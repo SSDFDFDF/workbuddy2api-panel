@@ -12,6 +12,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/jsondoc"
 )
 
 //go:embed defaultprompt.md
@@ -52,8 +54,8 @@ func Rewrite(body []byte, systemPrompt string) []byte {
 	if len(body) == 0 || systemPrompt == "" {
 		return body
 	}
-	var obj map[string]any
-	if err := json.Unmarshal(body, &obj); err != nil {
+	obj, err := jsondoc.Object(body)
+	if err != nil {
 		return body
 	}
 	msgs, ok := obj["messages"].([]any)
@@ -112,8 +114,8 @@ func Append(body []byte, systemPrompt string) []byte {
 	if len(body) == 0 || systemPrompt == "" {
 		return body
 	}
-	var obj map[string]any
-	if err := json.Unmarshal(body, &obj); err != nil {
+	obj, err := jsondoc.Object(body)
+	if err != nil {
 		return body
 	}
 	msgs, ok := obj["messages"].([]any)

@@ -12,16 +12,19 @@ import (
 	"strings"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/jsondoc"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/proxy"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
 // Config 顶层配置。
 type Config struct {
-	Listen    string `json:"listen"`     // ":7863"
-	APIKey    string `json:"api_key"`    // 空 = 不鉴权
-	AuthDir   string `json:"auth_dir"`   // ./auths
-	StateFile string `json:"state_file"` // ./data/state.json
+	ConfigVersion int    `json:"config_version"`
+	Listen        string `json:"listen"`     // ":7863"
+	APIKey        string `json:"api_key"`    // 空 = 不鉴权
+	AuthDir       string `json:"auth_dir"`   // ./auths
+	StateFile     string `json:"state_file"` // ./data/state.json
 
 	Panel struct {
 		// PackageDetailLimit 积分构成页单账号默认展示的最近到期包数；<=0 回落 5。
@@ -136,16 +139,13 @@ type Config struct {
 		// HeaderTimeoutSeconds 聊天 SSE 首字节前（响应头）上限；<=0 回落 TimeoutSeconds。
 		HeaderTimeoutSeconds int `json:"header_timeout_seconds"`
 		// IdleTimeoutSeconds 聊天 SSE 流中空闲上限（活跃吐数据续命不掐）；<=0 回落默认 300。
-		IdleTimeoutSeconds int `json:"idle_timeout_seconds"`
-		// UserAgent 出站 User-Agent 显式覆盖（非空时全路径生效，优先于默认三段式）。
-		// 全部出站请求生效：chat/refresh/checkin/balance/report/travel/FetchModels。
-		// 默认值已对齐官方 WorkBuddy 桌面形态（三段式），用户仍可配完全自定义值改写。
-		UserAgent string `json:"user_agent"`
-		// ClientVersion WorkBuddy 客户端版本段（出站 UA 的 `WorkBuddy/<ver>` 与归属头
-		// X-IDE-Version）。空 = 内置默认（对齐官方 5.5.4 分发包）。
-		ClientVersion string `json:"client_version"`
-		// CliVersion 出站 UA 中 `CLI/<ver>` 段的版本。空 = 内置默认（官方内置 CLI 2.137.1）。
-		CliVersion string `json:"cli_version"`
+		IdleTimeoutSeconds int                                 `json:"idle_timeout_seconds"`
+		Profiles           map[string]upstream.IdentityProfile `json:"profiles"`
+		ChatBaseCN         string                              `json:"chat_base_cn"`
+		// SegmentTypes 与默认值：0 表示未设置。
+		FirstModelEventSeconds int `json:"first_model_event_seconds"`
+		FirstGenerationSeconds int `json:"first_generation_seconds"`
+		TailSeconds            int `json:"tail_seconds"`
 		// ClientName 用量归属头取值（X-Product / X-IDE-Name / X-IDE-Type / X-IDE-Version）。
 		// 空 = 旧行为 X-Product="SaaS" 不设 X-IDE-*；配 "WorkBuddy" 则四头跟随。
 		ClientName string `json:"client_name"`
@@ -157,11 +157,6 @@ type Config struct {
 		// PassthroughIP 是否透传客户端 IP 给上游（默认 false，反代安全边界）。
 		PassthroughIP bool `json:"passthrough_ip"`
 	} `json:"upstream"`
-
-	Features struct {
-		// SanitizeBlacklistFingerprints 出站请求体黑名单指纹脱敏（默认 true；false 完全还原）。
-		SanitizeBlacklistFingerprints bool `json:"sanitize_blacklist_fingerprints"`
-	} `json:"features"`
 
 	Prompt struct {
 		// Mode passthrough（默认）= 透传客户端原始 system（降级重试仍会切到 Degraded）；
@@ -175,6 +170,10 @@ type Config struct {
 
 	// PromptText 解析后的系统提示词文本（custom/append 模式使用）。
 	PromptText string `json:"-"`
+
+	// Warnings 载入期的配置告警（未知/退役键、旧取值迁移）。运行期元数据，
+	// 不落盘（面板保存写的是深合并后的原始 map），供启动日志与面板 `_warnings` 展示。
+	Warnings []string `json:"_warnings,omitempty"`
 
 	Upstash struct {
 		URL   string `json:"url"`   // 空 = 纯内存模式；支持完整 rediss:// URL 或 https://xxx.upstash.io host
@@ -296,8 +295,13 @@ func Default() *Config {
 	// Global.Enabled 缺省 true（纯 CN 行为不变：CN 账号恒判 cn，global base 不被使用）；
 	// ChatBase/BillingBase 缺省空（回落内置默认）。
 	c.Global.Enabled = true
-	c.Features.SanitizeBlacklistFingerprints = true
-	c.Prompt.Mode = "passthrough" // 缺省 passthrough：透传客户端原始 system（对齐上游；custom 由用户显式选择）
+	c.ConfigVersion = 2
+	c.Upstream.FirstModelEventSeconds = 120
+	c.Upstream.FirstGenerationSeconds = 300
+	c.Upstream.TailSeconds = 10
+	c.Upstream.Profiles = map[string]upstream.IdentityProfile{"cn": upstream.DefaultIdentity("cn"), "global": upstream.DefaultIdentity("global")}
+	c.Upstream.ChatBaseCN = "https://www.workbuddy.cn"
+	c.Prompt.Mode = "none"
 	c.Pool.MaxInFlight = 3
 	// MaxInFlightGlobal 缺省 2：global 域 WAF 风控更紧，压低单号并发（WAF 403 修复
 	// P1-1）；0/负数 normalize 回落默认（与 max_in_flight 的 0=不限语义不同，分档键
@@ -354,14 +358,58 @@ func Load(path string) (*Config, error) {
 
 // ParseConfigInto 把 JSON 覆盖到 c 上并 normalize（不做 env、不读文件）。
 // 面板保存配置走这条路径：与 Load 完全同一套解析/校验逻辑，避免两处漂移。
+//
+// 容错策略：未知/退役键忽略并进 Warnings（不阻断），只有「认识的键值非法」
+// （如 model_default_realm=bogus）才返回错误。
 func ParseConfigInto(raw []byte, c *Config) (*Config, error) {
+	obj, err := jsondoc.Object(raw)
+	if err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	c.Warnings = nil
 	if err := json.Unmarshal(raw, c); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	if n := c.ConfigVersion; n != 0 && n != 2 {
+		return nil, fmt.Errorf("config_version: 不支持 %d（当前只支持 2；留空按 2 处理）", n)
+	}
+	c.ConfigVersion = 2
+	// 退役键（有替代项/语义已下线）与未知键分开报：退役项给出可执行说明，
+	// 未知键提示可能是笔误。两者都只告警，不阻断启动与保存。
+	for _, w := range retiredKeysIn(obj) {
+		c.addWarning(w)
+	}
+	for _, k := range unknownConfigKeys(obj, c) {
+		c.addWarning(k + " —— 未知配置项，已忽略（检查拼写或升级版本）")
+	}
+	for realm, p := range c.Upstream.Profiles {
+		if realm != "cn" && realm != "global" {
+			c.addWarning("upstream.profiles." + realm + " —— 未知 realm，已忽略")
+			delete(c.Upstream.Profiles, realm)
+			continue
+		}
+		if err := upstream.ValidateIdentity(p); err != nil {
+			return nil, err
+		}
 	}
 	if err := c.normalize(); err != nil {
 		return nil, err
 	}
 	return c, nil
+}
+
+// addWarning 追加去重后的配置告警（normalize 会被重复调用：Load 在 ParseConfigInto
+// 之后还会再 normalize 一次，模式迁移告警不能因此重复展示）。
+func (c *Config) addWarning(w string) {
+	if w == "" {
+		return
+	}
+	for _, existing := range c.Warnings {
+		if existing == w {
+			return
+		}
+	}
+	c.Warnings = append(c.Warnings, w)
 }
 
 // ParseConfig 基于默认值解析一段配置 JSON（等价于 Load 的文件分支，但不读环境变量）。
@@ -437,14 +485,21 @@ func applyEnv(c *Config) {
 			c.Upstream.IdleTimeoutSeconds = n
 		}
 	}
-	if v := os.Getenv("WB2A_USER_AGENT"); v != "" {
-		c.Upstream.UserAgent = v
+
+	if v := os.Getenv("WB2A_FIRST_MODEL_EVENT_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.Upstream.FirstModelEventSeconds = n
+		}
 	}
-	if v := os.Getenv("WB2A_CLIENT_VERSION"); v != "" {
-		c.Upstream.ClientVersion = v
+	if v := os.Getenv("WB2A_FIRST_GENERATION_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.Upstream.FirstGenerationSeconds = n
+		}
 	}
-	if v := os.Getenv("WB2A_CLI_VERSION"); v != "" {
-		c.Upstream.CliVersion = v
+	if v := os.Getenv("WB2A_TAIL_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.Upstream.TailSeconds = n
+		}
 	}
 	if v := os.Getenv("WB2A_CLIENT_NAME"); v != "" {
 		c.Upstream.ClientName = v
@@ -460,11 +515,7 @@ func applyEnv(c *Config) {
 			c.Upstream.PassthroughIP = b
 		}
 	}
-	if v := os.Getenv("WB2A_SANITIZE_FINGERPRINTS"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			c.Features.SanitizeBlacklistFingerprints = b
-		}
-	}
+
 	if v := os.Getenv("WB2A_PROMPT_MODE"); v != "" {
 		c.Prompt.Mode = v
 	}
@@ -674,16 +725,25 @@ func (c *Config) normalize() error {
 // passthrough 模式不加载文本（透传客户端原始 system，文本在降级时用 prompt.Degraded）。
 func (c *Config) normalizePrompt() error {
 	switch m := strings.ToLower(strings.TrimSpace(c.Prompt.Mode)); m {
-	case "", "passthrough":
-		c.Prompt.Mode = "passthrough"
+	case "", "none":
+		c.Prompt.Mode = "none"
+	case "passthrough":
+		// 旧取值迁移：passthrough 语义（不改写客户端 system）与 none 等价；
+		// 旧的「内容拦截后换降级提示词重试」已下线，不再是该模式的隐含行为。
+		c.Prompt.Mode = "none"
+		c.addWarning("prompt.mode: passthrough 已改名为 none（语义相同；内容拦截不再触发提示词改写）")
+	case "replace":
+		c.Prompt.Mode = "replace"
 	case "custom":
-		c.Prompt.Mode = "custom"
+		// 旧取值迁移：custom 语义就是用自有提示词替换 system。
+		c.Prompt.Mode = "replace"
+		c.addWarning("prompt.mode: custom 已改名为 replace")
 	case "append":
 		c.Prompt.Mode = "append"
 	default:
-		return fmt.Errorf("prompt.mode: %q 不是合法值（passthrough / custom / append）", c.Prompt.Mode)
+		return fmt.Errorf("prompt.mode: %q 不是合法值（none / append / replace）", c.Prompt.Mode)
 	}
-	if c.Prompt.Mode == "custom" || c.Prompt.Mode == "append" {
+	if c.Prompt.Mode == "replace" || c.Prompt.Mode == "append" {
 		text, err := prompt.Load(c.Prompt.Mode, c.Prompt.File)
 		if err != nil {
 			return err

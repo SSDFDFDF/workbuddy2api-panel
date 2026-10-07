@@ -44,8 +44,8 @@ func TestReportDesktopEventFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("report desktop: %v", err)
 	}
-	if gotUA != desktopUA {
-		t.Errorf("UA=%q want %q", gotUA, desktopUA)
+	if gotUA != "WorkBuddy/5.7.6 WorkBuddy/5.7.6 CLI/2.156.0" {
+		t.Errorf("desktop UA must come from profile: %q", gotUA)
 	}
 	if len(got) != 1 {
 		t.Fatalf("events=%d want 1", len(got))
@@ -131,8 +131,8 @@ func TestSetAppearanceTheme(t *testing.T) {
 		if r.URL.Path != "/v2/user-asset/appearance/set" {
 			t.Errorf("path=%s want /v2/user-asset/appearance/set", r.URL.Path)
 		}
-		if r.Header.Get("User-Agent") != desktopUA {
-			t.Errorf("UA=%q want desktop UA", r.Header.Get("User-Agent"))
+		if r.Header.Get("User-Agent") != "WorkBuddy/5.7.6 WorkBuddy/5.7.6 CLI/2.156.0" {
+			t.Errorf("desktop UA must come from profile: %q", r.Header.Get("User-Agent"))
 		}
 		raw, _ := io.ReadAll(r.Body)
 		json.Unmarshal(raw, &got)

@@ -1,5 +1,5 @@
 {
-  "listen": ":7863",
+  "config_version": 2,  "listen": ":7863",
   "api_key": "test_key",
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
@@ -46,19 +46,21 @@
     "timeout_seconds": 120,
     "header_timeout_seconds": 120,
     "idle_timeout_seconds": 300,
-    "user_agent": "",
-    "client_version": "",
-    "cli_version": "",
+    "first_model_event_seconds": 120,
+    "first_generation_seconds": 300,
+    "tail_seconds": 10,
+    "chat_base_cn": "https://www.workbuddy.cn",
+    "profiles": {
+      "cn": {"client_version": "5.7.6", "cli_version": "2.156.0"},
+      "global": {"client_version": "5.6.2", "cli_version": "2.147.0"}
+    },
     "client_name": "",
     "device_token": "",
     "device_token_file": "",
     "passthrough_ip": false
   },
-  "features": {
-    "sanitize_blacklist_fingerprints": true
-  },
   "prompt": {
-    "mode": "passthrough",
+    "mode": "none",
     "file": ""
   },
   "upstash": {

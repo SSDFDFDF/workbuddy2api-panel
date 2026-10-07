@@ -48,7 +48,7 @@ func (b *idleMonitoringBody) idleFor() time.Duration {
 // Transport.ResponseHeaderTimeout 管，这里不抢跑。
 func monitorBody(rc io.ReadCloser, idle time.Duration, cancel context.CancelFunc) io.ReadCloser {
 	if idle <= 0 {
-		return rc
+		return &cancelBody{ReadCloser: rc, cancel: cancel}
 	}
 	b := &idleMonitoringBody{
 		rc:       rc,
@@ -73,6 +73,14 @@ func monitorBody(rc io.ReadCloser, idle time.Duration, cancel context.CancelFunc
 	}()
 	return b
 }
+
+type cancelBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (b *cancelBody) Close() error { b.once.Do(b.cancel); return b.ReadCloser.Close() }
 
 // idleTick 返回监控周期：idle/4，钳在 [10ms, 1s]。小 idle 也能快速发现，大小值避免空转。
 func idleTick(idle time.Duration) time.Duration {

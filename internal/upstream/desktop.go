@@ -38,11 +38,10 @@ import (
 const (
 	desktopReportPath    = "/v2/report"
 	desktopAppearanceSet = "/v2/user-asset/appearance/set"
-	// desktopUA 实测桌面客户端 UA（对齐官方 5.7.6 内嵌 CLI 2.156.0）。
-	desktopUA = "WorkBuddy/5.7.6 WorkBuddy/5.7.6 CLI/2.156.0"
+	// 桌面主进程 UA 由 IdentityProfile 的 desktop surface 生成（identity.go）。
 )
 
-// desktopBase 桌面端 /v2/report 与 user-asset 走 chatBase（copilot.tencent.com）。
+// desktopBase 桌面端 /v2/report 与 user-asset 走 chatBase（CN 基线域 www.workbuddy.cn）。
 func (c *Client) desktopBase(a *auth.Auth) string { return c.chatBase(a) }
 
 // deriveHardwareProfile 基于 uid 的确定性哈希派生硬件特征，同一账号跨重启恒定，
@@ -71,7 +70,7 @@ func deriveHardwareProfile(uid string) (osVersion string, cpuCores int, memorySi
 type DesktopEvent map[string]any
 
 // desktopFingerprint 公共桌面指纹字段（注入每个事件，覆盖同名业务键）。
-func desktopFingerprint(a *auth.Auth) map[string]any {
+func (c *Client) desktopFingerprint(a *auth.Auth) map[string]any {
 	now := time.Now().UnixMilli()
 	uid := ""
 	nickname := ""
@@ -87,15 +86,13 @@ func desktopFingerprint(a *auth.Auth) map[string]any {
 		"username":     nickname,
 		"userNickname": nickname,
 		"product":      "SaaS",
-		"releaseDate":  int64(1791104628975), // 5.7.6 构建时间戳
-		"commit":       "306add2a5dfafacf97769081cd17c3d172f6e60d", // 5.7.6 Commit
 		"ideName":      "WorkBuddy",
 		"ideType":      "WorkBuddy",
-		"ideVersion":   defaultClientVersion,
+		"ideVersion":   c.identity(a).ClientVersion,
 		"machineId":    deriveAccountStableID(uid, "machine"),
 		"sessionId":    deriveAccountStableID(uid, "session"),
 		"extName":      "workbuddy-desktop",
-		"extVersion":   defaultClientVersion,
+		"extVersion":   c.identity(a).ClientVersion,
 		"os":           "win32",
 		"arch":         "x64",
 		"osVersion":    osVer,
@@ -113,7 +110,7 @@ func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error 
 	if len(events) == 0 {
 		return fmt.Errorf("desktop report: no events")
 	}
-	fp := desktopFingerprint(a)
+	fp := c.desktopFingerprint(a)
 	arr := make([]map[string]any, 0, len(events))
 	for _, ev := range events {
 		m := map[string]any{}
@@ -136,8 +133,8 @@ func (c *Client) ReportDesktopEvent(a *auth.Auth, events ...DesktopEvent) error 
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
-	req.Header.Set("User-Agent", desktopUA)
-	req.Header.Set("X-Domain", c.desktopBase(a))
+	req.Header.Set("User-Agent", c.purposeUA(a, "desktop"))
+	req.Header.Set("X-Domain", c.identity(a).Origin)
 	req.Header.Set("X-Product", "SaaS")
 	req.Header.Set("X-Request-ID", deriveAccountStableID(a.UID, "req")+fmt.Sprintf("%d", time.Now().UnixNano()%1e6))
 	if a.UID != "" {
@@ -241,7 +238,7 @@ func (c *Client) SetAppearanceTheme(a *auth.Auth, resourceKey string) error {
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
-	req.Header.Set("User-Agent", desktopUA)
+	req.Header.Set("User-Agent", c.purposeUA(a, "desktop"))
 	req.Header.Set("X-Product", "SaaS")
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
@@ -420,8 +417,8 @@ func (c *Client) MarketExpertList(a *auth.Auth, expertType string) ([]MarketExpe
 	}
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", desktopUA)
-	req.Header.Set("X-Domain", c.chatBase(a))
+	req.Header.Set("User-Agent", c.purposeUA(a, "desktop"))
+	req.Header.Set("X-Domain", c.identity(a).Origin)
 	req.Header.Set("X-Product", "SaaS")
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
@@ -469,7 +466,7 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	h.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	h.Set("Content-Type", "application/json")
 	h.Set("Accept", "text/event-stream")
-	h.Set("User-Agent", desktopUA)
+	h.Set("User-Agent", c.purposeUA(a, "desktop"))
 	h.Set("X-Domain", c.chatBase(a))
 	h.Set("X-Product", "SaaS")
 	h.Set("X-User-Id", a.UID)

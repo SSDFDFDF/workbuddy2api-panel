@@ -41,8 +41,8 @@ func TestMonitorBodyDisabledWhenIdleZero(t *testing.T) {
 	defer cancel()
 	rc := nopCloserBody{Reader: &oneByteReader{}}
 	out := monitorBody(rc, 0, cancel)
-	if _, ok := out.(nopCloserBody); !ok {
-		t.Fatalf("idle<=0 should return underlying body verbatim, got %T", out)
+	if _, ok := out.(*cancelBody); !ok {
+		t.Fatalf("idle<=0 must still own cancellation, got %T", out)
 	}
 	buf := make([]byte, 1)
 	if _, err := out.Read(buf); err != nil || buf[0] != 'a' {

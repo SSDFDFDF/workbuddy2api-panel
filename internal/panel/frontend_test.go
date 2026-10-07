@@ -767,8 +767,71 @@ process.stdout.write(JSON.stringify([
 		t.Fatalf("collectConfig node test failed: %v\n%s", err, out)
 	}
 	// [user_agent 已发, 其值, prompt.file 已发, 其值, listen 未发, checkin_hours 未发, api_key]
-	const want = `[true,"",true,"",false,false,"secret"]`
+	const want = `[false,null,true,"",false,false,"secret"]`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("collectConfig=%s want %s", strings.TrimSpace(string(out)), want)
+	}
+}
+
+// TestAppJSFillFetchedVersions 钉住「一键填入已拉取版本」的语义：
+//  1. 填入官方 feed 已拉取的客户端版本（国内 / 海外）；
+//  2. **不动** CLI 版本——feed 不下发内置 CLI 号，填旧值会造出错误指纹；
+//  3. 占位符来自后端内置基线（前端不硬编码版本，避免升级后漂移）。
+func TestAppJSFillFetchedVersions(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; version fill test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('const CFG_MAP');
+const end = src.indexOf('/* Go 时长字段即时校验');
+if (start < 0 || end < 0 || end < start) throw new Error('config region not found');
+const mk = v => ({ type: 'text', value: v, placeholder: '' });
+const cfgForm = { elements: {
+  cn_client_version: mk(''), cn_cli_version: mk(''),
+  global_client_version: mk(''), global_cli_version: mk(''),
+}};
+const hint = { textContent: '' };
+const $ = id => (id === 'cfgForm' ? cfgForm : (id === 'cfgVersionHint' ? hint : null));
+const ctx = { Date, Number, String, Math, Map, Array, Object, isNaN, URLSearchParams, Set,
+  document: { getElementById: $ }, $,
+  toast: (m, k) => { globalThis.__toast = [m, k]; } };
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.fillFetchedVersions = fillFetchedVersions; this.applyVersionInfo = applyVersionInfo;', ctx);
+ctx.applyVersionInfo({ checked: true, latest_cn: '5.8.0', latest_global: '5.7.0',
+  builtin_cn_client: '5.7.6', builtin_cn_cli: '2.156.0',
+  builtin_global_client: '5.6.2', builtin_global_cli: '2.147.0' }, cfgForm);
+cfgForm.elements.cn_cli_version.value = '2.160.0'; // 用户手工设定的 CLI 版本
+ctx.fillFetchedVersions();
+process.stdout.write(JSON.stringify([
+  cfgForm.elements.cn_client_version.value,
+  cfgForm.elements.cn_cli_version.value,
+  cfgForm.elements.global_client_version.value,
+  cfgForm.elements.global_cli_version.value,
+  cfgForm.elements.cn_client_version.placeholder,
+  cfgForm.elements.global_cli_version.placeholder,
+  globalThis.__toast[1],
+]));`
+	f, err := os.CreateTemp(t.TempDir(), "verfill-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("version fill node test failed: %v\n%s", err, out)
+	}
+	// [cn 客户端已填, cn CLI 保持不动, global 客户端已填, global CLI 保持不动,
+	//  占位符=内置基线, toast 级别=err（客户端版本与内置 CLI 基线不再成对，需提醒）]
+	const want = `["5.8.0","2.160.0","5.7.0","",  "5.7.6","2.147.0","err"]`
+	got, w := strings.TrimSpace(string(out)), strings.TrimSpace(want)
+	norm := func(s string) string { return strings.Join(strings.Fields(s), "") }
+	if norm(got) != norm(w) {
+		t.Fatalf("fillFetchedVersions=%s want %s", got, w)
 	}
 }

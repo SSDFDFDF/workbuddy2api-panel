@@ -1038,11 +1038,32 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             </div>
             <div class="hr"></div>
             <div class="grid2">
-              <label class="fld"><span class="lb">出站 User-Agent</span>
-                <input name="user_agent" placeholder="留空 = 默认 WorkBuddy 客户端 UA">
-                <span class="hint">影响官网积分记录「使用端」显示；需重启</span>
+              <label class="fld"><span class="lb">CN 客户端版本</span>
+                <input name="cn_client_version" placeholder="">
+                <span class="hint">留空 = 用内置默认</span></label>
+              <label class="fld"><span class="lb">CN CLI 版本</span>
+                <input name="cn_cli_version" placeholder="">
+                <span class="hint">留空 = 用内置默认</span></label>
+            </div>
+            <div class="grid2">
+              <label class="fld"><span class="lb">Global 客户端版本</span>
+                <input name="global_client_version" placeholder="">
+                <span class="hint">留空 = 用内置默认</span></label>
+              <label class="fld"><span class="lb">Global CLI 版本</span>
+                <input name="global_cli_version" placeholder="">
+                <span class="hint">留空 = 用内置默认</span></label>
+            </div>
+            <div class="grid2">
+              <label class="fld"><span class="lb">UA 版本更新</span>
+                <button type="button" id="btnCfgFillVersions">一键填入已拉取版本</button>
+                <span class="hint">把已探测到的官方客户端版本填入上方「客户端版本」两项（不含 CLI 版本）</span></label>
+              <label class="fld"><span class="lb">版本提示</span>
                 <span class="hint" id="cfgVersionHint" style="color:var(--text-dim,#64748b);"></span></label>
             </div>
+            <div class="hint">UA 与 X-IDE-Version 按「账号域 + 请求用途」生成（聊天/刷新/目录/计费各一形态），
+              不随代理域名改变；需重启。</div>
+            <div class="hint">产品名、Origin、语言及各用途 UA 覆盖需手工编辑 config.json 的
+              <code>upstream.profiles.&lt;realm&gt;</code>（不在面板管理）。</div>
             <div class="hr"></div>
             <div class="grid2">
               <label class="fld"><span class="lb">裸模型名默认域</span>
@@ -1086,9 +1107,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <div class="grid2">
               <label class="fld"><span class="lb">系统提示词模式</span>
                 <select name="prompt_mode">
-                  <option value="custom">custom — 网关自有提示词（避免指纹误报）</option>
-                  <option value="append">append — 客户端 system 后插网关提示词（并用）</option>
-                  <option value="passthrough">passthrough — 透传客户端原始 system</option>
+                  <option value="none">none — 原样保留客户端指令（默认）</option>
+                  <option value="append">append — 显式追加网关提示词</option>
+                  <option value="replace">replace — 显式替换 system/developer</option>
                 </select>
                 <span class="hint">需重启</span></label>
               <label class="fld"><span class="lb">提示词文件路径</span>
@@ -1096,8 +1117,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                 <span class="hint">需重启</span></label>
             </div>
             <div class="hr"></div>
-            <div class="switch"><span class="lb">出站请求指纹脱敏</span>
-              <input type="checkbox" name="sanitize_blacklist_fingerprints"></div>
+            <div class="hint">不清洗消息、工具参数或推理文本；内容拒绝不会触发自动提示词替换。</div>
             <div class="switch"><span class="lb">会话粘性路由</span>
               <input type="checkbox" name="session_sticky_enabled"></div>
             <div class="hint" style="margin-top:10px">Upstash Redis 镜像、凭证目录与状态文件路径需手工编辑配置文件（判为重启项）。</div>

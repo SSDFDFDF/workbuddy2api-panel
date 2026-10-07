@@ -11,7 +11,6 @@ package upstream
 
 import (
 	"encoding/json"
-	"net/http"
 	"strings"
 )
 
@@ -103,18 +102,14 @@ func FrameHintFunc(ctxFn func() HintContext) func(string) string {
 // （IsModelRateLimit 对帧 JSON 直接命中）优先；其余取帧内 error.message 走
 // Classify（请求级 400 口径）。判不出 → ErrNone（无 hint）。
 func FrameKind(payload string) ErrKind {
-	if IsModelRateLimit(payload) {
-		return ErrSoftRate
+	var obj map[string]any
+	if json.Unmarshal([]byte(payload), &obj) != nil {
+		return ErrServer
 	}
-	var f struct {
-		Error struct {
-			Message string `json:"message"`
-		} `json:"error"`
+	if fe := errorFrame(obj, payload, "error"); fe != nil {
+		return fe.Kind
 	}
-	if json.Unmarshal([]byte(payload), &f) != nil || f.Error.Message == "" {
-		return ErrNone
-	}
-	return Classify(http.StatusBadRequest, f.Error.Message)
+	return ErrServer
 }
 
 // isModelParamInvalid 上游 11133 body 判定（code 11133 / extError.code=

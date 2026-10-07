@@ -16,7 +16,6 @@ import (
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/redisstore"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
@@ -125,7 +124,7 @@ func TestChatLargeBodyNoGatewayLimit(t *testing.T) {
 	h := NewHandler(Config{Pool: p, Upstream: up})
 
 	pad := strings.Repeat("a", 4<<20) // 4MB 合法 JSON 字符串值
-	body := []byte(`{"model":"glm-5.2","messages":[],"pad":"` + pad + `"}`)
+	body := []byte(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}],"pad":"` + pad + `"}`)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(body)))
 	if rec.Code != http.StatusOK {
@@ -153,7 +152,7 @@ func TestChatBadParamsFailsFastWithoutPenalty(t *testing.T) {
 	p.SetCredits("good", 1000, 0)
 	h := NewHandler(Config{Pool: p, Upstream: up})
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("code=%d body=%s (want 400: request-level error must not be retried on other accounts)", rec.Code, rec.Body)
 	}
@@ -176,7 +175,7 @@ func TestChatBadParams400CarriesUpstreamBody(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: up})
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`)))
 	if rec.Code != 400 {
 		t.Fatalf("code=%d body=%s (want 400)", rec.Code, rec.Body)
 	}
@@ -188,7 +187,6 @@ func TestChatBadParams400CarriesUpstreamBody(t *testing.T) {
 		t.Errorf("request-level failure must not be reported as account exhaustion: %s", body)
 	}
 }
-
 
 func TestChatNonStreamAggregates(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
@@ -266,7 +264,7 @@ func TestChatStreamPassthrough(t *testing.T) {
 }
 
 func TestChatRecordsCreditForStreamAndSync(t *testing.T) {
-	const sseCredit = "data: {\"id\":\"chatcmpl-credit\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"}}],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":6,\"total_tokens\":10,\"credit\":1.25}}\n\n" +
+	const sseCredit = "data: {\"id\":\"chatcmpl-credit\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":6,\"total_tokens\":10,\"credit\":1.25}}\n\n" +
 		"data: [DONE]\n\n"
 	for _, stream := range []bool{false, true} {
 		name := "sync"
@@ -283,9 +281,9 @@ func TestChatRecordsCreditForStreamAndSync(t *testing.T) {
 				Upstream: up,
 				Usage:    rec,
 			})
-			body := `{"model":"glm-5.2","messages":[]}`
+			body := `{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`
 			if stream {
-				body = `{"model":"glm-5.2","stream":true,"messages":[]}`
+				body = `{"model":"glm-5.2","stream":true,"messages":[{"role":"user","content":"hi"}]}`
 			}
 			recorder := httptest.NewRecorder()
 			h.ServeHTTP(recorder, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
@@ -321,14 +319,14 @@ func TestChatRotatesOnHardCredit(t *testing.T) {
 	p.SetCredits("bad", 2000, 0)
 	p.SetCredits("good", 1000, 0)
 	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: time.Minute})
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != 200 {
+	if rec.Code != 503 {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
-	if calls["Bearer at-bad"] != 1 || calls["Bearer at-good"] != 1 {
-		t.Errorf("calls=%v", calls)
+	if calls["Bearer at-bad"] != 1 || calls["Bearer at-good"] != 0 {
+		t.Errorf("quota rejection must not rotate: calls=%v", calls)
 	}
 	st, _ := p.Status("bad")
 	if !st.Cooling || st.Reason == "" {
@@ -338,8 +336,8 @@ func TestChatRotatesOnHardCredit(t *testing.T) {
 		t.Errorf("bad token usage=%+v", st.TokenUsage)
 	}
 	good, _ := p.Status("good")
-	if good.TokenUsage.RequestCount != 1 || good.TokenUsage.TotalTokens != 2 {
-		t.Errorf("good token usage=%+v", good.TokenUsage)
+	if good.TokenUsage.RequestCount != 0 || good.TokenUsage.TotalTokens != 0 {
+		t.Errorf("unused good account token usage=%+v", good.TokenUsage)
 	}
 }
 
@@ -367,12 +365,12 @@ func TestChatSoftCoolsOnRateLimitBody(t *testing.T) {
 	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: soft})
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
-	if rec.Code != 200 {
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`)))
+	if rec.Code != 429 {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
-	if calls["Bearer at-bad"] != 1 || calls["Bearer at-good"] != 1 {
-		t.Errorf("calls=%v want bad/good 各 1 次", calls)
+	if calls["Bearer at-bad"] != 1 || calls["Bearer at-good"] != 0 {
+		t.Errorf("rate limit must not rotate: calls=%v", calls)
 	}
 	st, _ := p.Status("bad")
 	if !st.Cooling || st.CoolKind != "soft_rate" {
@@ -386,7 +384,7 @@ func TestChatSoftCoolsOnRateLimitBody(t *testing.T) {
 	// 冷却生效：同一账号在冷却期内不得再被选中。
 	before := calls["Bearer at-bad"]
 	rec2 := httptest.NewRecorder()
-	h.ServeHTTP(rec2, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	h.ServeHTTP(rec2, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`)))
 	if rec2.Code != 200 {
 		t.Fatalf("second code=%d body=%s", rec2.Code, rec2.Body)
 	}
@@ -427,12 +425,12 @@ func TestApplyErrorPolicyNotFoundUsesFixedBase(t *testing.T) {
 	p.Add(&auth.Auth{UID: "u1"})
 	h := NewHandler(Config{Pool: p, SoftCooldown: 20 * time.Minute}) // soft_rate 配得很大，验证 404 不受其影响
 
-	notFoundSec := int64(notFoundCooldown / time.Second)
+	notFoundSec := int64(0)
 	for i := 1; i <= 3; i++ {
 		h.applyErrorPolicy("u1", upstream.ErrNotFound, "", "", nil)
 		st, _ := p.Status("u1")
-		if !st.Cooling || st.CoolKind != "soft_rate" {
-			t.Fatalf("call %d: 应为 soft 冷却: %+v", i, st)
+		if st.Cooling || st.ErrTotal != 0 {
+			t.Fatalf("route failure penalized account: %+v", st)
 		}
 		if st.SoftStreak != 0 {
 			t.Errorf("call %d: 404 固定冷却不应推进 soft_streak, got %d", i, st.SoftStreak)
@@ -462,8 +460,8 @@ func TestNewHandlerSoftCooldownDefault(t *testing.T) {
 	h := NewHandler(Config{Pool: p, Upstream: up}) // 不注入 SoftCooldown
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
-	if rec.Code != 200 {
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`)))
+	if rec.Code != 429 {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
 	st, _ := p.Status("bad")
@@ -490,7 +488,7 @@ func TestChatStickyFollowsFinalSuccess(t *testing.T) {
 	// 先把会话预绑定到 bad（模拟历史粘性），bad 失败、good 成功 → 绑定应切到 good。
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		if authz == "Bearer at-bad" {
-			return 500, `{"code":500}`, false
+			return 400, `{"code":11102,"msg":"service info not found"}`, false
 		}
 		return 200, sseOK, true
 	})
@@ -500,16 +498,16 @@ func TestChatStickyFollowsFinalSuccess(t *testing.T) {
 		Session:      sess,
 		SoftCooldown: time.Minute,
 	})
-	// 预绑定：sess.Bind("conv-1", "bad")，然后请求体带同 conversation_id。
-	sess.Bind("conv-1", "bad")
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[],"metadata":{"conversation_id":"conv-1"}}`))
+	// 预绑定：sess.Bind("cn:glm-5.2:conv-1", "bad")，然后请求体带同 conversation_id。
+	sess.Bind("cn:glm-5.2:conv-1", "bad")
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}],"metadata":{"conversation_id":"conv-1"}}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != 200 {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
 	// 绑定必须收敛到最终成功的 good。
-	if uid, ok := st.lastUID("conv-1"); !ok || uid != "good" {
+	if uid, ok := st.lastUID("cn:glm-5.2:conv-1"); !ok || uid != "good" {
 		t.Fatalf("sticky binding should follow final success to good, got %s ok=%v (binds=%v)", uid, ok, st.binds)
 	}
 }
@@ -527,14 +525,14 @@ func TestChatStickySuccessKeepsBinding(t *testing.T) {
 		return 200, sseOK, true
 	})
 	h := NewHandler(Config{Pool: p, Upstream: up, Session: sess, SoftCooldown: time.Minute})
-	sess.Bind("conv-1", "good")
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[],"metadata":{"conversation_id":"conv-1"}}`))
+	sess.Bind("cn:glm-5.2:conv-1", "good")
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}],"metadata":{"conversation_id":"conv-1"}}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != 200 {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
-	if uid, ok := st.lastUID("conv-1"); !ok || uid != "good" {
+	if uid, ok := st.lastUID("cn:glm-5.2:conv-1"); !ok || uid != "good" {
 		t.Fatalf("binding should stay good after success, got %s ok=%v", uid, ok)
 	}
 }
@@ -565,15 +563,15 @@ func TestChatStickyFullFallsBackToRotation(t *testing.T) {
 		Session:      sess,
 		SoftCooldown: time.Minute,
 	})
-	sess.Bind("conv-1", "bad")
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[],"metadata":{"conversation_id":"conv-1"}}`))
+	sess.Bind("cn:glm-5.2:conv-1", "bad")
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}],"metadata":{"conversation_id":"conv-1"}}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != 200 {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
 	// 满载粘性号被解绑，绑定收敛到最终成功号 good。
-	if uid, ok := st.lastUID("conv-1"); !ok || uid != "good" {
+	if uid, ok := st.lastUID("cn:glm-5.2:conv-1"); !ok || uid != "good" {
 		t.Fatalf("sticky binding should fall back to good, got %s ok=%v (binds=%v)", uid, ok, st.binds)
 	}
 	p.Release("bad")
@@ -593,10 +591,10 @@ func TestChatHardCreditCooldownUntilNextDay4AM(t *testing.T) {
 	p.SetCredits("bad", 2000, 0) // bad 积分高，确定性源 → 先被选中
 	p.SetCredits("good", 1000, 0)
 	h := NewHandler(Config{Pool: p, Upstream: up})
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != 200 {
+	if rec.Code != 503 {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
 	st, ok := p.Status("bad")
@@ -636,8 +634,8 @@ func TestChat429Code14018UsesHardCreditCooldown(t *testing.T) {
 	p.SetCredits("good", 1000, 1000)
 	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: time.Minute})
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
-	if rec.Code != http.StatusOK {
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`)))
+	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
 	}
 	st, ok := p.Status("bad")
@@ -676,11 +674,11 @@ func TestChat6004ModelResetCoolsToParsedTime(t *testing.T) {
 	// 隔离对 breaker 的干扰：熔断阈值默认 3，一次失败不触发。
 	h := NewHandler(Config{Pool: p, Upstream: up})
 	req := httptest.NewRequest("POST", "/v1/chat/completions",
-		strings.NewReader(`{"model":"glm-5.3","messages":[]}`))
+		strings.NewReader(`{"model":"glm-5.3","messages":[{"role":"user","content":"hi"}]}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("code=%d body=%s (want 200 after rotate to good)", rec.Code, rec.Body)
+	if rec.Code != 429 {
+		t.Fatalf("code=%d body=%s (rate rejection must not rotate)", rec.Code, rec.Body)
 	}
 	// bad 已进入 6004 模型级独立冷却：账号级不 cooling，台账单行 until ≈ reset。
 	st, _ := p.Status("bad")
@@ -727,8 +725,8 @@ func TestChat6004WithoutResetFallsBackToBackoff(t *testing.T) {
 	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: time.Minute})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
-		strings.NewReader(`{"model":"glm-5.3","messages":[]}`)))
-	if rec.Code != 200 {
+		strings.NewReader(`{"model":"glm-5.3","messages":[{"role":"user","content":"hi"}]}`)))
+	if rec.Code != 429 {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
 	st, _ := p.Status("bad")
@@ -752,7 +750,7 @@ func TestChatAllUnavailableReturns503(t *testing.T) {
 		Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
 		Upstream: up,
 	})
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != 503 {
@@ -771,7 +769,7 @@ func TestChatSessionDeadDisables(t *testing.T) {
 	})
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: up})
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != 503 {
@@ -795,8 +793,8 @@ func TestChatTransportErrorDoesNotPenalize(t *testing.T) {
 	// 传输错误不喂熔断计数：一次 transport error 不应累计 errTotal 也不应熔断。
 	h := NewHandler(Config{Pool: p, Upstream: up})
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
-	if rec.Code != 503 {
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`)))
+	if rec.Code != 502 {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
 	st, _ := p.Status("u1")
@@ -814,13 +812,13 @@ func TestChatHTTP5xxPenalizes(t *testing.T) {
 	})
 	h := NewHandler(Config{Pool: p, Upstream: up})
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
-	if rec.Code != 503 {
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`)))
+	if rec.Code != 502 {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
 	st, _ := p.Status("u1")
-	if !st.Cooling {
-		t.Fatalf("http 5xx should trip breaker (cooling) with threshold=1: %+v", st)
+	if st.Cooling || st.ErrTotal != 0 {
+		t.Fatalf("http 5xx must not penalize account: %+v", st)
 	}
 }
 
@@ -831,8 +829,8 @@ func TestChatHTTP4xxClientDoesNotPenalize(t *testing.T) {
 	})
 	h := NewHandler(Config{Pool: p, Upstream: up})
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
-	if rec.Code != 503 {
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`)))
+	if rec.Code != 400 {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
 	st, _ := p.Status("u1")
@@ -1378,18 +1376,11 @@ func TestContentBlockedTriggersDegradedRetry(t *testing.T) {
 		strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[{"role":"system","content":"原始指纹"},{"role":"user","content":"hi"}]}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("code=%d body=%s (want 200 after degraded retry)", rec.Code, rec.Body)
+	if rec.Code != 400 {
+		t.Fatalf("code=%d body=%s (content rejection must not be rewritten)", rec.Code, rec.Body)
 	}
-	if len(bodies) != 2 {
-		t.Fatalf("want 2 upstream calls (first 400 + retry), got %d", len(bodies))
-	}
-	// 第二次出站 body 的 messages 头部 system 内容应为 Degraded 文本。
-	if !strings.Contains(string(bodies[1]), prompt.Degraded) {
-		t.Errorf("second body should contain Degraded prompt: %s", bodies[1])
-	}
-	if strings.Contains(string(bodies[1]), "原始指纹") {
-		t.Errorf("second body should not contain original system: %s", bodies[1])
+	if len(bodies) != 1 || !strings.Contains(string(bodies[0]), "原始指纹") {
+		t.Fatalf("request was changed or replayed: %q", bodies)
 	}
 }
 
@@ -1410,14 +1401,13 @@ func TestContentBlockedStickyDegraded(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[{"role":"system","content":"x"},{"role":"user","content":"hi"}]}`)))
-	if rec.Code != 200 {
+	if rec.Code != 400 {
 		t.Fatalf("first req code=%d", rec.Code)
 	}
-	// 降级粘性：新请求 Active()=true，body 已被 Rewrite(Degraded)，上游首字节即 200。
-	// 但 fake 上游只对 firstCall 返回 400，之后都 200，无法区分"直达"与"重试"。
-	// 用 degrade.Active() 直接断言粘性生效。
-	if !h.degrade.Active() {
-		t.Fatal("degrade should be active after trigger")
+	second := httptest.NewRecorder()
+	h.ServeHTTP(second, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"system","content":"other rules"},{"role":"user","content":"other"}]}`)))
+	if second.Code != 200 {
+		t.Fatal(second.Code, second.Body)
 	}
 }
 
@@ -1457,9 +1447,7 @@ func TestContentBlockedCustomModeDoesNotDegrade(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "gateway_hint") {
 		t.Errorf("content_blocked should carry gateway_hint: %s", rec.Body.String())
 	}
-	if h.degrade.Active() {
-		t.Error("degrade should NOT be active in custom mode")
-	}
+
 }
 
 // TestContentBlockedDoesNotPenalizeAccount ErrContentBlocked 不罚账号（无冷却/熔断/NoteError）。
@@ -1504,10 +1492,9 @@ func TestCustomModeFingerprintSanitizePreserved(t *testing.T) {
 		})},
 		ChatBaseCN: "https://fake.example",
 	}
-	up.SanitizeFingerprints.Store(true) // 开启清洗层（与生产一致）
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	const customSys = "我是网关自有提示词"
-	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "custom", PromptText: customSys})
+	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "replace", PromptText: customSys})
 
 	// user 消息含 Claude Code 指纹句（PR39 的 fixture 串，逐字精确指纹）。
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{
@@ -1535,18 +1522,8 @@ func TestCustomModeFingerprintSanitizePreserved(t *testing.T) {
 	// 原始指纹串（逐字精确匹配）在出站 body 中应被改写：
 	// "official CLI for Claude." → "official CLI tool for Claude."
 	// "Main branch (" → "Default branch ("
-	if strings.Contains(out, "official CLI for Claude.") {
-		t.Errorf("identity fingerprint not rewritten by sanitize in user msg: %s", out)
-	}
-	if strings.Contains(out, "Main branch (you will usually use this for PRs)") {
-		t.Errorf("branch fingerprint not rewritten by sanitize in user msg: %s", out)
-	}
-	// 改写后的痕迹应在（证明 sanitize 层生效，不是"全删了"）。
-	if !strings.Contains(out, "official CLI tool for Claude.") {
-		t.Errorf("sanitized identity rewrite missing: %s", out)
-	}
-	if !strings.Contains(out, "Default branch (you will usually use this for PRs)") {
-		t.Errorf("sanitized branch rewrite missing: %s", out)
+	if !strings.Contains(out, "official CLI for Claude.") || !strings.Contains(out, "Main branch (you will usually use this for PRs)") {
+		t.Errorf("user content was changed: %s", out)
 	}
 	// 2) messages 头部恰好一条 system = 自有提示词（Rewrite 已删旧 system）。
 	var obj map[string]any

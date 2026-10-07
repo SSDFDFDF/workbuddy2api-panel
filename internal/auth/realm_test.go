@@ -110,11 +110,11 @@ func TestRealmExplicitOffEscapeHatch(t *testing.T) {
 		{&Auth{Domain: "www.workbuddy.ai"}},
 	}
 	for _, tc := range cases {
-		if got := tc.auth.Realm(); got != "cn" {
-			t.Errorf("%+v Realm()=%q want cn (switch off)", tc.auth, got)
+		if got := tc.auth.Realm(); got != "global" {
+			t.Errorf("realm changed when routing disabled: %s", got)
 		}
-		if tc.auth.IsGlobal() {
-			t.Errorf("%+v IsGlobal()=true want false (switch off)", tc.auth)
+		if !tc.auth.IsGlobal() {
+			t.Error("identity must remain global")
 		}
 	}
 }
@@ -219,8 +219,8 @@ func TestBackfillRealmDomain(t *testing.T) {
 func TestBackfillRealmEscapeHatchFree(t *testing.T) {
 	withGlobalDisabled(t) // 逃生门关闭：Realm() 恒 cn，但 backfill 不得被污染
 	a := &Auth{Domain: "www.workbuddy.ai"}
-	if g := a.Realm(); g != "cn" {
-		t.Fatalf("precondition Realm()=%q want cn (escape hatch on)", g)
+	if g := a.Realm(); g != "global" {
+		t.Fatalf("realm identity changed: %q", g)
 	}
 	changed, got := a.BackfillRealm()
 	if !changed {

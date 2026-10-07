@@ -160,13 +160,8 @@ func (a *Auth) Realm() string {
 // 锁内再调 Realm() 会自锁）。realm 由 BackfillRealm 改写、Domain 由 RefreshToken 在锁内
 // 改写，故读取必须与写方同锁（理由见 AccessTokenValue 注释）。
 func (a *Auth) realmLocked() string {
-	if !globalEnabled.Load() {
-		return "cn"
-	}
-	if strings.TrimSpace(a.realm) == "global" || isGlobalDomain(a.Domain) {
-		return "global"
-	}
-	return "cn"
+	// Realm is identity, not a routing switch. Disabled realms are rejected by routing.
+	return ResolveRealm(a.realm, a.Domain)
 }
 
 // ResolveRealm 归一化 realm（cn/global）：显式非空优先，否则按原始 domain 推断

@@ -203,67 +203,12 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 	}
 	// 桌面端 UA（主路）：项目 chat 路径实际使用的 UA，与官方客户端看到的目录同源。
 	// 按账号 realm 生成（global → `WorkBuddy AI` 平台段），故必须传 a 而非用常量。
-	v3DesktopCh := probeV3(c.defaultWorkBuddyUAFor(a))
-	v3IDECh := probeV3(codeBuddyIDEUA)
-	v3CLICh := probeV3(codeBuddyCLIUA)
-	enterpriseCh := make(chan probeResult, 1)
-	go func() {
-		// 企业端点家族：/v2 首选 → /console 兜底（既有探活序，零回归）。
-		var lastErr error
-		for _, path := range globalModelsProbePaths {
-			names, infos, perr := c.globalModelsOnce(a, path)
-			if perr != nil {
-				lastErr = perr
-				continue
-			}
-			enterpriseCh <- probeResult{names: names, infos: infos}
-			return
-		}
-		enterpriseCh <- probeResult{err: lastErr}
-	}()
+	v3DesktopCh := probeV3(c.purposeUA(a, "catalog"))
 	v3Desktop := <-v3DesktopCh
-	v3IDE := <-v3IDECh
-	v3CLI := <-v3CLICh
-	enterprise := <-enterpriseCh
-	// v3 三路自合并：桌面端路字段权威（主路），IDE/CLI 只补主路缺失的模型 id
-	// （只补 id，字段仍取自各自条目——主路没有该 id 时才轮到它们）。
-	// 逐路容错：全失败才带 err 进入下游降级判断，部分失败 warn 后继续。
-	v3 := mergeV3Routes([]struct {
-		label string
-		res   probeResult
-	}{
-		{"desktop-UA", v3Desktop},
-		{"IDE-UA", v3IDE},
-		{"CLI-UA", v3CLI},
-	})
-
-	if v3.err != nil && enterprise.err != nil {
-		// 两路全失败 → 负缓存语义（等价原家族端点全非 2xx）。
-		return nil, nil, nil, nil, v3.err
+	if v3Desktop.err != nil {
+		return nil, nil, nil, nil, v3Desktop.err
 	}
-	if v3.err != nil {
-		// /v3 失败降级：不拖累企业端点结果（降级仅企业端点 + warn）。
-		log.Printf("WARN: [upstream] global models: v3/config probe failed (degraded to enterprise endpoint): %v", v3.err)
-		names, infos, efforts, defaults = extractEfforts(enterprise.infos)
-		return names, infos, efforts, defaults, nil
-	}
-	if enterprise.err != nil {
-		log.Printf("WARN: [upstream] global models: enterprise endpoint failed (v3/config only): %v", enterprise.err)
-		names, infos, efforts, defaults = extractEfforts(v3.infos)
-		return names, infos, efforts, defaults, nil
-	}
-	// 两路皆成功：v3 为主、企业端点补缺合并（含 effort 桶合并，v3 权威）。
-	v3Names, v3Infos, v3Efforts, v3Defaults := extractEfforts(v3.infos)
-	if len(v3Names) == 0 {
-		v3Names = v3.names
-	}
-	entNames, entInfos, entEfforts, entDefaults := extractEfforts(enterprise.infos)
-	if len(entNames) == 0 {
-		entNames = enterprise.names
-	}
-	names, infos = mergeGlobalCatalog(v3Names, v3Infos, entNames, entInfos)
-	efforts = mergeEffortBuckets(v3Efforts, entEfforts)
-	defaults = mergeEffortDefaults(v3Defaults, entDefaults)
+	names, infos, efforts, defaults = extractEfforts(v3Desktop.infos)
 	return names, infos, efforts, defaults, nil
 }
 

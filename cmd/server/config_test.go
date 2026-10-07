@@ -118,16 +118,19 @@ func TestBadDuration(t *testing.T) {
 }
 
 func TestHardCreditKeyIgnored(t *testing.T) {
-	// 退役的 hard_credit 键作为 JSON 未知字段被自然忽略，不报错。
+	// 退役键忽略并告警（不阻断启动）：用户不需要为了升级而删旧键。
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
 	os.WriteFile(fp, []byte(`{"cooldown":{"hard_credit":"not-a-duration","soft_rate":"30s"}}`), 0o600)
 	c, err := Load(fp)
 	if err != nil {
-		t.Fatalf("hard_credit must be ignored (not validated): %v", err)
+		t.Fatalf("retired key must not block startup: %v", err)
 	}
 	if c.SoftRateDur.Seconds() != 30 {
 		t.Errorf("soft_rate=%v want 30s", c.SoftRateDur)
+	}
+	if !hasWarning(c.Warnings, "cooldown.hard_credit") {
+		t.Errorf("retired key must be reported: %v", c.Warnings)
 	}
 }
 
@@ -351,7 +354,7 @@ func TestUpstreamEnvOverride(t *testing.T) {
 	}
 }
 
-// TestRetiredTravelIntervalKeyIgnored 退役的 travel_interval_minutes 键按未知字段忽略，不报错。
+// TestRetiredTravelIntervalKeyIgnored 退役的 travel_interval_minutes 键仅告警，同段其余键照常生效。
 func TestRetiredTravelIntervalKeyIgnored(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
@@ -362,6 +365,9 @@ func TestRetiredTravelIntervalKeyIgnored(t *testing.T) {
 	}
 	if len(c.Schedule.CheckinHours) != 1 || c.Schedule.CheckinHours[0] != 9 {
 		t.Errorf("checkin_hours=%v want [9]（同段其余键照常生效）", c.Schedule.CheckinHours)
+	}
+	if !hasWarning(c.Warnings, "schedule.travel_interval_minutes") {
+		t.Errorf("retired key must be reported: %v", c.Warnings)
 	}
 }
 
@@ -670,7 +676,7 @@ func TestPromptDefaultPassthrough(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Prompt.Mode != "passthrough" {
+	if c.Prompt.Mode != "none" {
 		t.Errorf("prompt.mode=%q want passthrough", c.Prompt.Mode)
 	}
 	// passthrough 不加载提示词文本（透传客户端 system）；切 custom 时 normalize 会加载。
@@ -680,12 +686,12 @@ func TestPromptDefaultPassthrough(t *testing.T) {
 func TestPromptExplicitPassthrough(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"prompt":{"mode":"passthrough"}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"prompt":{"mode":"none"}}`), 0o600)
 	c, err := Load(fp)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Prompt.Mode != "passthrough" {
+	if c.Prompt.Mode != "none" {
 		t.Errorf("mode=%q want passthrough", c.Prompt.Mode)
 	}
 	if c.PromptText != "" {
@@ -707,7 +713,7 @@ func TestPromptInvalidMode(t *testing.T) {
 func TestPromptFileMissing(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"prompt":{"mode":"custom","file":"/nonexistent/p.md"}}`), 0o600)
+	os.WriteFile(fp, []byte(`{"prompt":{"mode":"replace","file":"/nonexistent/p.md"}}`), 0o600)
 	if _, err := Load(fp); err == nil {
 		t.Fatal("want error for missing prompt file")
 	}
@@ -721,7 +727,7 @@ func TestPromptFileOverride(t *testing.T) {
 	os.WriteFile(pf, []byte(want), 0o600)
 	cf := filepath.Join(dir, "c.json")
 	// 用 json.Marshal 拼路径：Windows 反斜杠必须转义，手工字符串拼接会产出非法 JSON。
-	cfgJSON, err := json.Marshal(map[string]any{"prompt": map[string]any{"mode": "custom", "file": pf}})
+	cfgJSON, err := json.Marshal(map[string]any{"prompt": map[string]any{"mode": "replace", "file": pf}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -737,12 +743,12 @@ func TestPromptFileOverride(t *testing.T) {
 
 // TestPromptEnvOverride env 覆盖 prompt.mode 与 prompt.file。
 func TestPromptEnvOverride(t *testing.T) {
-	t.Setenv("WB2A_PROMPT_MODE", "passthrough")
+	t.Setenv("WB2A_PROMPT_MODE", "none")
 	c, err := Load("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Prompt.Mode != "passthrough" {
+	if c.Prompt.Mode != "none" {
 		t.Errorf("mode=%q want passthrough", c.Prompt.Mode)
 	}
 }
@@ -756,7 +762,7 @@ func TestPromptLegacyConfigNoImpact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Prompt.Mode != "passthrough" {
+	if c.Prompt.Mode != "none" {
 		t.Errorf("legacy config should default to passthrough, got %q", c.Prompt.Mode)
 	}
 	if c.Listen != ":9999" {
@@ -767,29 +773,72 @@ func TestPromptLegacyConfigNoImpact(t *testing.T) {
 // TestUpstreamUserAgentConfig 配置 upstream.user_agent 与 env WB2A_USER_AGENT 均生效，
 // 缺省空串保持现状（headers 层回落到 clientUA）。
 func TestUpstreamUserAgentConfig(t *testing.T) {
-	// JSON 配置
-	dir := t.TempDir()
-	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"upstream":{"user_agent":"WorkBuddy/1.2.3"}}`), 0o600)
-	c, err := Load(fp)
+	// 旧的全局 UA 键忽略并告警（新结构见 upstream.profiles）。
+	legacy, err := ParseConfig([]byte(`{"upstream":{"user_agent":"retired"}}`))
+	if err != nil {
+		t.Fatalf("retired global UA key must not block startup: %v", err)
+	}
+	if !hasWarning(legacy.Warnings, "upstream.user_agent") {
+		t.Errorf("retired key must be reported: %v", legacy.Warnings)
+	}
+	c, err := ParseConfig([]byte(`{"config_version":2,"upstream":{"profiles":{"global":{"client_version":"6.0.0","cli_version":"3.0.0","user_agents":{"chat":"custom/1"}}}}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Upstream.UserAgent != "WorkBuddy/1.2.3" {
-		t.Errorf("user_agent=%q want WorkBuddy/1.2.3", c.Upstream.UserAgent)
+	if c.Upstream.Profiles["global"].UserAgents["chat"] != "custom/1" || c.Upstream.Profiles["cn"].ClientVersion != "5.7.6" {
+		t.Fatal(c.Upstream.Profiles)
 	}
-	// 缺省为空
-	if c2, err := Load(""); err != nil || c2.Upstream.UserAgent != "" {
-		t.Errorf("default user_agent=%q want empty (err=%v)", c2.Upstream.UserAgent, err)
+}
+
+// hasWarning 报告告警列表是否含指定片段（告警文案含点分路径）。
+func hasWarning(warnings []string, needle string) bool {
+	for _, w := range warnings {
+		if strings.Contains(w, needle) {
+			return true
+		}
 	}
-	// env 覆盖
-	t.Setenv("WB2A_USER_AGENT", "EnvAgent/9")
-	c3, err := Load("")
+	return false
+}
+
+// TestUnknownConfigKeyTolerated 未知/笔误键只告警，不阻断：面板保存会把旧文件
+// 深合并回来，若严格拒收则任何历史遗留键都会让配置写不回去。
+func TestUnknownConfigKeyTolerated(t *testing.T) {
+	c, err := ParseConfig([]byte(`{"config_version":2,"upstream":{"profiles":{"cn":{"client_verison":"9.9.9"}}},"listen":":1234"}`))
+	if err != nil {
+		t.Fatalf("unknown key must not fail parse: %v", err)
+	}
+	if c.Listen != ":1234" {
+		t.Errorf("known keys must still apply: %q", c.Listen)
+	}
+	if !hasWarning(c.Warnings, "upstream.profiles.cn.client_verison") {
+		t.Errorf("typo inside nested profile must be reported: %v", c.Warnings)
+	}
+}
+
+// TestUnknownConfigKeySurvivesSave unknown 键在保存回写时保留（不静默删用户数据）。
+func TestUnknownConfigKeySurvivesSave(t *testing.T) {
+	start := map[string]any{"config_version": float64(2), "listen": ":1", "my_note": "keep me"}
+	incoming := map[string]any{"listen": ":2"}
+	merged := mergeConfigMaps(start, incoming)
+	if _, err := ParseConfig(mergedJSON(merged)); err != nil {
+		t.Fatalf("save path must accept existing unknown keys: %v", err)
+	}
+	if merged["my_note"] != "keep me" {
+		t.Fatalf("unknown key dropped on save: %v", merged)
+	}
+}
+
+// TestPromptLegacyModeMigrated 旧 mode 取值迁移到新名并告警。
+func TestPromptLegacyModeMigrated(t *testing.T) {
+	c, err := ParseConfig([]byte(`{"prompt":{"mode":"passthrough"}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c3.Upstream.UserAgent != "EnvAgent/9" {
-		t.Errorf("env user_agent=%q want EnvAgent/9", c3.Upstream.UserAgent)
+	if c.Prompt.Mode != "none" {
+		t.Errorf("mode=%q want none", c.Prompt.Mode)
+	}
+	if !hasWarning(c.Warnings, "prompt.mode") {
+		t.Errorf("legacy mode must be reported: %v", c.Warnings)
 	}
 }
 

@@ -975,9 +975,12 @@ const CFG_MAP = {
   idle_weight_per_hour: ['pool', 'idle_weight_per_hour'], idle_weight_max: ['pool', 'idle_weight_max'],
   ttl: ['session_sticky', 'ttl'],
   timeout_seconds: ['upstream', 'timeout_seconds'], header_timeout_seconds: ['upstream', 'header_timeout_seconds'],
-  idle_timeout_seconds: ['upstream', 'idle_timeout_seconds'], user_agent: ['upstream', 'user_agent'],
+  idle_timeout_seconds: ['upstream', 'idle_timeout_seconds'],
+  cn_client_version: ['upstream', 'profiles', 'cn', 'client_version'],
+  cn_cli_version: ['upstream', 'profiles', 'cn', 'cli_version'],
+  global_client_version: ['upstream', 'profiles', 'global', 'client_version'],
+  global_cli_version: ['upstream', 'profiles', 'global', 'cli_version'],
   prompt_mode: ['prompt', 'mode'], prompt_file: ['prompt', 'file'],
-  sanitize_blacklist_fingerprints: ['features', 'sanitize_blacklist_fingerprints'],
   session_sticky_enabled: ['session_sticky', 'enabled'],
   model_default_realm: ['model_default_realm'],
   proxy_url: ['proxy_url'],
@@ -993,10 +996,14 @@ const CFG_MAP = {
  * 但覆盖型字段正好相反：清空 = 明确要求回到默认。漏发它们会让面板显示"已保存"
  * 而值其实没变（issue #102 附带发现 2：user_agent 清空后 config.json 里仍是旧值）。
  *
+ * 分域版本四个字段也属于覆盖型：清空 = 用内置默认（后端对空串回落
+ * DefaultIdentity，所以删掉值不会让 UA 变成空串）。
+ *
  * 刻意不含 api_key：清空它 = 关闭整个鉴权，误触代价是网关变成无鉴权公开服务。
  * 该字段（以及提示文案"留空 = 不鉴权"与现状不符的问题）单独处理。
  */
-const CLEARABLE_CFG = new Set(['user_agent', 'prompt_file', 'proxy_url', 'resin_url', 'resin_platform_name']);
+const CLEARABLE_CFG = new Set(['prompt_file', 'proxy_url', 'resin_url', 'resin_platform_name',
+  'cn_client_version', 'cn_cli_version', 'global_client_version', 'global_cli_version']);
 
 function dig(obj, path) { return path.reduce((o, k) => (o == null ? undefined : o[k]), obj); }
 function put(obj, path, val) {
@@ -1004,6 +1011,8 @@ function put(obj, path, val) {
   for (let i = 0; i < path.length - 1; i++) { if (typeof o[path[i]] !== 'object' || o[path[i]] === null) o[path[i]] = {}; o = o[path[i]]; }
   o[path[path.length - 1]] = val;
 }
+
+let cfgVersionInfo = null; // 最近一次 GET config 返回的 version_info（一键填入的数据源）
 
 async function loadConfig() {
   try {
@@ -1020,13 +1029,100 @@ async function loadConfig() {
       else el.value = v == null ? '' : v;
     }
     markDurationFields(); // 回填后重置校验态（清掉残留红框；现值来自后端必然合法）
-    if (d.version_info && $('cfgVersionHint')) {
-      const v = d.version_info;
-      $('cfgVersionHint').textContent = `官方最新版本: 国内 ${v.latest_cn || '5.7.6'} | 海外 ${v.latest_global || '5.6.2'}`;
-    }
+    applyVersionInfo(d.version_info, f);
     $('cfgNote').textContent = '';
+    // 配置告警（未知/退役键、旧取值迁移）：只告知，不阻断保存。
+    const warns = (cfgLoaded && Array.isArray(cfgLoaded._warnings)) ? cfgLoaded._warnings : [];
+    if (warns.length && $('cfgNote')) {
+      $('cfgNote').textContent = `配置告警：${warns.join('；')}`;
+    }
+    if (warns.length) console.warn('config warnings:', warns);
   } catch (e) { toast('读取配置失败：' + e.message, 'err'); }
 }
+// applyVersionInfo 用后端返回的版本信息初始化版本区：
+//   - 占位符 = 内置默认 profile 版本（单一事实来源在后端，前端不再硬编码，
+//     避免代码升级后面板还显示旧版本号）；
+//   - 提示行 = 已拉取的最新版本 + 配置风险提醒；
+//   - 四个输入框绑定 input，改动后即时重算提醒。
+function applyVersionInfo(v, f) {
+  cfgVersionInfo = v || null;
+  if (f) {
+    for (const n of ['cn_client_version', 'cn_cli_version', 'global_client_version', 'global_cli_version']) {
+      const el = f.elements[n];
+      if (!el) continue;
+      const base = (
+        n === 'cn_client_version' ? v && v.builtin_cn_client :
+        n === 'cn_cli_version' ? v && v.builtin_cn_cli :
+        n === 'global_client_version' ? v && v.builtin_global_client :
+        v && v.builtin_global_cli
+      );
+      if (base) el.placeholder = base;
+      el.oninput = refreshVersionNotes;
+    }
+  }
+  refreshVersionNotes();
+}
+
+// versionNotes 返回某域的版本配置风险提醒（按严重度只有两类，都是“可能造出
+// 不存在的客户端指纹”，不阻止保存）：
+//   1. 客户端版本落后于已拉取的最新版（可一键填入）；
+//   2. 只改了客户端版本、CLI 版本仍是内置基线值：UA 两段版本不成对。
+//      官方 feed 不下发「某构建捆绑的 CLI 号」，网关无法代填，只能提醒人工核对。
+function versionNotes(realm) {
+  const f = $('cfgForm'), v = cfgVersionInfo;
+  if (!f || !v || !f.elements) return [];
+  const cn = realm === 'cn', label = cn ? 'CN' : 'Global';
+  const clientEl = f.elements[realm + '_client_version'], cliEl = f.elements[realm + '_cli_version'];
+  if (!clientEl || !cliEl) return [];
+  const bClient = (cn ? v.builtin_cn_client : v.builtin_global_client) || '';
+  const bCLI = (cn ? v.builtin_cn_cli : v.builtin_global_cli) || '';
+  const latest = (cn ? v.latest_cn : v.latest_global) || '';
+  const client = (clientEl.value || '').trim() || bClient;
+  const cli = (cliEl.value || '').trim() || bCLI;
+  const notes = [];
+  if (latest && client && client !== latest) {
+    notes.push(`${label} 客户端版本 ${client} 落后于已拉取的最新 ${latest}（可一键填入）`);
+  }
+  if (bClient && client !== bClient && cli === bCLI) {
+    notes.push(`${label} 已改客户端版本但 CLI 版本仍是内置 ${bCLI}，请填该构建捆绑的 CLI 号（否则 UA 两段版本不成对）`);
+  }
+  return notes;
+}
+
+// refreshVersionNotes 重算提示行：已拉取版本信息 + 当前输入的配置风险。
+function refreshVersionNotes() {
+  if (!$('cfgVersionHint')) return;
+  const v = cfgVersionInfo;
+  if (!v) { $('cfgVersionHint').textContent = ''; return; }
+  const src = v.checked ? '已探测' : '未探测成功，显示内置基线';
+  const notes = versionNotes('cn').concat(versionNotes('global'));
+  $('cfgVersionHint').textContent =
+    `已拉取版本（${src}）：国内 ${v.latest_cn || '-'} | 海外 ${v.latest_global || '-'}` +
+    (notes.length ? '；' + notes.join('；') : '');
+}
+
+// fillFetchedVersions 一键填入已拉取的客户端版本（CLI 版本不动：官方 feed 不下发
+// 内置 CLI 版本，我们无法知道新构建捆绑的 CLI 号，填旧值反而会造成错误指纹）。
+function fillFetchedVersions() {
+  const f = $('cfgForm'), v = cfgVersionInfo;
+  if (!f || !v || !f.elements) { toast('尚未读取到版本信息，请刷新配置后重试', 'err'); return; }
+  const filled = [];
+  if (v.latest_cn && f.elements.cn_client_version) {
+    f.elements.cn_client_version.value = v.latest_cn;
+    filled.push('CN ' + v.latest_cn);
+  }
+  if (v.latest_global && f.elements.global_client_version) {
+    f.elements.global_client_version.value = v.latest_global;
+    filled.push('Global ' + v.latest_global);
+  }
+  if (!filled.length) { toast('没有可填入的版本（探测未成功）', 'err'); return; }
+  refreshVersionNotes();
+  const notes = versionNotes('cn').concat(versionNotes('global'));
+  const srcNote = v.checked ? '' : '（未探测成功，这是内置基线版本，建议先确认官方已发布版本）';
+  toast('已填入 ' + filled.join('、') + srcNote + (notes.length ? '；' + notes.join('；') : ''),
+    (notes.length || !v.checked) ? 'err' : 'ok');
+}
+
 function collectConfig() {
   const f = $('cfgForm'), out = {};
   for (const [name, path] of Object.entries(CFG_MAP)) {
@@ -1079,6 +1175,7 @@ $('btnEye').onclick = () => {
   $('btnEye').textContent = show ? '隐藏' : '显示';
 };
 $('btnCfgReload').onclick = loadConfig;
+if ($('btnCfgFillVersions')) $('btnCfgFillVersions').onclick = fillFetchedVersions;
 $('cfgForm').onsubmit = async ev => {
   ev.preventDefault();
   // 时长字段脏值拦截：标红 + toast 点名，不发保存请求（后端同样会拒，这里前置）。

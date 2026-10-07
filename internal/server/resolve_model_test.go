@@ -101,6 +101,7 @@ func TestChatBareModelRealmPolicy(t *testing.T) {
 		})
 	}
 	up := newFakeUpstream(t, func(string) (int, string, bool) { return 200, sseOK, true })
+	up.GlobalEnabled = true
 	body := `{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}]}`
 
 	run := func(cfg Config) int {
@@ -110,11 +111,11 @@ func TestChatBareModelRealmPolicy(t *testing.T) {
 	}
 
 	// 默认（无 resolver）→ cn：池内无 CN 号 → 503。
-	if code := run(Config{Pool: newGlobalOnlyPool(), Upstream: up}); code != http.StatusServiceUnavailable {
+	if code := run(Config{GlobalEnabled: true, Pool: newGlobalOnlyPool(), Upstream: up}); code != http.StatusServiceUnavailable {
 		t.Errorf("bare model default cn code=%d want 503", code)
 	}
 	// Default=global → 命中 global 号。
-	if code := run(Config{Pool: newGlobalOnlyPool(), Upstream: up,
+	if code := run(Config{GlobalEnabled: true, Pool: newGlobalOnlyPool(), Upstream: up,
 		RealmResolver: NewRealmResolver(RealmDefaultGlobal, nil)}); code != http.StatusOK {
 		t.Errorf("bare model default global code=%d want 200", code)
 	}
@@ -125,13 +126,13 @@ func TestChatBareModelRealmPolicy(t *testing.T) {
 		})
 	}
 	p := newGlobalOnlyPool()
-	if code := run(Config{Pool: p, Upstream: up, RealmResolver: auto(p)}); code != http.StatusOK {
+	if code := run(Config{GlobalEnabled: true, Pool: p, Upstream: up, RealmResolver: auto(p)}); code != http.StatusOK {
 		t.Errorf("bare model auto(global-only pool) code=%d want 200", code)
 	}
 	// 显式 global: 前缀在默认 cn 策略下也命中。
 	prefixed := `{"model":"global:deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}]}`
 	rec := httptest.NewRecorder()
-	NewHandler(Config{Pool: newGlobalOnlyPool(), Upstream: up}).ServeHTTP(rec,
+	NewHandler(Config{GlobalEnabled: true, Pool: newGlobalOnlyPool(), Upstream: up}).ServeHTTP(rec,
 		httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(prefixed)))
 	if rec.Code != http.StatusOK {
 		t.Errorf("explicit global: prefix code=%d want 200", rec.Code)

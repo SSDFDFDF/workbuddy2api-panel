@@ -72,6 +72,8 @@ func main() {
 		}
 	}
 
+	logConfigWarnings(cfg)
+
 	auths, err := auth.LoadDir(cfg.AuthDir)
 	if err != nil {
 		log.Fatalf("load auths: %v", err)
@@ -157,13 +159,17 @@ func main() {
 	}
 	// 聊天 SSE 流中空闲上限（S3 空闲监控读取）。
 	up.IdleTimeout = time.Duration(cfg.Upstream.IdleTimeoutSeconds) * time.Second
-	up.SanitizeFingerprints.Store(cfg.Features.SanitizeBlacklistFingerprints)
-	// 出站 UA 与归属头（issue #42 + 上游同步）：
-	// UserAgent 非空则完全覆盖；ClientVersion/CliVersion 缺省对齐官方形态；
-	// ClientName 非空时 chat 路径注入 X-IDE-* 四头（用量归因对齐官方桌面端）。
-	up.UserAgent = cfg.Upstream.UserAgent
-	up.ClientVersion = cfg.Upstream.ClientVersion
-	up.CliVersion = cfg.Upstream.CliVersion
+	up.Profiles = cfg.Upstream.Profiles
+	up.ChatBaseCN = cfg.Upstream.ChatBaseCN
+	up.CacheSecret, err = upstream.LoadCacheSecret(stateSibling(cfg.StateFile, "cache-secret"))
+	if err != nil {
+		log.Fatalf("cache secret: %v", err)
+	}
+	up.StreamTimeouts = upstream.StreamTimeoutConfig{
+		FirstModelEvent: time.Duration(cfg.Upstream.FirstModelEventSeconds) * time.Second,
+		FirstGeneration: time.Duration(cfg.Upstream.FirstGenerationSeconds) * time.Second,
+		Tail:            time.Duration(cfg.Upstream.TailSeconds) * time.Second,
+	}
 	up.ClientName = cfg.Upstream.ClientName
 	up.DeviceToken = cfg.Upstream.DeviceToken
 	up.DeviceTokenFile = cfg.Upstream.DeviceTokenFile
@@ -250,10 +256,9 @@ func main() {
 	// 面板环形缓冲，供 /panel/api/logs 读取；控制台输出行为完全不变。
 	// live 承载可热改字段（api_key/soft_rate/脱敏开关），面板保存配置时在线替换。
 	live := livecfg.New(livecfg.Snapshot{
-		APIKey:               cfg.APIKey,
-		SoftCooldown:         cfg.SoftRateDur,
-		SanitizeFingerprints: cfg.Features.SanitizeBlacklistFingerprints,
-		RecordClientInfo:     cfg.Logging.RequestClientInfo,
+		APIKey:           cfg.APIKey,
+		SoftCooldown:     cfg.SoftRateDur,
+		RecordClientInfo: cfg.Logging.RequestClientInfo,
 	})
 	// 用量记录器：与 state 文件同目录，随 state_file 配置一起搬移。
 	// datapath 由 state 文件路径推出，避免再加一个配置项。
@@ -299,7 +304,14 @@ func main() {
 		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),
 		ConfigPath: *cfgPath,
 		LoadConfig: func() (any, error) {
-			return Load(*cfgPath)
+			c, err := Load(*cfgPath)
+			if err != nil {
+				return nil, err
+			}
+			// 面板配置页据此展示 `_warnings`（未知/退役键、旧取值迁移），
+			// 不静默吞掉不生效的配置项。
+			logConfigWarnings(c)
+			return c, nil
 		},
 		SaveConfig: func(raw []byte) ([]string, error) {
 			return saveConfig(raw, *cfgPath, live, p, up, sch)
@@ -441,6 +453,24 @@ func panelListenPath(listen string) string {
 // 落盘用"先写 tmp 再 rename"原子替换，且优先保留磁盘上的原始 JSON 结构（只改
 // 面板表单覆盖到的键），避免把用户手写的注释性字段/未知键洗掉——这里直接整体
 // 序列化校验后的配置，未知键在 json.Unmarshal 时已丢失，故先合并原始 map。
+// logConfigWarnings 把配置告警打到 stdout（面板日志页同源）：未知/退役键、
+// 旧取值迁移都只告警不阻断，但必须可见，否则用户会以为旧开关仍在生效。
+// 每次调用前清空已打印记录：saveConfig 后再次 Load 会重新产生同一批告警。
+var printedConfigWarnings = map[string]bool{}
+
+func logConfigWarnings(c *Config) {
+	if c == nil {
+		return
+	}
+	for _, w := range c.Warnings {
+		if printedConfigWarnings[w] {
+			continue
+		}
+		printedConfigWarnings[w] = true
+		log.Printf("WARN: [config] %s", w)
+	}
+}
+
 func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) ([]string, error) {
 	// 1) 解析原始 JSON 为 map（保留用户手写的未知键），再叠加面板提交的键。
 	oldRaw, err := os.ReadFile(path)
@@ -461,6 +491,9 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	if err != nil {
 		return nil, err
 	}
+	// 保存时也把告警打出：用户刚改完配置就能看到哪一项没生效；
+	// 未知键一律保留在 merged 里回写（不静默删用户数据）。
+	logConfigWarnings(newCfg)
 
 	// 3) 落盘（原子替换）。
 	out, err := json.MarshalIndent(merged, "", "  ")
@@ -502,12 +535,10 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 
 	// 4) 热应用：能立即生效的字段全部应用，并列出仍需重启的字段。
 	live.Store(livecfg.Snapshot{
-		APIKey:               newCfg.APIKey,
-		SoftCooldown:         newCfg.SoftRateDur,
-		SanitizeFingerprints: newCfg.Features.SanitizeBlacklistFingerprints,
-		RecordClientInfo:     newCfg.Logging.RequestClientInfo,
+		APIKey:           newCfg.APIKey,
+		SoftCooldown:     newCfg.SoftRateDur,
+		RecordClientInfo: newCfg.Logging.RequestClientInfo,
 	})
-	up.SanitizeFingerprints.Store(newCfg.Features.SanitizeBlacklistFingerprints)
 	p.SetBreaker(newCfg.Pool.BreakerThreshold, newCfg.BreakerCooldownDur, newCfg.BreakerCooldownMaxD)
 	p.SetMaxInFlight(newCfg.Pool.MaxInFlight)
 	p.SetMaxInFlightGlobal(newCfg.Pool.MaxInFlightGlobal)
@@ -549,7 +580,7 @@ func restartRequiredFields(c *Config) []string {
 	// upstream.user_agent 在装配期被写进出站 client（main.go 的 up.UserAgent = ...），
 	// 之后不再读取——不在 livecfg 热快照里，也无法热改。此前漏列，导致面板改完
 	// 显示"已保存"却不提示需要重启，用户以为没生效（issue #102 附带发现 2）。
-	out = append(out, "upstream.user_agent")
+	out = append(out, "upstream.profiles", "upstream.chat_base_cn", "upstream.first_model_event_seconds", "upstream.first_generation_seconds", "upstream.tail_seconds", "global", "prompt")
 	if c.Upstash.URL != "" || c.Upstash.Token != "" {
 		out = append(out, "upstash")
 	}

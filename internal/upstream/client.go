@@ -17,10 +17,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/forwarding"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/proxy"
 )
@@ -635,22 +635,14 @@ type Client struct {
 	// 1h TTL + 5min 负缓存），见 global_models.go。按实例持有，测试新建 Client 即隔离。
 	globalModels fetchGlobalModelsCache
 
-	// SanitizeFingerprints 出站请求体黑名单指纹脱敏开关（默认 true；false 完全还原）。
-	// 面板保存配置热改 + chat 热路径并发读写，用 atomic.Bool 消除数据竞争。
-	SanitizeFingerprints atomic.Bool
+	// Identity profiles are immutable after client construction.
+	Profiles    map[string]IdentityProfile
+	CacheSecret []byte
 
-	// UserAgent 出站 User-Agent 显式覆盖（非空时全路径生效，优先于默认三段式）。
-	// 空 = 默认官方形态：chat/refresh/FetchModels 走
-	// `WorkBuddy/<ver> WorkBuddy/<ver> CLI/<cliVer>`；billing 走 `WorkBuddy/<ver>`
-	// （仅当 client_name 非空）。
-	UserAgent string
-
-	// ClientVersion WorkBuddy 客户端版本段（出站 UA 的 `WorkBuddy/<ver>` + X-IDE-Version）。
-	// 空 = 内置默认（对齐官方 5.5.4 分发包）。
-	ClientVersion string
-
-	// CliVersion 出站 UA 中 `CLI/<ver>` 段版本。空 = 内置默认（官方内置 CLI 2.137.1）。
-	CliVersion string
+	// StreamTimeouts SSE 语义阶段上限（零值 = 内置默认 120s/300s/10s）。
+	// 心跳只续网络读空闲，不续这些阶段。
+	StreamTimeouts StreamTimeoutConfig
+	refreshes      refreshGroup
 
 	// ClientName 用量归属头取值（X-Product / X-IDE-Name / X-IDE-Type / X-IDE-Version）。
 	// 空 = 旧行为：X-Product="SaaS"，不设 X-IDE-*（向后兼容，不突变归因）。
@@ -688,6 +680,14 @@ type Client struct {
 	proxy *proxy.Client
 }
 
+// StreamTimeoutConfig SSE 阶段上限（见 sse.go watchResponse）：首个模型事件、
+// 首个实质生成、全部 choice 终止后的尾部等待。零值 = 内置默认（120s/300s/10s）。
+type StreamTimeoutConfig struct {
+	FirstModelEvent time.Duration
+	FirstGeneration time.Duration
+	Tail            time.Duration
+}
+
 // New 生产默认值。Transport 由 newTransport() 集中构造（连接层加固：真正禁 h2 /
 // TLS 握手超时 / 短 keepalive 探测 / 失败清池，参数见 transport.go——吸收上游
 // kongjianguan 4 连击实测经验）。
@@ -696,14 +696,13 @@ func New() *Client {
 	c := &Client{
 		HTTP:          &http.Client{Timeout: 120 * time.Second, Transport: tr},
 		ChatHTTP:      &http.Client{Timeout: 0, Transport: tr}, // 无总时长；首字节由 ResponseHeaderTimeout 管
-		ChatBaseCN:    "https://copilot.tencent.com",
+		ChatBaseCN:    "https://www.workbuddy.cn",
 		BillingBaseCN: "https://www.codebuddy.cn",
 		WebBaseCN:     "https://www.workbuddy.cn",
 		// GlobalEnabled 缺省 true（与 config global.enabled 缺省 true 一致；纯 CN 部署行为不变：
 		// CN 账号恒判 cn，global base 只在 realm=global 的账号上被使用）。
 		GlobalEnabled: true,
 	}
-	c.SanitizeFingerprints.Store(true)
 	return c
 }
 
@@ -784,24 +783,19 @@ func (c *Client) chatBase(a *auth.Auth) string {
 	if c.globalOn(a) {
 		return c.globalChatBase()
 	}
-	return c.ChatBaseCN
+	if c.ChatBaseCN != "" {
+		return strings.TrimRight(c.ChatBaseCN, "/")
+	}
+	return "https://www.workbuddy.cn"
 }
 
-// prepareBody 组装出站请求体（脱敏开关由 Client.SanitizeFingerprints 控制）。
-// realm 为账号 Realm()（cn/global），供 efforts 缓存分桶（跨域 effort 集合不互相污染）。
-func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []byte {
-	efforts, defs := c.effortsSnapshot(realm), c.defaultEffortsSnapshot(realm)
-	if realmKey(realm) == "global" {
-		// global 域降级源 = 远端探测桶（权威）∪ 产品静态兜底表（全局 21 名内档位如
-		// deepseek-v4.1-flash ['high']）。当前探测桶为空时也按静态表降级，不全程透传
-		//（issue #84：往 WorkBuddy 上游发 low/max 非法，须降级到 high）。
-		efforts, defs = globalEffortMap(efforts, defs)
+// prepareBody validates and encodes one request without rewriting its content.
+func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) ([]byte, error) {
+	r, err := forwarding.Parse(body)
+	if err != nil {
+		return nil, err
 	}
-	body = PrepareBodyOptWithEffortsAndDefault(body, c.SanitizeFingerprints.Load(), efforts, defs)
-	// prompt_cache_key 注入（P0 费用优化，费用降 ~17×）：按账号隔离的稳定缓存键，
-	// 让同一客户端对同一账号的连续请求命中上游前缀缓存。
-	body = InjectPromptCacheKey(body, uid, conversationID)
-	return body
+	return r.Encode(r.Model)
 }
 
 // effortsSnapshot 返回 effort 能力缓存副本；nil 表示未知（透传不降级）。
@@ -866,7 +860,7 @@ func (c *Client) webBase(a *auth.Auth) string {
 // body 读失败（连接中断/空闲掐流/截断）返回普通错误（非 *Error）——半截 body 不进
 // Classify，不参与账号惩罚（传输层故障不该喂熔断误罚号）。
 func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
-	resp, err := c.HTTP.Do(req)
+	resp, err := noRedirectClient(c.HTTP).Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -913,41 +907,28 @@ const refreshTokenExpiresInMax = 10 * 365 * 24 * time.Hour
 //   - 写回前重新校验快照一致性：若锁外期间另一 goroutine 已完成刷新（refreshToken
 //     已变），本次结果直接采用（新 token 已生效），不再重复写回。
 func (c *Client) RefreshToken(a *auth.Auth) error {
-	// 第 1 段（锁内）：读快照。
-	a.Lock()
-	rtSnapshot := a.RefreshToken
-	atBefore := a.AccessToken
-	a.Unlock()
+	return c.refreshes.Do(a.UID, func() error { return c.refreshTokenOnce(a) })
+}
+
+func (c *Client) refreshTokenOnce(a *auth.Auth) error {
+	snapshot := a.Snapshot(true)
+	if snapshot.IsGlobal() && !c.GlobalEnabled {
+		return fmt.Errorf("global realm disabled")
+	}
+	rtSnapshot := snapshot.RefreshToken
+	atBefore := snapshot.AccessToken
 	if strings.TrimSpace(rtSnapshot) == "" {
 		return fmt.Errorf("no refreshToken")
 	}
 
-	endpoint := c.chatBase(a) + "/v2/plugin/auth/token/refresh"
+	endpoint := c.chatBase(snapshot) + "/v2/plugin/auth/token/refresh"
 	ctx, cancel := context.WithTimeout(context.Background(), refreshIOTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
 	if err != nil {
 		return err
 	}
-	// RefreshHeaders 读取 a 的字段（domain/uid 等）注入请求头——需在锁内取快照值，
-	// 用一个显式逐字段拷贝的临时 auth 构造头（不拷贝 sync.Mutex，避免 vet copies-lock）。
-	a.Lock()
-	hdrSnapshot := auth.Auth{
-		AccessToken:  a.AccessToken,
-		RefreshToken: rtSnapshot,
-		ExpiresAt:    a.ExpiresAt,
-		Domain:       a.Domain,
-		UID:          a.UID,
-		EnterpriseID: a.EnterpriseID,
-		Nickname:     a.Nickname,
-		DeviceToken:  a.DeviceToken,
-	}
-	a.Unlock()
-	// use_proxy 是未导出字段，逐字段快照无法直接拷贝；锁内也不可再调 UseProxy()
-	// （sync.Mutex 不可重入）。解锁后读一次补进快照——否则关闭代理的账号在 token
-	// 刷新时仍会走代理（tagProxy 读快照的 useProxy，nil 视为默认 true）。
-	hdrSnapshot.SetUseProxy(a.UseProxy())
-	c.RefreshHeaders(req, &hdrSnapshot)
+	c.RefreshHeaders(req, snapshot)
 
 	// 网络 I/O（锁外，30s 上限）。
 	data, err := c.doJSON(req)
@@ -972,7 +953,7 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 	// 即「并发刷新已完成」判据；AND 与 OR 在真实形态下等价。唯 OR 会额外放弃的
 	// 「只有单 token 变化」（如手工只改 auth 文件一个字段）不构成放弃条件——本次
 	// 结果覆盖手工编辑。
-	if a.AccessToken != atBefore && a.RefreshToken != rtSnapshot {
+	if a.AccessToken != atBefore || a.RefreshToken != rtSnapshot {
 		// 锁外期间另一 goroutine 已完成刷新：新 token 已生效，本次结果不必再写
 		// （实测 R-E：服务端无 rotation 撤销，并发双刷新拿到的两个新 token 都有效，
 		// 后写覆盖先写二者等价可用；提前返回避免无意义覆盖与 ExpiresAt 抖动）。
@@ -1028,10 +1009,15 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	prepared := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID)
-	if c.globalOn(a) {
-		prepared = ensureConsoleSystem(prepared)
+	a = a.Snapshot(false)
+	if a.IsGlobal() && !c.GlobalEnabled {
+		return nil, 400, nil, &Error{Kind: ErrBadParams, Status: 400, Msg: "global realm disabled"}
 	}
+	prepared, prepErr := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID)
+	if prepErr != nil {
+		return nil, 400, []byte(prepErr.Error()), &Error{Kind: ErrBadParams, Status: 400, Msg: prepErr.Error()}
+	}
+	prepared = c.injectCacheKey(prepared, a.Realm(), a.UID, meta.ConversationID, meta.PrincipalID)
 	// reqCtx 的 cancel 在每个出口显式调用（Do 失败 / ≥400 / 成功分支移交 monitorBody），
 	// 循环本身各分支必 return——无循环尾兜底代码（此前外层 var cancel 从未赋值 +
 	// 尾部不可达 cancel() 是潜伏 nil-panic，已删；chatPaths 恒非空由构造保证）。
@@ -1046,7 +1032,7 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		// 同时 monitorBody.Close 仍能独立 cancel 本分支（空闲掐流）。
 		reqCtx, cancel := context.WithCancel(ctx)
 		req = req.WithContext(reqCtx)
-		resp, err := c.chatHTTP().Do(req)
+		resp, err := noRedirectClient(c.chatHTTP()).Do(req)
 		if err != nil {
 			cancel()
 			log.Printf("ERR: [upstream] chat_stream acct=%s: transport error: %v", logfmt.Label(a.UID, a.Nickname), err)
@@ -1056,7 +1042,7 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			roundTripCloseIdle(c.chatHTTP().Transport)
 			return nil, 0, nil, err
 		}
-		if resp.StatusCode >= 400 {
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			raw, rerr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 			resp.Body.Close()
 			cancel()
@@ -1067,6 +1053,9 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 				return nil, 0, nil, fmt.Errorf("read body: %w", rerr)
 			}
 			kind := Classify(resp.StatusCode, string(raw))
+			if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+				kind = ErrServer
+			}
 			log.Printf("WARN: [upstream] chat_stream acct=%s: upstream %d %s body=%s",
 				logfmt.Label(a.UID, a.Nickname), resp.StatusCode, kind, truncate(string(raw), 200))
 			// ≥400 直接返回（#119 后 global 单路径 /v2，chat 层无 fallback 链）。
@@ -1080,6 +1069,11 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 				ue.RetryAfter = d
 			}
 			return nil, resp.StatusCode, raw, ue
+		}
+		if resp.StatusCode == http.StatusAccepted {
+			resp.Body.Close()
+			cancel()
+			return nil, 502, nil, &Error{Kind: ErrServer, Status: 502, Msg: "upstream_queue_unsupported"}
 		}
 		// 成功分支：cancel 所有权交给 monitorBody（其 Close 会 cancel）；
 		// IdleTimeout<=0 时 monitorBody 原样返回底流、无人调 cancel——可接受：
@@ -1401,7 +1395,7 @@ func (c *Client) fetchEnterpriseModels(a *auth.Auth) ([]ModelInfo, error) {
 // nonChatModel 规则剔除非对话条目（selected 会选模型报 code=11102）。
 // 失败返回错误（调用方降级为仅企业端点）。
 func (c *Client) fetchV3Models(a *auth.Auth) ([]ModelInfo, error) {
-	byID, err := c.fetchV3ConfigModelMap(a, codeBuddyIDEUA)
+	byID, err := c.fetchV3ConfigModelMap(a, c.userAgent(a))
 	if err != nil {
 		return nil, err
 	}

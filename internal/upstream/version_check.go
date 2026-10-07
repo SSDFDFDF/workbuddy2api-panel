@@ -18,21 +18,39 @@ type ClientVersionInfo struct {
 	LatestCN          string    `json:"latest_cn"`           // 国内最新语义版本（如 "5.7.6"）
 	LatestCNBuild     string    `json:"latest_cn_build"`     // 国内最新完整构建号（如 "5.7.6.40409493"）
 	LatestGlobal      string    `json:"latest_global"`       // 国际最新语义版本（如 "5.6.2"）
-	LatestGlobalBuild string    `json:"latest_global_build"` // 国际最新完整构建号（如 "5.6.2.39458645"）
+	LatestGlobalBuild string    `json:"latest_global_build"` // 国际最新完整构建号（如 "5.6.2.39468645"）
 	CheckedAt         time.Time `json:"checked_at"`          // 最近一次检测时间
 	Checked           bool      `json:"checked"`             // 是否已成功完成一次检测
+
+	// Builtin* 内置默认 profile 的版本对（面板占位符与「一键填入」的基线）。
+	// 与 upstream.DefaultIdentity 同源，面板不再硬编码版本号（避免代码升级后前端漂移）。
+	BuiltinCNClient     string `json:"builtin_cn_client"`
+	BuiltinCNCLI        string `json:"builtin_cn_cli"`
+	BuiltinGlobalClient string `json:"builtin_global_client"`
+	BuiltinGlobalCLI    string `json:"builtin_global_cli"`
+}
+
+// builtinVersions 返回内置默认 profile 的四个版本值（单一事实来源）。
+func builtinVersions() (cnClient, cnCLI, globalClient, globalCLI string) {
+	cn, global := DefaultIdentity("cn"), DefaultIdentity("global")
+	return cn.ClientVersion, cn.CLIVersion, global.ClientVersion, global.CLIVersion
 }
 
 var globalVersionInfo atomic.Pointer[ClientVersionInfo]
 
 func init() {
+	cnClient, cnCLI, globalClient, globalCLI := builtinVersions()
 	// 初始化内置默认值，确保未探测前不返回全空
 	initInfo := &ClientVersionInfo{
-		LatestCN:          defaultClientVersion,
-		LatestCNBuild:     "5.7.6.40409493",
-		LatestGlobal:      "5.6.2",
-		LatestGlobalBuild: "5.6.2.39458645",
-		Checked:           false,
+		LatestCN:            cnClient,
+		LatestCNBuild:       "5.7.6.40409493",
+		LatestGlobal:        globalClient,
+		LatestGlobalBuild:   "5.6.2.39458645",
+		Checked:             false,
+		BuiltinCNClient:     cnClient,
+		BuiltinCNCLI:        cnCLI,
+		BuiltinGlobalClient: globalClient,
+		BuiltinGlobalCLI:    globalCLI,
 	}
 	globalVersionInfo.Store(initInfo)
 }
@@ -42,9 +60,14 @@ func GetLatestVersionInfo() ClientVersionInfo {
 	if p := globalVersionInfo.Load(); p != nil {
 		return *p
 	}
+	cnClient, cnCLI, globalClient, globalCLI := builtinVersions()
 	return ClientVersionInfo{
-		LatestCN:     defaultClientVersion,
-		LatestGlobal: "5.6.2",
+		LatestCN:            cnClient,
+		LatestGlobal:        globalClient,
+		BuiltinCNClient:     cnClient,
+		BuiltinCNCLI:        cnCLI,
+		BuiltinGlobalClient: globalClient,
+		BuiltinGlobalCLI:    globalCLI,
 	}
 }
 
@@ -114,13 +137,18 @@ func CheckLatestVersion(ctx context.Context, timeout time.Duration) ClientVersio
 	latestGlobal, buildGlobal, errGlobal := fetchFeedVersion(cCtx, httpClient, globalFeedURL)
 
 	prev := GetLatestVersionInfo()
+	cnClient, cnCLI, globalClient, globalCLI := builtinVersions()
 	next := &ClientVersionInfo{
-		LatestCN:          prev.LatestCN,
-		LatestCNBuild:     prev.LatestCNBuild,
-		LatestGlobal:      prev.LatestGlobal,
-		LatestGlobalBuild: prev.LatestGlobalBuild,
-		CheckedAt:         time.Now(),
-		Checked:           true,
+		LatestCN:            prev.LatestCN,
+		LatestCNBuild:       prev.LatestCNBuild,
+		LatestGlobal:        prev.LatestGlobal,
+		LatestGlobalBuild:   prev.LatestGlobalBuild,
+		CheckedAt:           time.Now(),
+		Checked:             true,
+		BuiltinCNClient:     cnClient,
+		BuiltinCNCLI:        cnCLI,
+		BuiltinGlobalClient: globalClient,
+		BuiltinGlobalCLI:    globalCLI,
 	}
 
 	if errCN == nil && latestCN != "" {

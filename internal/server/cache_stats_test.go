@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func feedStatsLines(s *chatStatsReader, lines ...string) {
+func feedStatsLines(s *testStatsReader, lines ...string) {
 	for _, l := range lines {
 		s.parseSSELine(l)
 	}

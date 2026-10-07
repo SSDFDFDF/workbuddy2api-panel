@@ -2,7 +2,6 @@
 package server
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/jsondoc"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
@@ -96,7 +96,6 @@ func (s *chatStat) done() {
 // 并记录首个 data 帧的 TTFB；原始字节原样返回给下游透传。
 // 注意：不做 rune 估算，token 数一律采信上游 usage。
 type chatStatsReader struct {
-	br                  *bufio.Reader
 	start               time.Time
 	ttfb                time.Duration
 	seen                bool // 已见过首个 data 帧（TTFB 只记一次）
@@ -107,21 +106,52 @@ type chatStatsReader struct {
 	hasCompletionTokens bool
 	hasTotalTokens      bool
 	// credit 上游末帧 usage.credit（本次真实扣费积分），供成本台账（NoteModelCost）。
-	hasCredit  bool
-	credit     float64
-	errorFrame bool
+	hasCredit bool
+	credit    float64
 	// cacheHit/cacheMiss 上游末帧 usage.prompt_cache_hit_tokens / miss_tokens，
 	// 供用量桶的命中率维度与 reqlog 逐次记录（issue #92）。
 	hasCacheHit  bool
 	cacheHit     int
 	cacheMiss    int
 	hasCacheMiss bool
-	pend         []byte // 已读未返回的行缓存
 }
 
-// newChatStatsReaderSince 以 since 为 TTFB 计时起点（通常是请求进入 handler 的时刻）。
-func newChatStatsReaderSince(r io.Reader, since time.Time) *chatStatsReader {
-	return &chatStatsReader{br: bufio.NewReaderSize(r, 64*1024), start: since}
+// Observe consumes the same decoded events as the response sinks. No second SSE parser.
+func (s *chatStatsReader) Observe(obj map[string]any) {
+	if !s.seen {
+		s.seen = true
+		s.ttfb = time.Since(s.start)
+	}
+	u, ok := obj["usage"].(map[string]any)
+	if !ok {
+		return
+	}
+	if n, ok := jsondoc.Int(u["prompt_tokens"]); ok {
+		s.promptTokens = int(n)
+		s.hasPromptTokens = true
+	}
+	if n, ok := jsondoc.Int(u["completion_tokens"]); ok {
+		s.completionTokens = int(n)
+		s.hasCompletionTokens = true
+	}
+	if n, ok := jsondoc.Int(u["total_tokens"]); ok {
+		s.totalTokens = int(n)
+		s.hasTotalTokens = true
+	}
+	if n, ok := u["credit"].(json.Number); ok {
+		if f, e := n.Float64(); e == nil {
+			s.credit = f
+			s.hasCredit = true
+		}
+	}
+	if n, ok := upstream.UsageCacheHitTokens(u); ok {
+		s.cacheHit = int(n)
+		s.hasCacheHit = true
+	}
+	if n, ok := upstream.UsageCacheMissTokens(u); ok {
+		s.cacheMiss = int(n)
+		s.hasCacheMiss = true
+	}
 }
 
 // TTFB 返回首个 data 帧到达耗时；无帧时为 0。
@@ -148,66 +178,6 @@ func (s *chatStatsReader) Usage() pool.TokenUsageDelta {
 	}
 }
 
-// parseSSELine 解析一行 "data: {...}"：首帧记 TTFB，含 usage 时采信精确 completion_tokens。
-func (s *chatStatsReader) parseSSELine(line string) {
-	line = strings.TrimRight(line, "\r\n")
-	if !strings.HasPrefix(line, "data: ") {
-		return
-	}
-	payload := strings.TrimPrefix(line, "data: ")
-	if payload == "[DONE]" {
-		return
-	}
-	if !s.seen {
-		s.seen = true
-		s.ttfb = time.Since(s.start)
-	}
-	var chunk struct {
-		Error json.RawMessage `json:"error"`
-		Usage *struct {
-			PromptTokens         *int     `json:"prompt_tokens"`
-			CompletionTokens     *int     `json:"completion_tokens"`
-			TotalTokens          *int     `json:"total_tokens"`
-			Credit               *float64 `json:"credit"`
-			PromptCacheHitTokens *int     `json:"prompt_cache_hit_tokens"`
-			PromptCacheMissTok   *int     `json:"prompt_cache_miss_tokens"`
-		} `json:"usage"`
-	}
-	if json.Unmarshal([]byte(payload), &chunk) != nil || chunk.Usage == nil {
-		if json.Unmarshal([]byte(payload), &chunk) == nil && len(chunk.Error) > 0 {
-			s.errorFrame = true
-		}
-		return
-	}
-	if len(chunk.Error) > 0 {
-		s.errorFrame = true
-	}
-	if chunk.Usage.PromptTokens != nil {
-		s.hasPromptTokens = true
-		s.promptTokens = *chunk.Usage.PromptTokens
-	}
-	if chunk.Usage.CompletionTokens != nil {
-		s.hasCompletionTokens = true
-		s.completionTokens = *chunk.Usage.CompletionTokens
-	}
-	if chunk.Usage.TotalTokens != nil {
-		s.hasTotalTokens = true
-		s.totalTokens = *chunk.Usage.TotalTokens
-	}
-	if chunk.Usage.Credit != nil {
-		s.hasCredit = true
-		s.credit = *chunk.Usage.Credit
-	}
-	if chunk.Usage.PromptCacheHitTokens != nil {
-		s.hasCacheHit = true
-		s.cacheHit = *chunk.Usage.PromptCacheHitTokens
-	}
-	if chunk.Usage.PromptCacheMissTok != nil {
-		s.hasCacheMiss = true
-		s.cacheMiss = *chunk.Usage.PromptCacheMissTok
-	}
-}
-
 // CacheTokens 返回末帧 usage 的缓存命中 / 未命中 token 数。miss 缺失时按
 // prompt - hit 推导；hit 与 miss 均不可得时 ok=false（不参与命中率统计）。
 func (s *chatStatsReader) CacheTokens() (hit, miss int64, ok bool) {
@@ -225,41 +195,21 @@ func (s *chatStatsReader) CacheTokens() (hit, miss int64, ok bool) {
 	return hit, miss, true
 }
 
-// SawErrorFrame 报告流中是否透传过 SSE error 帧。
-func (s *chatStatsReader) SawErrorFrame() bool { return s.errorFrame }
-
-// Read 返回原始数据，同时解析统计 TTFB/token。
-func (s *chatStatsReader) Read(p []byte) (int, error) {
-	if len(s.pend) > 0 {
-		n := copy(p, s.pend)
-		s.pend = s.pend[n:]
-		return n, nil
-	}
-	line, err := s.br.ReadString('\n')
-	if line != "" {
-		s.parseSSELine(line)
-		s.pend = []byte(line)
-		n := copy(p, s.pend)
-		s.pend = s.pend[n:]
-		return n, nil
-	}
-	return 0, err
-}
-
 // rewriteModel 把 outbound chat body 的 model 字段替换为 bare（保留其余字段原样）。
 // 仅当 bare != 原 model 时由 chatCompletions 调用；body 不可解析时原样返回（不二次错误化）。
 func rewriteModel(body []byte, bare string) []byte {
 	if len(body) == 0 || bare == "" {
 		return body
 	}
-	var obj map[string]any
-	if err := json.Unmarshal(body, &obj); err != nil {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(body, &obj); err != nil || obj == nil {
 		return body
 	}
-	if cur, ok := obj["model"].(string); !ok || cur == bare {
+	var cur string
+	if json.Unmarshal(obj["model"], &cur) != nil || cur == bare {
 		return body
 	}
-	obj["model"] = bare
+	obj["model"], _ = json.Marshal(bare)
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return body
@@ -324,11 +274,19 @@ func completionTokens(resp map[string]any) int {
 	if !ok {
 		return -1
 	}
-	v, ok := u["completion_tokens"].(float64)
+	v, ok := u["completion_tokens"].(json.Number)
+	if ok {
+		n, err := v.Int64()
+		if err == nil {
+			return int(n)
+		}
+		return -1
+	}
+	f, ok := u["completion_tokens"].(float64)
 	if !ok {
 		return -1
 	}
-	return int(v)
+	return int(f)
 }
 
 // uidPrefix 只显示 uid 前 8 位；空 uid 显示 "-"。

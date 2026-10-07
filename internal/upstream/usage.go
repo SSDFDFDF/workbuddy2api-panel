@@ -61,6 +61,9 @@ func bestUsageCacheHitTokens(usage map[string]any) (float64, bool) {
 
 func positiveUsageNumber(value any) (float64, bool) {
 	switch n := value.(type) {
+	case json.Number:
+		value, err := n.Float64()
+		return value, err == nil && value > 0
 	case float64:
 		return n, n > 0
 	case float32:
