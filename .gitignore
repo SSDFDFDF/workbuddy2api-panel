@@ -31,11 +31,6 @@ PLAN.md
 SPEC.md
 docs/
 
-# 设计/计划文档（但 README.md 必须进版本库）
-*.md
-!README.md
-!FORK_CHANGES.md
-
 # Windows binaries
 /wb2api.exe
 /login.exe
