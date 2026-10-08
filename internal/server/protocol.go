@@ -95,9 +95,13 @@ func (o inferenceOutput) Stream(w http.ResponseWriter, r io.Reader, hint func(st
 	return protocol.Stream(w, r, o.request, hint, opts...)
 }
 
-func (o inferenceOutput) Aggregate(r io.Reader, opts ...upstream.StreamOption) (map[string]any, error) {
+func (o inferenceOutput) Aggregate(r io.Reader, opts ...upstream.StreamOption) (*protocol.Completion, error) {
 	if o.kind == protocol.Chat {
-		return upstream.Aggregate(r, opts...)
+		raw, err := upstream.Aggregate(r, opts...)
+		if err != nil {
+			return nil, err
+		}
+		return &protocol.Completion{Raw: raw}, nil
 	}
 	return protocol.Aggregate(r, o.request, opts...)
 }

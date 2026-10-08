@@ -114,6 +114,44 @@ for typ in ("input_text", "output_text"):
         list(s)
         assert s.get_final_response().output_text == "你好"
 
+# Partial tools are diagnostic data only: no call/arguments lifecycle events.
+# An event-driven tool runner must never be invited to execute them.
+for model, reason in (("partial-tool", "max_output_tokens"), ("filtered-tool", "content_filter")):
+    params = dict(model="cn:" + model, store=False, input=initial, tools=otools)
+    results = [o.responses.create(**params)]
+    with o.responses.stream(**params) as s:
+        streamed = list(s)
+        assert not any(e.type.startswith("response.function_call") for e in streamed)
+        assert not any(e.type == "response.completed" for e in streamed)
+        assert not any(getattr(getattr(e, "item", None), "type", None) == "function_call" for e in streamed)
+        results.append(next(e.response for e in streamed if e.type == "response.incomplete"))
+    for result in results:
+        check_usage(result)
+        assert result.status == "incomplete"
+        assert result.incomplete_details.reason == reason
+        call = result.output[1]
+        assert call.type == "function_call" and call.status == "incomplete"
+        assert call.call_id == "cut" and call.name == "lookup" and call.arguments == '{"n":'
+    # Anthropic cannot represent this as a finished tool input object.
+    try:
+        a.messages.create(model="cn:" + model, max_tokens=100, messages=initial, tools=atools)
+    except anthropic.APIStatusError as e:
+        assert e.status_code == 502
+    else:
+        raise AssertionError("Anthropic accepted partial tool input")
+    try:
+        with a.messages.stream(model="cn:" + model, max_tokens=100, messages=initial, tools=atools) as s:
+            list(s)
+    except anthropic.APIError:
+        pass
+    else:
+        raise AssertionError("Anthropic streamed partial tool input")
+
+with o.responses.stream(model="cn:bad-tool", store=False, input=initial, tools=otools) as s:
+    streamed = list(s)
+    assert any(e.type == "response.failed" for e in streamed)
+    assert not any(e.type in ("response.incomplete", "response.completed") for e in streamed)
+
 with o.responses.stream(model="cn:truncated", store=False, input="hi") as s:
     events = list(s)
     assert any(e.type == "response.failed" for e in events)
@@ -139,4 +177,4 @@ for client, params in (
 
 o.close()
 a.close()
-print(f"SDK smoke passed: openai {openai.__version__}, anthropic {anthropic.__version__}; text/history/tools/name-dialects/two-turn/length/truncation/usage")
+print(f"SDK smoke passed: openai {openai.__version__}, anthropic {anthropic.__version__}; text/history/tools/name-dialects/two-turn/length/partial-tools/truncation/usage")

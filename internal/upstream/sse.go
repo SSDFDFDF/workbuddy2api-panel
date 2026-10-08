@@ -413,21 +413,33 @@ func (s *completionState) add(obj map[string]any) error {
 			if err := c.validateTools(); err != nil {
 				return err
 			}
+		} else if c.declaredToolNames != nil && (c.finish == "length" || c.finish == "content_filter") {
+			// Resolve only observed complete names for translating consumers.
+			// The protocol layer decides whether partial arguments can be represented.
+			if err := c.resolveToolNames(); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
+func (c *choiceState) resolveToolNames() error {
+	for index, state := range c.toolNames {
+		name, err := state.name()
+		if err != nil {
+			return err
+		}
+		c.tools[index]["function"].(map[string]any)["name"] = name
+	}
+	return nil
+}
 func (c *choiceState) validateTools() error {
+	if err := c.resolveToolNames(); err != nil {
+		return err
+	}
 	calls := []any{}
 	if len(c.tools) > 0 {
-		for index, t := range c.tools {
-			if state := c.toolNames[index]; state != nil {
-				name, err := state.name()
-				if err != nil {
-					return err
-				}
-				t["function"].(map[string]any)["name"] = name
-			}
+		for _, t := range c.tools {
 			calls = append(calls, t)
 		}
 	} else {

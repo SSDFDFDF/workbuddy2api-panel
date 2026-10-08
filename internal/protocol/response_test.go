@@ -72,7 +72,7 @@ func TestTextAndToolStreams(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				formatted, err := Format(r, resp)
+				formatted, err := resp.Format(r)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -204,7 +204,7 @@ func stripIDs(v any) {
 func TestStreamFailuresAndIncomplete(t *testing.T) {
 	prefix := `data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}` + "\n\n"
 	for _, kind := range []Kind{Responses, Anthropic} {
-		for _, raw := range []string{"", "data: [DONE]\n\n", prefix, prefix + "data: not-json\n\n", prefix + `data: {"error":{"code":6004,"message":"rate limited"}}` + "\n\n", `data: {"choices":[{"index":0,"delta":{"reasoning_content":"secret"},"finish_reason":"stop"}]}` + "\n\n", strings.Replace(toolsStream, `"finish_reason":"tool_calls"`, `"finish_reason":"length"`, 1)} {
+		for _, raw := range []string{"", "data: [DONE]\n\n", prefix, prefix + "data: not-json\n\n", prefix + `data: {"error":{"code":6004,"message":"rate limited"}}` + "\n\n", `data: {"choices":[{"index":0,"delta":{"reasoning_content":"secret"},"finish_reason":"stop"}]}` + "\n\n", strings.Replace(strings.Replace(toolsStream, `"finish_reason":"tool_calls"`, `"finish_reason":"length"`, 1), `"name":"other"`, `"name":"unknown"`, 1)} {
 			rec := httptest.NewRecorder()
 			if err := Stream(rec, strings.NewReader(raw), testRequest(t, kind), nil); err == nil {
 				t.Fatalf("accepted invalid stream %s", raw)
@@ -257,10 +257,10 @@ func TestJSONSnapshotAndMissingUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Format(testRequest(t, Anthropic), resp); err == nil {
+	if _, err := resp.Format(testRequest(t, Anthropic)); err == nil {
 		t.Fatal("fabricated Anthropic usage")
 	}
-	out, err := Format(testRequest(t, Responses), resp)
+	out, err := resp.Format(testRequest(t, Responses))
 	if err != nil || out["usage"] != nil {
 		t.Fatal(out, err)
 	}
@@ -295,7 +295,7 @@ func TestOwnOutputCanBeReplayed(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		out, err := Format(r, resp)
+		out, err := resp.Format(r)
 		if err != nil {
 			t.Fatal(err)
 		}

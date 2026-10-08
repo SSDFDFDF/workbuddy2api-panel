@@ -12,12 +12,12 @@ import (
 )
 
 // Stream relays text immediately but buffers tools until the native completion
-// predicate and the destination schema both validate. Tool names can arrive in
-// fragments, and emitting an executable call before validation is unsafe.
+// predicate and destination schema validate. Incomplete tools appear only in
+// response.incomplete, never in tool lifecycle events that eager clients execute.
 func Stream(w http.ResponseWriter, r io.Reader, req *Request, hint func(string) string, opts ...upstream.StreamOption) error {
 	b := newBuilder(req)
 	started, textStarted := false, false
-	order := &outputOrder{}
+	textIndex := -1
 	sequence := 0
 	emit := func(name string, data map[string]any) error {
 		data["type"] = name
@@ -52,63 +52,42 @@ func Stream(w http.ResponseWriter, r io.Reader, req *Request, hint func(string) 
 			}
 			return emit("response.in_progress", map[string]any{"response": b.responseEnvelope("in_progress", []any{}, nil)})
 		}
-		// Zeroes here are provisional stream counters, never final accounting.
-		// The real input/output counters are required and replace them at the end.
+		// Provisional counters, replaced by observed final input/output usage.
 		return emit("message_start", map[string]any{"message": map[string]any{"id": b.id, "type": "message", "role": "assistant", "model": req.Chat.Model,
 			"content": []any{}, "stop_reason": nil, "stop_sequence": nil, "usage": map[string]any{"input_tokens": 0, "output_tokens": 0}}})
 	}
-	startText := func() error {
+	startText := func(index int) error {
 		if textStarted {
+			if textIndex != index {
+				return fmt.Errorf("multiple streaming text blocks are not enabled")
+			}
 			return nil
 		}
-		textStarted = true
+		textStarted, textIndex = true, index
 		if err := start(); err != nil {
 			return err
 		}
 		if req.Kind == Anthropic {
-			return emit("content_block_start", map[string]any{"index": 0, "content_block": map[string]any{"type": "text", "text": ""}})
+			return emit("content_block_start", map[string]any{"index": index, "content_block": map[string]any{"type": "text", "text": ""}})
 		}
-		if err := emit("response.output_item.added", map[string]any{"output_index": 0, "item": map[string]any{"id": b.messageID, "type": "message", "role": "assistant", "status": "in_progress", "content": []any{}}}); err != nil {
+		if err := emit("response.output_item.added", map[string]any{"output_index": index, "item": map[string]any{"id": b.messageID, "type": "message", "role": "assistant", "status": "in_progress", "content": []any{}}}); err != nil {
 			return err
 		}
-		return emit("response.content_part.added", map[string]any{"item_id": b.messageID, "output_index": 0, "content_index": 0,
+		return emit("response.content_part.added", map[string]any{"item_id": b.messageID, "output_index": index, "content_index": 0,
 			"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}, "logprobs": []any{}}})
 	}
-	opts = completionOptions(req, opts)
-	resp, err := upstream.ConsumeCompletion(r, func(chunk map[string]any) error {
-		if err := order.observe(chunk); err != nil {
+	resp, err := collect(r, req, func(index int, text string) error {
+		if err := startText(index); err != nil {
 			return err
 		}
-		choices, _ := chunk["choices"].([]any)
-		for _, v := range choices {
-			ch := v.(map[string]any)
-			m, _ := ch["delta"].(map[string]any)
-			if m == nil {
-				m, _ = ch["message"].(map[string]any)
-			}
-			if v := m["content"]; v != nil {
-				text := v.(string)
-				if text != "" {
-					if err := startText(); err != nil {
-						return err
-					}
-					if req.Kind == Anthropic {
-						if err := emit("content_block_delta", map[string]any{"index": 0, "delta": map[string]any{"type": "text_delta", "text": text}}); err != nil {
-							return err
-						}
-					} else {
-						if err := emit("response.output_text.delta", map[string]any{"item_id": b.messageID, "output_index": 0, "content_index": 0, "delta": text, "logprobs": []any{}}); err != nil {
-							return err
-						}
-					}
-				}
-			}
+		if req.Kind == Anthropic {
+			return emit("content_block_delta", map[string]any{"index": index, "delta": map[string]any{"type": "text_delta", "text": text}})
 		}
-		return nil
+		return emit("response.output_text.delta", map[string]any{"item_id": b.messageID, "output_index": index, "content_index": 0, "delta": text, "logprobs": []any{}})
 	}, opts...)
 	var result map[string]any
 	if err == nil {
-		result, err = b.format(resp)
+		result, err = b.formatCompletion(resp)
 	}
 	if err != nil {
 		var we *upstream.DownstreamWriteError
@@ -144,11 +123,10 @@ func Stream(w http.ResponseWriter, r io.Reader, req *Request, hint func(string) 
 	if req.Kind == Anthropic {
 		key = "content"
 	}
-	items := result[key].([]any)
-	for i, v := range items {
+	for i, v := range result[key].([]any) {
 		item := v.(map[string]any)
 		if item["type"] == "text" || item["type"] == "message" {
-			if err := startText(); err != nil {
+			if err := startText(i); err != nil {
 				return err
 			}
 			if req.Kind == Anthropic {
@@ -167,6 +145,10 @@ func Stream(w http.ResponseWriter, r io.Reader, req *Request, hint func(string) 
 					return err
 				}
 			}
+			continue
+		}
+		// Never signal that partial arguments/calls are ready for execution.
+		if req.Kind == Responses && item["status"] == "incomplete" {
 			continue
 		}
 		if req.Kind == Anthropic {

@@ -243,8 +243,10 @@ Anthropic SDK 的 `base_url` 为 `http://localhost:7863`，使用 `client.messag
 **流式与用量边界**
 
 - 文本实时输出；工具按独立 index 聚合，支持名称晚到、重复完整名、累计前缀、名称分片和空 identity 续传。名称必须唯一匹配本次声明的工具，缺名、未声明或多种解释同时成立时失败，不按“只有一个工具”猜测补名。完整完成并验证 JSON 后才发送工具事件，避免客户端执行半截调用；非空 ID 冲突、畸形工具或无法无损表达的响应明确失败，不丢坏工具后报成功。此名称兼容只用于新协议，原生 Chat 仍保留字面增量行为。
-- 空流、错误帧、缺失 finish 的 EOF 不伪装成功，不触发生成重放；开流前返回 HTTP 错误，开流后为 `response.failed` / Anthropic `error`。
-- 文本 `length` 对应 `response.incomplete` / `stop_reason:max_tokens`。OpenAI SDK `3.26.0` 的 `get_final_response()` 只处理 completed；截断须读取 incomplete 事件的 response，不能依赖该 helper。工具被截断则失败，不补 `{}`。
+- 流式与非流式共享协议层块计划，原始上游响应单独用于记账；正文与参数不因块计划再复制。当前仍只开放“文本在前、工具在后”，工具后的文本及混合 snapshot/delta 明确失败，不能把输出保序误当成历史可无损回放。
+- 空流、错误帧、缺失 finish 的 EOF 不伪装成功，也不猜成 `length`，不触发生成重放；开流前返回 HTTP 错误，开流后为 `response.failed` / Anthropic `error`。
+- 文本 `length` 对应 `response.incomplete` / `stop_reason:max_tokens`。OpenAI SDK `3.26.0` 的 `get_final_response()` 只处理 completed；截断须读取 incomplete 事件的 response，不能依赖该 helper。
+- Responses 对**明确 `length` / `content_filter`** 且身份、声明名称完整的工具，保留原始参数字符串并标记 `status:incomplete`；参数须为完整对象或合法未完成对象前缀，缺参、错误语法、重复键、歧义/缺失名称仍失败。SSE 中这些调用**只出现在最终 `response.incomplete.response.output`**，不发工具 added/delta/done 事件；所有调用均不可执行，也不可作为 completed 历史回传。即使某个参数对象已完整，也不能把截断回合的工具升级成 completed。Anthropic 截断工具仍失败，不补 `{}`。
 - 内部按原始上游 usage 记账。缓存别名不相加，cache miss 不作 cache write；Anthropic 输入扣除已观测缓存读写，SSE 初始 0 为临时计数，最终 `message_delta.usage` 覆盖。旧客户端是否支持最终输入计数更新需单独验证。
 - Responses 缺失 usage 时返回 null；Anthropic 缺必要计数则失败，不估算 token。Responses 的 `usage.input_tokens_details.cache_write_tokens` 是保留已观测缓存写入的**网关扩展**，不是官方标准字段。
 
@@ -255,6 +257,13 @@ Anthropic SDK 的 `base_url` 为 `http://localhost:7863`，使用 `client.messag
 uv run --no-project --with openai==3.26.0 --with anthropic==1.12.1 python -c \
   'import os,sys,subprocess; os.environ["WB2A_SDK_PYTHON"]=sys.executable; sys.exit(subprocess.call(["go","test","./internal/server","-run","^TestProtocolSDKSmoke$","-v","-count=1"]))'
 ```
+
+**网关提示词与 Codex / Claude Code 工具约定**
+
+- 三个入口共用提示词组合；Responses `instructions`、Anthropic `system` 转成 Chat system 后同样受 `prompt.mode` 控制。推荐默认 `none`，需通用提示时选 `after` / `append` 保留客户端规则。
+- `replace` 删除所有 system/developer（包括中途消息），不区分身份模板、项目规范、权限或工具使用约定。它不修改 `tools` 的 schema/描述、工具选择、已转换的历史参数和工具结果，但**可能影响模型新生成的参数与调用行为**；通用预设不等价于 Codex 内置规范。user 中的项目规则保留。
+- `fingerprint_rewrite` 是独立的有损改写层，默认 false；开启后可能直接改变出站历史 `tool_calls[].function.arguments`、工具结果和消息正文，不只是 system 模板。例如历史参数中的 `11128` 会变成 `11-128`。要求代码、命令、补丁逐字保真时不要开启。
+- `after` / `append` 保留模板，不保证绕过上游内容拦截，也不保证冲突提示的模型执行优先级。提示词模式没有在本轮自动调整。
 
 实现挂载点与开源模型补丁取舍见 [FORK_CHANGES.md](FORK_CHANGES.md)。
 

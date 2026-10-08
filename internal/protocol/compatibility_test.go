@@ -20,7 +20,7 @@ func TestEmptyToolIdentityContinuations(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, kind := range []Kind{Responses, Anthropic} {
-		out, err := Format(testRequest(t, kind), resp)
+		out, err := resp.Format(testRequest(t, kind))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -136,6 +136,8 @@ func FuzzResponsePipeline(f *testing.F) {
 	f.Add(textStream)
 	f.Add(toolsStream)
 	f.Add(emptyIdentityStream)
+	f.Add(partialToolStream(`{"n":`, "length"))
+	f.Add(partialToolStream(`{"x":]`, "content_filter"))
 	f.Fuzz(func(t *testing.T, raw string) {
 		if len(raw) > 1<<16 {
 			t.Skip()
@@ -145,7 +147,7 @@ func FuzzResponsePipeline(f *testing.F) {
 			req := testRequest(t, kind)
 			err := aggregateErr
 			if err == nil {
-				_, err = Format(req, completion)
+				_, err = completion.Format(req)
 			}
 			streamErr := Stream(httptest.NewRecorder(), strings.NewReader(raw), req, nil)
 			if (err == nil) != (streamErr == nil) {
@@ -201,10 +203,10 @@ func TestInvalidToolsAreNotDroppedOrInvented(t *testing.T) {
 		}
 	}
 	resp, _ := Aggregate(strings.NewReader(toolsStream), testRequest(t, Responses))
-	calls := resp["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)["tool_calls"].([]any)
+	calls := resp.Raw["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)["tool_calls"].([]any)
 	calls[0].(map[string]any)["type"] = "custom"
 	for _, kind := range []Kind{Responses, Anthropic} {
-		if _, err := Format(testRequest(t, kind), resp); err == nil {
+		if _, err := resp.Format(testRequest(t, kind)); err == nil {
 			t.Fatal("non-function tool converted")
 		}
 	}

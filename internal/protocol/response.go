@@ -252,6 +252,25 @@ func usageFor(kind Kind, raw any) (any, error) {
 }
 
 func (b *responseBuilder) format(resp map[string]any) (map[string]any, error) {
+	// Direct snapshot formatting has no stream chronology. Match the existing
+	// Chat snapshot contract: content first, then tool array order.
+	m, _, err := responseParts(resp)
+	if err != nil {
+		return nil, err
+	}
+	s := &outputState{}
+	if text, _ := m["content"].(string); text != "" {
+		s.blocks = append(s.blocks, blockRef{kind: textBlock})
+	}
+	c, err := s.complete(resp)
+	if err != nil {
+		return nil, err
+	}
+	return b.formatCompletion(c)
+}
+
+func (b *responseBuilder) formatCompletion(completion *Completion) (map[string]any, error) {
+	resp := completion.Raw
 	m, finish, err := responseParts(resp)
 	if err != nil {
 		return nil, err
@@ -269,31 +288,40 @@ func (b *responseBuilder) format(resp map[string]any) (map[string]any, error) {
 		}
 	}
 	calls, _ := m["tool_calls"].([]any)
-	if len(calls) > 0 && finish != "tool_calls" {
-		// Anthropic cannot encode unfinished JSON inputs. Responses could describe
-		// some partial calls, but this MVP rejects them rather than issuing tools.
+	incomplete := finish == "length" || finish == "content_filter"
+	if len(calls) > 0 && finish != "tool_calls" && !(b.req.Kind == Responses && incomplete) {
 		return nil, fmt.Errorf("unfinished or inconsistently terminated upstream tool calls")
+	}
+	if finish == "tool_calls" && len(calls) == 0 {
+		return nil, fmt.Errorf("tool_calls finish without calls")
+	}
+	if err := completion.validatePlan(text, len(calls)); err != nil {
+		return nil, err
 	}
 	output := []any{}
 	status := "completed"
-	if finish == "length" || finish == "content_filter" {
+	if incomplete {
 		status = "incomplete"
-	}
-	if text != "" || len(calls) == 0 {
-		if b.req.Kind == Responses {
-			output = append(output, map[string]any{"id": b.messageID, "type": "message", "role": "assistant", "status": status,
-				"content": []any{map[string]any{"type": "output_text", "text": text, "annotations": []any{}, "logprobs": []any{}}}})
-		} else {
-			output = append(output, map[string]any{"type": "text", "text": text})
-		}
 	}
 	ids := map[string]bool{}
 	declared := map[string]bool{}
 	for _, name := range declaredToolNames(b.req) {
 		declared[name] = true
 	}
-	for _, v := range calls {
-		call, ok := v.(map[string]any)
+	for _, block := range completion.blocks {
+		if block.kind == textBlock {
+			if b.req.Kind == Responses {
+				output = append(output, map[string]any{"id": b.messageID, "type": "message", "role": "assistant", "status": status,
+					"content": []any{map[string]any{"type": "output_text", "text": text, "annotations": []any{}, "logprobs": []any{}}}})
+			} else {
+				output = append(output, map[string]any{"type": "text", "text": text})
+			}
+			continue
+		}
+		if block.tool >= len(calls) {
+			return nil, fmt.Errorf("tool block no longer matches completion")
+		}
+		call, ok := calls[block.tool].(map[string]any)
 		if !ok {
 			return nil, fmt.Errorf("invalid upstream tool call")
 		}
@@ -306,7 +334,10 @@ func (b *responseBuilder) format(resp map[string]any) (map[string]any, error) {
 		}
 		id, _ := call["id"].(string)
 		name, _ := fn["name"].(string)
-		args, _ := fn["arguments"].(string)
+		args, hasArgs := fn["arguments"].(string)
+		if !hasArgs {
+			return nil, fmt.Errorf("missing upstream tool arguments")
+		}
 		if v := call["type"]; v != nil && v != "function" {
 			return nil, fmt.Errorf("unsupported upstream tool type")
 		}
@@ -317,12 +348,17 @@ func (b *responseBuilder) format(resp map[string]any) (map[string]any, error) {
 			return nil, fmt.Errorf("upstream tool name does not match declared tools")
 		}
 		ids[id] = true
-		input, err := jsondoc.Object([]byte(args))
+		var input map[string]any
+		if incomplete {
+			err = objectPrefix(args)
+		} else {
+			input, err = jsondoc.Object([]byte(args))
+		}
 		if err != nil {
-			return nil, fmt.Errorf("upstream tool input must be a JSON object")
+			return nil, fmt.Errorf("invalid upstream tool input: %w", err)
 		}
 		if b.req.Kind == Responses {
-			output = append(output, map[string]any{"type": "function_call", "id": newID("fc_"), "call_id": id, "name": name, "arguments": args, "status": "completed"})
+			output = append(output, map[string]any{"type": "function_call", "id": newID("fc_"), "call_id": id, "name": name, "arguments": args, "status": status})
 		} else {
 			output = append(output, map[string]any{"type": "tool_use", "id": id, "name": name, "input": input})
 		}

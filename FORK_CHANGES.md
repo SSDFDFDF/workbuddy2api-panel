@@ -89,6 +89,17 @@ git log --oneline <已同步基线>..upstream/main     # 列出待判定提交�
 长流正文与工具参数改用增量缓冲，保留快照冲突规则与原生流式已发送正文的释放行为。
 缓存计数桥接只映射已观测字段，不把 cache miss 当 cache write。
 
+协议 P0 优化：`protocol.Completion` 将原始记账数据与有序块引用分开，流式/非流式共用
+`collect` 与块格式化；不新增跨块正文/参数复制。保留工具后文本、混合快照的严格拒绝，
+暂不宣称支持有序块历史回放。Responses 在明确 length/content_filter 时允许身份完整的
+未完成工具作为诊断数据；只在最终 incomplete envelope 携带，不发工具生命周期事件。
+参数前缀验证不修复 JSON，错误语法/重复键/过深嵌套仍拒绝；无 finish 的 EOF 仍失败。
+Anthropic 不能表达半截 input 对象，继续拒绝截断工具。原生 Chat 完成语义不变。
+
+提示词默认不变（none + fingerprint_rewrite:false）。三协议端到端夹具锁定四种组合模式
+不改变工具声明、选择、历史参数、大整数和工具结果；replace 仍明确删除全部 system/developer。
+独立验证指纹开关开启后会改写历史参数及结果，不能把该行为误称为“提示词替换无损”。
+
 本阶段参考 CLIProxyAPI、llm-rosetta、cc-switch，独立实现而非直接移植源码：
 
 | 参考处理 | 取舍 |
@@ -96,6 +107,7 @@ git log --oneline <已同步基线>..upstream/main     # 列出待判定提交�
 | cc-switch：空工具 identity、晚到名称、并行分片，DeepSeek 缓存别名 | 借鉴无损数据形态处理与回归场景；不按模型名启用，原生 Chat 不变 |
 | llm-rosetta：MiniMax `reasoning_split` / `<think>` 拆解，DeepSeek / Moonshot 删除参数及 system 前移 | 不采用：WorkBuddy 未验证，自动删参数或重排消息会改变请求意图 |
 | cc-switch：Moonshot `$ref` 兄弟字段改为 `allOf` | 不采用：原补丁限定直连 Moonshot 的 Responses→Chat，不能套用到 WorkBuddy |
+| CLIProxyAPI / cc-switch：块状态、工具项 incomplete | 借鉴状态与终止分类；不补工具名、不修复 JSON、不在 EOF 上猜测 length；截断工具只在 Responses 终帧提供诊断信息 |
 | CLIProxyAPI / cc-switch：budget→effort、档位钳位；Kimi / DeepSeek 工具历史 reasoning 补全 | 不采用：不自动升降档、不补造推理；新协议暂不支持 thinking，原 Chat 保留已有字段 |
 
 厂商直连补丁不等于 WorkBuddy 能力；后续采用补丁须提供真实上游脱敏请求 / 原始帧依据与回归测试。

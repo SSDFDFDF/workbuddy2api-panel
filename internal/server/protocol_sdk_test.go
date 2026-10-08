@@ -84,6 +84,17 @@ func TestProtocolSDKSmoke(t *testing.T) {
 				`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"` + second + `","arguments":"9007199254740993}"}}]},"finish_reason":"tool_calls"}]}` + "\n\n"
 		}
 		body += usage
+		if model == "partial-tool" || model == "filtered-tool" || model == "bad-tool" {
+			finish, args := "length", `{"n":`
+			if model == "filtered-tool" {
+				finish = "content_filter"
+			}
+			if model == "bad-tool" {
+				args = `{"n":]`
+			}
+			body = fmt.Sprintf("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"checking\"}}]}\n\n"+
+				"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"cut\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":%q}}]},\"finish_reason\":%q}]}\n\n", args, finish) + usage
+		}
 		if model == "truncated" {
 			body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n"
 		}

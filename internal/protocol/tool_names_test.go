@@ -68,7 +68,7 @@ func TestToolNameDialects(t *testing.T) {
 				resp, err := Aggregate(strings.NewReader(raw), req)
 				var out map[string]any
 				if err == nil {
-					out, err = Format(req, resp)
+					out, err = resp.Format(req)
 				}
 				rec := httptest.NewRecorder()
 				se := Stream(rec, strings.NewReader(raw), req, nil)

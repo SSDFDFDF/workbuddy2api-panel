@@ -1115,11 +1115,11 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 		}
 		observed := &chatStatsReader{start: st.start}
 		timeouts := h.cfg.Upstream.StreamTimeouts
-		resp, err := out.Aggregate(rc, upstream.WithExpectedChoices(peek.N), upstream.WithFrameObserver(observed.Observe), upstream.WithResponseTimeouts(timeouts.FirstModelEvent, timeouts.FirstGeneration, timeouts.Tail))
+		completion, err := out.Aggregate(rc, upstream.WithExpectedChoices(peek.N), upstream.WithFrameObserver(observed.Observe), upstream.WithResponseTimeouts(timeouts.FirstModelEvent, timeouts.FirstGeneration, timeouts.Tail))
 		rc.Close()
 		var formatted map[string]any
 		if err == nil {
-			formatted, err = protocol.Format(request, resp)
+			formatted, err = completion.Format(request)
 		}
 		if err != nil {
 			credit, hasCredit := observed.Credit()
@@ -1137,6 +1137,7 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 			st.outcome = reqlog.OutcomeHTTPError
 			return
 		}
+		resp := completion.Raw
 		credit, total, hasCredit := usageCreditTotal(resp)
 		if usage, ok := resp["usage"].(map[string]any); ok {
 			if hit, okH := upstream.UsageCacheHitTokens(usage); okH {
