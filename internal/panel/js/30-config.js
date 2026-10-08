@@ -33,6 +33,10 @@ const CFG_MAP = {
   prompt_global_mode: ['prompt', 'profiles', 'global', 'mode'], prompt_global_preset: ['prompt', 'profiles', 'global', 'preset'],
   prompt_global_text: ['prompt', 'profiles', 'global', 'text'],
   fingerprint_rewrite: ['fingerprint_rewrite'],
+  // 多模态与图片策略（media.*）：三档工具图片处理 + 显式的转码/压缩开关。
+  media_tool_images: ['media', 'tool_images'],
+  media_image_transcode: ['media', 'image_transcode'],
+  media_image_max_dimension: ['media', 'image_max_dimension'],
   // 值不是纯路径：面板用「一行一条」文本编辑，由 parseRules/formatRules 编解码。
   fingerprint_rules_text: ['fingerprint_rules'],
   session_sticky_enabled: ['session_sticky', 'enabled'],
@@ -65,6 +69,14 @@ const MANUAL_CFG = new Set(['fingerprint_rules_text']);
 const CLEARABLE_CFG = new Set(['prompt_file', 'prompt_text', 'prompt_cn_text', 'prompt_global_text',
   'proxy_url', 'resin_url', 'resin_platform_name',
   'cn_client_version', 'cn_cli_version', 'global_client_version', 'global_cli_version']);
+
+/* 「下拉但值是数字」字段：Go 侧是 int（media.image_max_dimension）。
+ *
+ * 通用收集循环对 select 只取字符串，直接下发 "1080" 会让 Go 的 json 解码失败
+ * （不能把字符串解码进 int）。这里显式转 Number，与 <input type="number"> 同口径；
+ * 把非法值留给后端校验（错误信息里带允许取值），不在前端再列一份白名单。
+ */
+const NUMERIC_CFG = new Set(['media_image_max_dimension']);
 
 /* ---------- 自定义指纹规则：文本编解码 ----------
  *
@@ -250,6 +262,7 @@ function collectConfig() {
       const raw = el.value.trim();
       // 覆盖型字段空串照发（见 CLEARABLE_CFG）；其余空 = 不下发。
       if (raw === '') v = CLEARABLE_CFG.has(name) ? '' : undefined;
+      else if (NUMERIC_CFG.has(name)) v = Number(raw);
       else if (name.endsWith('_hours')) v = raw.split(/[,，\s]+/).filter(Boolean).map(Number);
       else v = raw;
     }

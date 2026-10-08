@@ -160,13 +160,10 @@ func responsesRequest(src map[string]any, tools *toolIndex) (map[string]any, err
 				if role != "user" && role != "assistant" && role != "system" && role != "developer" {
 					return nil, invalid(p+".role", "unsupported message role")
 				}
-				types := []string{"input_text"}
-				if role == "assistant" {
-					// EasyInputMessage permits assistant input_text; replayed
-					// ResponseOutputMessage uses output_text. Both are lossless.
-					types = append(types, "output_text")
-				}
-				content, err := textParts(m["content"], p+".content", types...)
+				// responsesContent 按 role 决定允许的 part 类型：assistant 只收文本
+				// （input_text / output_text，replayed ResponseOutputMessage 无损回放），
+				// user 额外收 input_image，system/developer 只收 input_text。
+				content, err := responsesContent(m["content"], p+".content", role)
 				if err != nil {
 					return nil, err
 				}
@@ -222,7 +219,7 @@ func responsesRequest(src map[string]any, tools *toolIndex) (map[string]any, err
 				if err != nil {
 					return nil, err
 				}
-				output, err := toolResultText(m["output"], p+".output", "input_text")
+				output, err := responsesToolOutput(m["output"], p+".output")
 				if err != nil {
 					return nil, err
 				}

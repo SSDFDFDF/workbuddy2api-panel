@@ -23,6 +23,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/media"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/protocol"
@@ -659,8 +660,10 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 		}
 	}
 
-	// 请求形态（image_url part）：在提示词策略与编码之前取（编码会重排字段）。
-	reqHasImage := hasImagePart(body)
+	// 请求形态（image_url part）：从已解析对象扫描（跨协议已转换为 Chat 形态）。
+	// 旧实现按原始 body 反序列化，同一请求里混有字符串 content 消息时会整体失败，
+	// 导致 gateway_hint 的「请求确实带图」判定漏判。
+	reqHasImage := media.HasImages(request.Chat.Object)
 
 	// 在途租约：成功选中即占名额；函数出口（含成功 return 与 panic）统一释放。
 	var heldUID string
@@ -1531,30 +1534,6 @@ func writeOpenAIErrorHint(w http.ResponseWriter, status int, code, msg, hint str
 			"gateway_hint": hint,
 		},
 	})
-}
-
-// hasImagePart 报告聊天请求体是否携带多模态 image_url part（OpenAI 兼容形态
-// messages[].content[] {type:"image_url"}）。畸形/其他形态一律 false（hint 侧
-// 宁缺勿滥：判不出带图就不给「模型不支持图片」指向）。
-func hasImagePart(body []byte) bool {
-	var peek struct {
-		Messages []struct {
-			Content []struct {
-				Type string `json:"type"`
-			} `json:"content"`
-		} `json:"messages"`
-	}
-	if json.Unmarshal(body, &peek) != nil {
-		return false
-	}
-	for _, m := range peek.Messages {
-		for _, p := range m.Content {
-			if p.Type == "image_url" {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // hintContext 组装 chatCompletions 的 gateway_hint 判定上下文：请求裸模型名 +

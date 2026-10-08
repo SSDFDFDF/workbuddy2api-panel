@@ -8,7 +8,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/media"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
 func TestDefault(t *testing.T) {
@@ -1113,6 +1118,7 @@ func TestPlainProxyEnv(t *testing.T) {
 func TestPruneUnknownKeysNestedValid(t *testing.T) {
 	raw := map[string]any{
 		"listen": ":1",
+		"media":  map[string]any{"tool_images": "hoist"},
 		"prompt": map[string]any{
 			"mode":   "after",
 			"preset": "minimal",
@@ -1145,6 +1151,11 @@ func TestPruneUnknownKeysNestedValid(t *testing.T) {
 		t.Fatalf("upstream profile pruned: %v", up)
 	}
 
+	// media.tool_images 是已知键（面板保存不能把它当未知键丢掋）。
+	if got := raw["media"].(map[string]any)["tool_images"]; got != "hoist" {
+		t.Fatalf("media.tool_images pruned: %v", got)
+	}
+
 	// 真正的未知键被删。
 	if _, ok := raw["features"]; ok {
 		t.Error("features (removed section) must be pruned")
@@ -1158,5 +1169,123 @@ func TestPruneUnknownKeysNestedValid(t *testing.T) {
 	want := []string{"bogus_top", "features", "upstream.profiles.cn.client_verison"}
 	if strings.Join(pruned, ",") != strings.Join(want, ",") {
 		t.Errorf("pruned=%v want %v", pruned, want)
+	}
+}
+
+// media.tool_images：默认 auto（按入口默认策略）；显式取值大小写/空白不敏感；
+// 非法值在装载阶段 fail fast（不留到请求时才报错）。
+func TestMediaToolImagesPolicy(t *testing.T) {
+	if c := Default(); c.Media.ToolImages != "auto" {
+		t.Fatalf("default tool_images=%q want auto", c.Media.ToolImages)
+	}
+	for _, tc := range []struct {
+		raw  string
+		want string
+	}{
+		{`{"media":{"tool_images":"hoist"}}`, "hoist"},
+		{`{"media":{"tool_images":" HoiSt "}}`, "hoist"},
+		{`{"media":{"tool_images":"passthrough"}}`, "passthrough"},
+		{`{"media":{"tool_images":"reject"}}`, "reject"},
+		{`{"media":{"tool_images":"auto"}}`, "auto"},
+		{`{"media":{"tool_images":""}}`, ""},
+	} {
+		c, err := ParseConfig([]byte(tc.raw))
+		if err != nil {
+			t.Fatalf("parse %s: %v", tc.raw, err)
+		}
+		if got := c.Media.ToolImages; got != tc.want {
+			t.Fatalf("%s → %q want %q", tc.raw, got, tc.want)
+		}
+	}
+	if _, err := ParseConfig([]byte(`{"media":{"tool_images":"hoist-all"}}`)); err == nil || !strings.Contains(err.Error(), "media.tool_images") {
+		t.Fatalf("invalid policy accepted: %v", err)
+	}
+}
+
+// media.image_transcode / media.image_max_dimension：默认全关；显式取值生效；
+// 非法档位在装载阶段 fail fast（不留到请求时才报错）。
+func TestMediaImagePolicy(t *testing.T) {
+	c := Default()
+	if c.Media.ImageTranscode || c.Media.ImageMaxDimension != 0 {
+		t.Fatalf("image policy must default to off: %+v", c.Media)
+	}
+	parsed, err := ParseConfig([]byte(`{"media":{"image_transcode":true,"image_max_dimension":1080}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !parsed.Media.ImageTranscode || parsed.Media.ImageMaxDimension != 1080 {
+		t.Fatalf("image policy not parsed: %+v", parsed.Media)
+	}
+	for _, raw := range []string{
+		`{"media":{"image_max_dimension":1234}}`,
+		`{"media":{"image_max_dimension":-1}}`,
+	} {
+		if _, err := ParseConfig([]byte(raw)); err == nil || !strings.Contains(err.Error(), "media.image_max_dimension") {
+			t.Fatalf("%s accepted: %v", raw, err)
+		}
+	}
+}
+
+// TestSaveConfigMediaPolicyRoundTrip 面板保存路径的类型往返：
+// 面板提交的是 JSON（select 是字符串、checkbox 是布尔、数字下拉经 Number 转换），
+// 后端走 merge → pruneUnknownKeys → ParseConfig → 热应用。这里用与前端 collectConfig
+// 相同形态的 payload（bool + number）钉住 media 段：
+//   - 三个键都不是未知键（不被剪掉）；
+//   - 数值档位落到 int 字段（不是字符串）；
+//   - 热应用后进程级策略真的生效。
+func TestSaveConfigMediaPolicyRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"listen":":1","media":{"tool_images":"auto"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prevTool := media.CurrentToolPolicy()
+	prevImage := media.CurrentImagePolicy()
+	t.Cleanup(func() {
+		_ = media.SetToolPolicy(prevTool)
+		_ = media.SetImagePolicy(prevImage)
+	})
+
+	payload := []byte(`{"listen":":1","media":{"tool_images":"hoist","image_transcode":true,"image_max_dimension":1080}}`)
+	if _, err := saveConfig(payload, path, livecfg.New(livecfg.Snapshot{}), pool.New(""), &upstream.Client{}, scheduler.New(scheduler.Config{})); err != nil {
+		t.Fatalf("saveConfig: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseConfig(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Media.ToolImages != "hoist" || !parsed.Media.ImageTranscode || parsed.Media.ImageMaxDimension != 1080 {
+		t.Fatalf("media policy not persisted: %+v", parsed.Media)
+	}
+	if got := media.CurrentToolPolicy(); got != media.ToolPolicyHoist {
+		t.Fatalf("tool policy not hot-applied: %q", got)
+	}
+	if got := media.CurrentImagePolicy(); !got.Transcode || got.MaxDimension != 1080 {
+		t.Fatalf("image policy not hot-applied: %+v", got)
+	}
+}
+
+// TestSaveConfigRejectsInvalidMediaPolicy 非法档位保存时报错且不改动热状态。
+func TestSaveConfigRejectsInvalidMediaPolicy(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"listen":":1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prevImage := media.CurrentImagePolicy()
+	t.Cleanup(func() { _ = media.SetImagePolicy(prevImage) })
+	if err := media.SetImagePolicy(media.ImagePolicy{MaxDimension: 2000}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := saveConfig([]byte(`{"listen":":1","media":{"image_max_dimension":4096}}`), path, livecfg.New(livecfg.Snapshot{}), pool.New(""), &upstream.Client{}, scheduler.New(scheduler.Config{}))
+	if err == nil || !strings.Contains(err.Error(), "media.image_max_dimension") {
+		t.Fatalf("invalid dimension accepted: %v", err)
+	}
+	if got := media.CurrentImagePolicy(); got.MaxDimension != 2000 {
+		t.Fatalf("rejected save must not change the live policy: %+v", got)
 	}
 }

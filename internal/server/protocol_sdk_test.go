@@ -18,6 +18,64 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
+// sdkImageDataURL 与 Python 端的 8 字节 PNG 头一致。
+const sdkImageDataURL = "data:image/png;base64,iVBORw0KGgo="
+
+// sdkImageRequest 校验官方 SDK 发出的图片请求在出站 chat 报文里的形态：
+// Responses input_image / Messages image block 都必须变成上游唯一接受的
+// image_url 对象形态，且文本/图片 part 顺序保持。
+func sdkImageRequest(obj map[string]any) error {
+	msgs, _ := obj["messages"].([]any)
+	if len(msgs) < 1 {
+		return fmt.Errorf("image request lost messages")
+	}
+	parts, ok := msgs[0].(map[string]any)["content"].([]any)
+	if !ok || len(parts) != 2 {
+		return fmt.Errorf("image parts lost: %#v", msgs[0])
+	}
+	imageURL, ok := parts[0].(map[string]any)["image_url"].(map[string]any)
+	if !ok || imageURL["url"] != sdkImageDataURL {
+		return fmt.Errorf("image not normalized to object form: %#v", parts[0])
+	}
+	if text, _ := parts[1].(map[string]any)["text"].(string); text != "看图" {
+		return fmt.Errorf("text part order changed: %#v", parts)
+	}
+	return nil
+}
+
+// sdkToolImageRequest 校验工具结果图片的默认抬升：tool 消息只留文本，图片出现在
+// 紧随整批工具结果之后的 user 消息里（而不是 tool 多模态形态）。
+func sdkToolImageRequest(obj map[string]any) error {
+	msgs, _ := obj["messages"].([]any)
+	if len(msgs) != 3 {
+		return fmt.Errorf("hoisted tool image layout: %#v", msgs)
+	}
+	tool, _ := msgs[1].(map[string]any)
+	if tool["role"] != "tool" {
+		return fmt.Errorf("tool message lost")
+	}
+	parts, _ := tool["content"].([]any)
+	if len(parts) != 1 || parts[0].(map[string]any)["text"] != "captured" {
+		return fmt.Errorf("tool content must keep text only: %#v", tool["content"])
+	}
+	hoisted, _ := msgs[2].(map[string]any)
+	if hoisted["role"] != "user" {
+		return fmt.Errorf("hoisted images must be a user message: %#v", hoisted)
+	}
+	attached, _ := hoisted["content"].([]any)
+	if len(attached) != 3 {
+		return fmt.Errorf("hoisted parts: %#v", attached)
+	}
+	if header, _ := attached[0].(map[string]any)["text"].(string); !strings.HasPrefix(header, "Attached image(s) from tool result") {
+		return fmt.Errorf("hoist header lost: %#v", attached[0])
+	}
+	imageURL, ok := attached[2].(map[string]any)["image_url"].(map[string]any)
+	if !ok || imageURL["url"] != sdkImageDataURL {
+		return fmt.Errorf("hoisted image lost: %#v", attached[2])
+	}
+	return nil
+}
+
 func sdkNamespaceNames(model string) []string {
 	if strings.Contains(model, "long") {
 		return []string{"nsh_a5a9H0ShJNLfYwTpuH8hgP5pqmDgXwoD0LZ95bRz2Uw", "nsh_xEZT841iGZKhpanpwRrIyzy4VhHHFvd7GKvmYwJaDgg"}
@@ -132,11 +190,23 @@ func TestProtocolSDKSmoke(t *testing.T) {
 				return nil, err
 			}
 		}
-		if results > 0 {
-			if results != 2 {
-				return nil, fmt.Errorf("missing parallel tool result")
+		switch model {
+		case "images":
+			if err := sdkImageRequest(obj); err != nil {
+				return nil, err
+			}
+		case "images-tool":
+			if err := sdkToolImageRequest(obj); err != nil {
+				return nil, err
 			}
 			text = "工具完成"
+		default:
+			if results > 0 {
+				if results != 2 {
+					return nil, fmt.Errorf("missing parallel tool result")
+				}
+				text = "工具完成"
+			}
 		}
 		if model == "length" {
 			finish = "length"

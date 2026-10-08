@@ -44,6 +44,11 @@
   "model_default_realm": "cn",
   "fingerprint_rewrite": false,
   "fingerprint_rules": [],
+  "media": {
+    "tool_images": "auto",
+    "image_transcode": false,
+    "image_max_dimension": 0
+  },
   "upstream": {
     "timeout_seconds": 120,
     "header_timeout_seconds": 120,

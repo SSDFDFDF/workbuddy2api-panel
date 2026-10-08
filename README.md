@@ -64,6 +64,9 @@ WorkBuddy2API 是一个自托管的 **OpenAI / Anthropic 协议桥接网关**，
 | ⏰ **定时任务** | 签到（09/21）+ 活跃上报（10）+ 小猫旅行（09/21）+ token 保活（22）+ 余额后台刷新，各自独立开关 |
 | ⚡ **流式 + 非流式** | 出站强制 `stream:true`；SSE 帧按规范重建；非流式由本地聚合为单响应 |
 | 🔌 **Responses / Messages** | 复用同一上游执行与记账路径，支持无状态文本及普通 function/client tools；Responses 要求 `store:false`、工具 `strict:false`，详见 [兼容边界](#protocol-compatibility) |
+| 🖼️ **图片输入** | 三入口用户图片统一支持（Chat `image_url` 字符串/对象、Responses `input_image`、Messages `image` base64）；出站归一为上游唯一接受的 data URL 对象形态，外链/超限/音视频 part 明确 400 |
+| 🧰 **工具结果图片** | `media.tool_images` 三档策略（auto/passthrough/hoist/reject）；桥接入口默认把工具图片抬升为工具批次后的 user 图片消息（官方 custom-model 插件同构），原生 Chat 默认不改写 |
+| 🪄 **图片转码/压缩** | 可选（默认全关）：`gif/bmp/tiff` → PNG 无损转码；1080 / 2000 两档等比缩放 + JPEG 质量阶梯（对齐官方客户端）。关闭时请求路径不解码图片 |
 | 💬 **系统提示词体系** | `none`/`replace`/`after`/`append` 四种组合位置；五种内置预设；按账号域（CN/Global）分别配置；面板可预览生效正文 |
 | 🗑️ **指纹改写层** | 可选：改写 user/assistant/tool 消息里的上游黑名单指纹串；支持自定义词/句规则（热生效） |
 | 🧬 **分域客户端特征** | 按「账号域 × 请求用途」生成版本、Origin、语言与 UA，不随代理域名漂移 |
@@ -238,7 +241,10 @@ Anthropic SDK 的 `base_url` 为 `http://localhost:7863`，使用 `client.messag
 - 支持文本、普通 function/client tools、流式与非流式、基础采样和工具选择；工具 schema 原样保留，不自动改写 `$ref`。
 - Responses 支持 `instructions`、message / function_call / function_call_output；assistant 文本历史可使用 `input_text` 或 `output_text`（非空 annotations 等信息仍拒绝）。上一轮 `response.output` 加入完整历史，结果用 `{"type":"function_call_output","call_id":"...","output":"结果"}` 回传；`output` 也支持 `input_text` 数组，保留分块、空文本和先后顺序，不拼接或改写；显式 `output:[]` 表示空结果，保持为 Chat `content:[]`，不等同于缺失 output 或 null（后二者仍拒绝）。关联键为 **call_id，不是 item id**。`metadata` 只在本次响应回显，不作为服务端会话。
 - Anthropic 支持顶层 system、text / tool_use / tool_result；回传上一轮 assistant content，再以 user 的 tool_result blocks 提供结果。`tool_use.input` 必须为对象；`tool_result.content:[]` 保留为空数组，省略 content 仍按该协议的空结果处理，显式 null 拒绝。assistant 文本须在工具前，user 的工具结果须在普通文本前；不重排历史、不补缺失或重复的工具结果。
-- 不支持服务端存储 / `previous_response_id` / `conversation` / 后台生成、图片 / 音视频 / 文件、原生 thinking、严格 Schema、托管工具、beta / cache_control、`count_tokens`。非空 `stop_sequences`、`tool_result.is_error:true` 等无法等价表达的输入明确拒绝，不静默降级。原生 Chat 的扩展字段保留策略不变。
+- 图片：三入口都支持 user 消息里的图片（原生 Chat `image_url` 字符串或对象形态、Responses `input_image`、Messages `image` base64 source），顺序与文本 part 一起保留。出站统一为上游唯一接受的 `{"type":"image_url","image_url":{"url":"data:…"}}`（`detail` 原样保留）。只接受内联 `data:image/*;base64` URL：单图解码 ≤5 MiB、单请求 ≤20 张且累计 ≤24 MiB；外链、`file_id`、音视频/文件 part、assistant 历史图片一律明确 400，不删图、不静默降级。**外链代抓有意不实现**（网关不是图片托管服务，代抓要引入 SSRF/隐私/尾延迟成本，且本项目客户端不产生该形态；详见 [FORK_CHANGES.md](FORK_CHANGES.md)）。
+- 工具结果图片由 `media.tool_images` 控制（默认 `auto`）：Responses `function_call_output.output` 里的 `input_image`、Messages `tool_result.content` 里的 `image`（仅 base64）以及原生 Chat tool 消息里的图片 part（含 `content` 为 JSON 字符串数组的官方客户端形态）都按同一策略处理。`auto` 下**桥接口默认抬升**（图片抽出、tool 内容保留其余 part 或占位 `(see attached image)`，在整批工具结果之后的 user 消息里附上图片并标注来源 `tool_call_id`），**原生 Chat 默认透传**（既有转发行为不变）；`hoist` / `passthrough` / `reject` 可全局覆盖。抬升是官方 `custom-model-tool-media-hoist` 插件同构的显式兼容变换，改变图片角色与上下文位置，不是无损编码。
+- 图片转码与压缩**默认全关**（关闭时只做形状与 5 MiB 硬限制校验，不解码像素）：`media.image_transcode` 把上游不支持的 `gif/bmp/tiff` 转成 PNG（GIF 只保留首帧）；`media.image_max_dimension` 取 `1080` / `2000` 时，超过档位边长或体积的图片会等比缩放 + JPEG 质量阶梯重编码（有损）。两者都是显式声明的兼容变换，与原生 Chat 的逐字透传契约不同；要求像素保真时保持关闭。
+- 不支持服务端存储 / `previous_response_id` / `conversation` / 后台生成、音视频 / 文件（含工具结果内文件）、原生 thinking、严格 Schema、托管工具、beta / cache_control、`count_tokens`。非空 `stop_sequences`、`tool_result.is_error:true` 等无法等价表达的输入明确拒绝，不静默降级。原生 Chat 的扩展字段保留策略不变。
 
 **Responses namespace 函数工具子集**
 
@@ -268,7 +274,7 @@ Anthropic SDK 的 `base_url` 为 `http://localhost:7863`，使用 `client.messag
 - 内部按原始上游 usage 记账。缓存别名不相加，cache miss 不作 cache write；Anthropic 输入扣除已观测缓存读写，SSE 初始 0 为临时计数，最终 `message_delta.usage` 覆盖。旧客户端是否支持最终输入计数更新需单独验证。
 - Responses 缺失 usage 时返回 null；Anthropic 缺必要计数则失败，不估算 token。Responses 的 `usage.input_tokens_details.cache_write_tokens` 是保留已观测缓存写入的**网关扩展**，不是官方标准字段。
 
-已通过本地假上游及官方 Python SDK（OpenAI `3.26.0` / Anthropic `1.12.1`）的文本、工具、namespace / 长别名 / 移除声明后的历史回传 / 空数组及文本数组结果、工具选择约束、两轮回传、流式、用量和截断测试；**尚未完成真实 WorkBuddy / Codex / Claude Code 端到端验收**。
+已通过本地假上游及官方 Python SDK（OpenAI `3.26.0` / Anthropic `1.12.1`）的文本、工具、namespace / 长别名 / 移除声明后的历史回传 / 空数组及文本数组结果、**图片（Responses `input_image` / Messages `image` base64 与工具结果图片的默认抬升）**、工具选择约束、两轮回传、流式、用量和截断测试；**尚未完成真实 WorkBuddy / Codex / Claude Code 端到端验收**。
 可选 SDK 测试只访问测试创建的 loopback 网关，不消耗账号额度；普通 `go test` 默认跳过，不安装 Python 依赖：
 
 ```bash
@@ -326,6 +332,9 @@ uv run --no-project --with openai==3.26.0 --with anthropic==1.12.1 python -c \
 | `prompt.profiles.<realm>` | `{}` | 按账号域（`cn` / `global`）覆盖 `mode`/`preset`/`file`/`text` |
 | `fingerprint_rewrite` | `false` | 出站指纹改写层：改写 user/assistant/tool 消息里的已知指纹串（内置 7 类 + 自定义规则）。**会改用户可见内容**，默认关闭；面板改即时生效 |
 | `fingerprint_rules` | `[]` | 自定义改写规则，在内置指纹之上叠加；每项 `{match, replace, mode, action}`（写法见 FORK_CHANGES.md §4.2） |
+| `media.tool_images` | `auto` | 工具结果图片策略：`auto` = 原生 Chat 透传 / 桥接口抬升；`passthrough` = 全部原样转发；`hoist` = 全部抽出为工具批次后的 user 图片消息（官方 custom-model 插件同构，改变图片角色与位置）；`reject` = 明确 400。热生效 |
+| `media.image_transcode` | `false` | 上游不支持的图片格式（gif/bmp/tiff）转 PNG；GIF 只保留首帧，转码后仍超 5 MiB 则明确报错。热生效 |
+| `media.image_max_dimension` | `0` | 图片压缩档位：`0` = 关闭；`1080`（base64 ≤500KB）/ `2000`（≤5MB）对齐官方客户端，超档位等比缩放 + JPEG 质量阶梯（**有损**）。热生效 |
 | `upstash.url` / `upstash.token` | 空 | 空 = 纯内存模式（Noop 降级，功能照常） |
 | `pool.max_in_flight` | `3` | 单账号最大在途请求数（`0` = 不限） |
 | `pool.max_in_flight_global` | `2` | global 域单账号在途上限（国际版 WAF 风控更紧，压低并发） |

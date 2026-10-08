@@ -137,7 +137,7 @@ func anthropicRequest(src map[string]any) (map[string]any, error) {
 		if !ok || len(blocks) == 0 {
 			return nil, invalid(p+".content", "string or non-empty content array required")
 		}
-		texts, calls := []any{}, []any{}
+		parts, calls := []any{}, []any{}
 		seenCall := false
 		for j, v := range blocks {
 			bp := fmt.Sprintf("%s.content[%d]", p, j)
@@ -147,17 +147,23 @@ func anthropicRequest(src map[string]any) (map[string]any, error) {
 			}
 			switch b["type"] {
 			case "text":
-				if err = fields(b, bp, "type text"); err != nil {
-					return nil, err
-				}
 				if seenCall {
 					return nil, invalid(bp, "text after tool_use cannot preserve block order in Chat")
 				}
-				s, err := stringValue(b["text"], bp+".text")
+				part, err := textPartFrom(b, bp, "text")
 				if err != nil {
 					return nil, err
 				}
-				texts = append(texts, map[string]any{"type": "text", "text": s})
+				parts = append(parts, part)
+			case "image":
+				if role != "user" {
+					return nil, invalid(bp, "image blocks are only supported in user messages")
+				}
+				part, err := anthropicImagePart(b, bp)
+				if err != nil {
+					return nil, err
+				}
+				parts = append(parts, part)
 			case "tool_use":
 				if role != "assistant" {
 					return nil, invalid(bp, "tool_use requires assistant role")
@@ -180,8 +186,8 @@ func anthropicRequest(src map[string]any) (map[string]any, error) {
 				calls = append(calls, call)
 				seenCall = true
 			case "tool_result":
-				if role != "user" || len(texts) != 0 {
-					return nil, invalid(bp, "tool_result must precede user text")
+				if role != "user" || len(parts) != 0 {
+					return nil, invalid(bp, "tool_result must precede user text and images")
 				}
 				if err = fields(b, bp, "type tool_use_id content is_error"); err != nil {
 					return nil, err
@@ -195,20 +201,20 @@ func anthropicRequest(src map[string]any) (map[string]any, error) {
 				}
 				content := any("")
 				if v, exists := b["content"]; exists {
-					content, err = toolResultText(v, bp+".content", "text")
+					content, err = anthropicToolResult(v, bp+".content")
 					if err != nil {
 						return nil, err
 					}
 				}
 				messages = append(messages, map[string]any{"role": "tool", "tool_call_id": id, "content": content})
 			default:
-				return nil, invalid(bp+".type", "only text, tool_use and successful text tool_result are supported")
+				return nil, invalid(bp+".type", "only text, image, tool_use and successful text/image tool_result are supported")
 			}
 		}
-		if len(texts) > 0 || len(calls) > 0 {
+		if len(parts) > 0 || len(calls) > 0 {
 			msg["content"] = nil
-			if len(texts) > 0 {
-				msg["content"] = texts
+			if len(parts) > 0 {
+				msg["content"] = parts
 			}
 			if len(calls) > 0 {
 				msg["tool_calls"] = calls

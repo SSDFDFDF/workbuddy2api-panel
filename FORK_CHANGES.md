@@ -144,6 +144,9 @@ content:[]。空数组保持原形，不作为 null、缺失结果或虚构文�
 | 转发契约 | **新增** `internal/forwarding/`、`internal/jsondoc/` |
 | 响应管线 | `internal/upstream/{sse,tool_names}.go`、`internal/upstream/idle.go` |
 | Responses / Messages | **新增** `internal/protocol/`、`internal/server/protocol.go`；`internal/server/{handler,logging}.go`；`upstream.ConsumeCompletion` 共享消费接口 |
+| 图片形状与校验 | **新增** `internal/media/`、`internal/protocol/content.go`；`internal/forwarding/request.go`（Parse 归一）、`internal/server/handler.go`（hasImage 判定） |
+| 工具结果图片策略 | **新增** `internal/media/{policy,hoist}.go`；`internal/protocol/request.go`（Decode 按入口策略）、`internal/server/protocol.go`（Mutated 重序列化）、`cmd/server/{config,main}.go` |
+| 图片转码/压缩 | **新增** `internal/media/image.go`（解码/缩放/JPEG 阶梯，依赖 `golang.org/x/image`）；`cmd/server/{config,main}.go`；面板表单项（`internal/panel/{index.html,js/30-config.js}`） |
 | 重试与账号策略 | `internal/server/handler.go`、`internal/upstream/client.go` |
 | 系统提示词 | **新增** `internal/prompt/`、`cmd/server/prompt_config.go`、`cmd/server/prompt_preview.go` |
 | 指纹改写 | **新增** `internal/scrub/` |
@@ -157,7 +160,9 @@ content:[]。空数组保持原形，不作为 null、缺失结果或虚构文�
 
 默认 chat 端点与 profile 头、`max_completion_tokens` 映射、`tool_choice` 的 none/required/具名、
 思考关闭编码与 effort 档位、`n>1`、logprobs、JSON Schema、图片、工具名增量方言。
-Responses / Messages 已覆盖本地假上游及官方 Python SDK 的文本 / 工具 / 两轮回传 / SSE，
+图片的 wire 形状、外链/超限拒绝、三入口转换与工具结果图片策略（auto/passthrough/hoist/reject）已实现并有单元/端到端（假上游）回归；`media.image_transcode` / `media.image_max_dimension` 的转码与压缩有单元/端到端回归（默认全关，关闭时不解码像素）。但**没有真实上游验收**（官方 COS 链接白名单、各模型 `supports_images`、真实图片理解、`hoist` 与转码后图片在上游的接受度、JPEG 重编码对识别准确率的影响均未实测）；文件/音视频仍未实现（明确 400）。
+**外链图片代抓有意不实现**（网关不是图片托管服务；代抓引入 SSRF/隐私/尾延迟成本，且本项目客户端不产生该形态）：外链请求明确 400 + 请客户端内联。若日后真遇官方自家 CDN 外链，正确修法是**白名单透传**（不下载）而非代抓。
+Responses / Messages 已覆盖本地假上游及官方 Python SDK 的文本 / 工具 / 图片（含工具结果图片默认抬升）/ 两轮回传 / SSE，
 仍未做真实 WorkBuddy 和完整 Codex / Claude Code 端到端验收；不能将协议测试视为模型能力证明。
 
 ## 7. 验证

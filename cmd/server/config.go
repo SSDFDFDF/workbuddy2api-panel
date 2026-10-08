@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/jsondoc"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/media"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/proxy"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/scrub"
@@ -54,6 +55,35 @@ type Config struct {
 		// PackageDetailLimit 积分构成页单账号默认展示的最近到期包数；<=0 回落 5。
 		PackageDetailLimit int `json:"package_detail_limit"`
 	} `json:"panel"`
+
+	Media struct {
+		// ToolImages 工具结果图片处理策略（internal/media）：
+		//   "" / "auto"    —— 按入口默认：原生 Chat 透传（不改既有转发行为），
+		//                     Responses / Messages 抬升为工具批次后的 user 图片消息；
+		//   "passthrough"  —— 全部入口原样转发 tool 消息里的图片 part；
+		//   "hoist"        —— 全部入口抽出图片，改为工具批次之后的 user 图片消息；
+		//   "reject"       —— 全部入口明确 400（不转发工具结果图片）。
+		//
+		// 抬升是官方 custom-model-tool-media-hoist 插件同构的显式兼容变换（改变图片的
+		// 角色与上下文位置，不是无损编码）；透传则把未验证的 tool 多模态形态交给上游
+		// 判定。改动**热生效**（进程级策略，无需重启）。
+		ToolImages string `json:"tool_images"`
+
+		// ImageTranscode 把上游不支持的图片格式（gif/bmp/tiff）转码为 PNG（无损；
+		// 若同时开启压缩档，转码结果可能进一步被重编码为更小的 JPEG）。
+		//
+		// GIF 只保留首帧（动画信息丢失，官方客户端转 PNG 同样如此）；Go 无 webp
+		// 编码器，webp 仅在开启压缩档时被重编码为 JPEG。默认 false。
+		// 改动**热生效**。
+		ImageTranscode bool `json:"image_transcode"`
+
+		// ImageMaxDimension 图片压缩档位：0 = 关闭（默认），1080 / 2000 为内置两档
+		// （对齐官方 CODEBUDDY_CODE_IMAGE_COMPRESSION_MAX_DIMENSION：1080 档 base64
+		// ≤512000 + JPEG 质量 [85,70,50,30]；2000 档 base64 ≤5 MiB + 质量
+		// [80,60,40,20]）。开启后超过档位边长或体积的图片会被等比缩放 + JPEG 重编码
+		// （有损）——这是显式声明的兼容变换，不是无损编码。改动**热生效**。
+		ImageMaxDimension int `json:"image_max_dimension"`
+	} `json:"media"`
 
 	Logging struct {
 		// RequestArchiveEnabled 请求元数据 JSONL 归档开关，缺省 true。
@@ -311,6 +341,10 @@ func Default() *Config {
 	c.Cooldown.SoftRateMax = "2h"
 	c.Server.ReadTimeout = "300s"
 	c.Panel.PackageDetailLimit = 5
+	// 工具结果图片策略默认 auto（原生 Chat 透传 / 桥接抬升）。显式写成 auto 而不是留
+	// 空串，是为了面板下拉有匹配项：空串在 <select> 里匹配不上任何 option，回显会是
+	// 空白（配置与表单显示漂移）。空串仍是合法别名（兼容手写配置）。
+	c.Media.ToolImages = "auto"
 	c.Logging.RequestArchiveEnabled = true
 	c.Logging.RequestRetentionDays = 7
 	c.Logging.RequestArchiveMaxMB = 100
@@ -762,6 +796,19 @@ func (c *Config) normalize() error {
 	}
 	c.ProxyClient = pc
 	if err := c.normalizeFingerprintRules(); err != nil {
+		return err
+	}
+	// 工具结果图片策略：空 = auto（按入口默认）。这里只校验；生效由 main 的热应用
+	// 路径统一 SetToolPolicy（校验失败时不能已经改掉进程级状态）。
+	c.Media.ToolImages = strings.ToLower(strings.TrimSpace(c.Media.ToolImages))
+	if err := media.ValidateToolPolicy(media.ToolPolicy(c.Media.ToolImages)); err != nil {
+		return err
+	}
+	// 图片像素处理策略（转码/压缩）：同样只校验，生效在 main 的热应用路径。
+	if err := media.ValidateImagePolicy(media.ImagePolicy{
+		Transcode:    c.Media.ImageTranscode,
+		MaxDimension: c.Media.ImageMaxDimension,
+	}); err != nil {
 		return err
 	}
 	return c.normalizePrompt()

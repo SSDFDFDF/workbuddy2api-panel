@@ -1369,3 +1369,71 @@ process.stdout.write(JSON.stringify({
 			strings.TrimSpace(string(out)), want)
 	}
 }
+
+// TestAppJSCollectMediaPolicy 钉住多模态与图片策略表单的收集类型：
+//   - media_tool_images 是字符串枚举（select）；
+//   - media_image_transcode 是布尔（checkbox）；
+//   - media_image_max_dimension 是**数字**（Go 侧 int）。select 的 value 天生是
+//     字符串，漏掉 Number 转换会让 config.json 写成 "1080"、Go 侧解码报类型错——
+//     这类漂移不会让 go 测试失败，只有人肉点保存才会发现。
+//
+// 同时把「控件类型 ↔ Go 字段类型」钉在 HTML 上：把布尔开关改成 select（值为
+// "true"/"false" 字符串）或把数字下拉改成普通文本，都会让上面的收集断言失去意义，
+// 所以直接从下发的页面里断言控件本身的形态。
+func TestAppJSCollectMediaPolicy(t *testing.T) {
+	html := string(indexHTML)
+	form := html[strings.Index(html, `<form id="cfgForm">`):]
+	form = form[:strings.Index(form, "</form>")]
+	if !regexp.MustCompile(`<input[^>]*type="checkbox"[^>]*name="media_image_transcode"`).MatchString(form) {
+		t.Fatal("media_image_transcode 必须是 checkbox（Go 侧 bool；select 会下发字符串）")
+	}
+	if !regexp.MustCompile(`<select[^>]*name="media_image_max_dimension"`).MatchString(form) {
+		t.Fatal("media_image_max_dimension 期望下拉（数值由 collectConfig 转 Number）")
+	}
+	if !regexp.MustCompile(`<select[^>]*name="media_tool_images"`).MatchString(form) {
+		t.Fatal("media_tool_images 期望下拉（字符串枚举）")
+	}
+
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; collect config test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('const CFG_MAP');
+const end = src.indexOf('/* Go 时长字段即时校验');
+if (start < 0 || end < 0 || end < start) throw new Error('collectConfig region not found');
+const cfgForm = { elements: {
+  media_tool_images: { type: 'select-one', value: 'hoist' },
+  media_image_transcode: { type: 'checkbox', checked: true },
+  media_image_max_dimension: { type: 'select-one', value: '1080' },
+}};
+const ctx = {
+  Date, Number, String, Math, Map, Array, Object, isNaN, URLSearchParams, Set,
+  document: { getElementById: () => cfgForm },
+  $: () => cfgForm,
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.collectConfig = collectConfig;', ctx);
+const out = ctx.collectConfig();
+const media = out.media || {};
+process.stdout.write(JSON.stringify([media.tool_images, media.image_transcode,
+  typeof media.image_max_dimension, media.image_max_dimension]));`
+	f, err := os.CreateTemp(t.TempDir(), "cfgmedia-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), panelJSFile(t)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("collectConfig node test failed: %v\n%s", err, out)
+	}
+	const want = `["hoist",true,"number",1080]`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("collectConfig media=%s want %s", strings.TrimSpace(string(out)), want)
+	}
+}

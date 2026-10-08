@@ -395,6 +395,13 @@
                   <span class="side-tab-sub">组合模式 · 预设 · 覆盖</span>
                 </div>
               </button>
+              <button type="button" class="side-tab" data-sec="sec-media" role="tab">
+                <svg class="side-tab-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="12" height="10" rx="2"/><circle cx="5.5" cy="6.5" r="1.2"/><path d="M3 12l3.5-3.5 3 3L12 9l2 2"/></svg>
+                <div class="side-tab-text">
+                  <span class="side-tab-name">多模态与图片</span>
+                  <span class="side-tab-sub">工具图片 · 转码 · 压缩</span>
+                </div>
+              </button>
               <button type="button" class="side-tab" data-sec="sec-fp-log" role="tab">
                 <svg class="side-tab-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 2.5a5.5 5.5 0 0 0-5.5 5.5c0 3 5.5 6 5.5 6s5.5-3 5.5-6a5.5 5.5 0 0 0-5.5-5.5z"/><circle cx="8" cy="8" r="1.5"/></svg>
                 <div class="side-tab-text">
@@ -823,7 +830,50 @@
           </div>
         </div>
 
-        <!-- 6. 指纹改写与日志 -->
+        <!-- 6. 多模态与图片 -->
+        <div class="box tab-panel-item" id="sec-media">
+          <header>
+            <h3>多模态与图片 <span class="hint">工具结果图片 · 格式转码 · 体积压缩</span></h3>
+            <span class="grow"></span>
+            <span class="badge b-live">即时生效</span>
+          </header>
+          <div class="pad">
+            <div class="sub-hd">工具结果图片</div>
+            <div class="grid2">
+              <label class="fld"><span class="lb">tool 消息图片处理</span>
+                <select name="media_tool_images">
+                  <option value="auto">auto — 原生 Chat 透传 / 跨协议抬升（默认）</option>
+                  <option value="passthrough">passthrough — 全部原样转发</option>
+                  <option value="hoist">hoist — 全部抬升为后续 user 图片消息</option>
+                  <option value="reject">reject — 明确 400</option>
+                </select>
+                <span class="hint">图片工具结果（截图 / 读图 / MCP 返回图）的上游写法。上游对 tool 多模态形态挑模型，
+                  <b>抬升</b>把图片抽到工具批次之后的 user 消息里（官方 custom-model 插件同构）——会改变图片角色与位置，
+                  不是无损转发。auto 下原生 Chat 保持透传（原有行为不变），跨协议入口默认抬升。</span></label>
+            </div>
+
+            <div class="sub-hd">图片转码与压缩（默认全关）</div>
+            <div class="switch"><span class="lb">格式转码（gif / bmp / tiff → PNG）</span>
+              <input type="checkbox" name="media_image_transcode" id="mediaTranscode"></div>
+            <div class="hint">上游只原生接受 jpeg / png / webp；其余格式原样透传会被拒。开启后网关解码重编码：
+              GIF <b>只保留首帧</b>，重编码后仍超 5 MiB 会明确报错（可配合下方压缩档）。关闭时不解码图片。</div>
+            <div class="grid2">
+              <label class="fld"><span class="lb">压缩档位</span>
+                <select name="media_image_max_dimension">
+                  <option value="0">关闭 — 不缩放不压缩（默认）</option>
+                  <option value="1080">1080 — 边长≤1080、base64≤500KB</option>
+                  <option value="2000">2000 — 边长≤2000、base64≤5MB</option>
+                </select>
+                <span class="hint">对齐官方客户端两档压缩。开启后超档位的图片会被等比缩放 + JPEG 质量阶梯重编码（<b>有损</b>），
+                  仅用于把大图送到上游；要求像素级保真时保持关闭。</span></label>
+            </div>
+            <div class="warnbox"><span class="ic">!</span>
+              <span>以上两项是<b>显式声明的兼容变换</b>：会改变出站图片字节（有损），与原生 Chat 的逐字透传契约不同。
+              默认全关时请求路径不解码图片，只做形状与 5 MiB 硬限制校验。</span></div>
+          </div>
+        </div>
+
+        <!-- 7. 指纹改写与日志 -->
         <div class="box tab-panel-item" id="sec-fp-log">
           <header>
             <h3>敏感指纹改写与日志记录 <span class="hint">对话正文指纹脱敏与访问来源记录</span></h3>

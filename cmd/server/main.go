@@ -20,6 +20,7 @@ import (
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/media"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/redisstore"
@@ -180,6 +181,16 @@ func main() {
 		log.Fatalf("fingerprint rules: %v", err)
 	}
 	up.Fingerprints.Store(scrubLayer)
+	// 工具结果图片策略（media.tool_images）：进程级原子快照，请求路径零锁读取。
+	// ParseConfig 已校验合法性，这里失败属装配期异常。
+	if err := media.SetToolPolicy(media.ToolPolicy(cfg.Media.ToolImages)); err != nil {
+		log.Fatalf("media.tool_images: %v", err)
+	}
+	// 图片转码/压缩策略（media.image_transcode / image_max_dimension）：默认全关，
+	// 关闭时请求路径不解码像素（只有形状/大小校验）。
+	if err := media.SetImagePolicy(media.ImagePolicy{Transcode: cfg.Media.ImageTranscode, MaxDimension: cfg.Media.ImageMaxDimension}); err != nil {
+		log.Fatalf("media image policy: %v", err)
+	}
 	up.DeviceToken = cfg.Upstream.DeviceToken
 	up.DeviceTokenFile = cfg.Upstream.DeviceTokenFile
 	up.PassthroughIP = cfg.Upstream.PassthroughIP
@@ -574,6 +585,13 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		return nil, err
 	}
 	up.Fingerprints.Store(newScrub)
+	// 工具结果图片策略热生效：进程级原子快照，无需重启（normalize 已校验取值）。
+	if err := media.SetToolPolicy(media.ToolPolicy(newCfg.Media.ToolImages)); err != nil {
+		return nil, err
+	}
+	if err := media.SetImagePolicy(media.ImagePolicy{Transcode: newCfg.Media.ImageTranscode, MaxDimension: newCfg.Media.ImageMaxDimension}); err != nil {
+		return nil, err
+	}
 	sch.SetExpiringSoonWindow(newCfg.ExpiringSoonDur)
 	sch.Reconfigure(
 		newCfg.Schedule.CheckinHours, newCfg.Schedule.TravelHours,

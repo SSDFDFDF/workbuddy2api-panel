@@ -11,6 +11,7 @@ import (
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/forwarding"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/jsondoc"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/media"
 )
 
 type Kind string
@@ -23,11 +24,14 @@ const (
 
 // Request keeps the wire request separate from protocol-only response metadata.
 // Source is owned by this request; it is never sent to WorkBuddy.
+// Mutated 标记 Decode 是否改写过 Chat.Object（工具结果图片抬升）：原生 Chat 的
+// 严格透传快路径（original body 原字节出站）只在未改写时可用。
 type Request struct {
-	Kind   Kind
-	Chat   *forwarding.Request
-	Source map[string]any
-	tools  *toolIndex
+	Kind    Kind
+	Chat    *forwarding.Request
+	Source  map[string]any
+	Mutated bool
+	tools   *toolIndex
 }
 
 func invalid(path, message string) error {
@@ -144,26 +148,11 @@ func textParts(v any, path string, allowedTypes ...string) (any, error) {
 		if !supported {
 			return nil, invalid(p+".type", "only "+strings.Join(allowedTypes, " or ")+" is supported")
 		}
-		allowed := "type text"
-		if typ == "output_text" {
-			allowed += " annotations logprobs"
-			for _, key := range []string{"annotations", "logprobs"} {
-				if v := m[key]; v != nil {
-					a, ok := v.([]any)
-					if !ok || len(a) != 0 {
-						return nil, invalid(p+"."+key, "only an empty array is supported")
-					}
-				}
-			}
-		}
-		if err = fields(m, p, allowed); err != nil {
-			return nil, err
-		}
-		s, err := stringValue(m["text"], p+".text")
+		part, err := textPartFrom(m, p, typ)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, map[string]any{"type": "text", "text": s})
+		out = append(out, part)
 	}
 	return out, nil
 }
@@ -171,10 +160,21 @@ func textParts(v any, path string, allowedTypes ...string) (any, error) {
 // Decode delegates native Chat unchanged. Cross-protocol requests use an explicit
 // allowlist, preserving numeric values and checking the resulting tool history
 // with the exact same validator as native Chat.
+//
+// 解码后按入口默认（或 media.tool_images 显式配置）执行工具结果图片策略：
+// passthrough 零改动，hoist 抽出图片并在工具批次后插入 user 图片消息（改写标记
+// 写入 Request.Mutated，供 encodedRequest 决定是否重新序列化），reject 明确 400。
 func Decode(kind Kind, raw []byte) (*Request, error) {
 	if kind == Chat {
 		chat, err := forwarding.Parse(raw)
-		return &Request{Kind: kind, Chat: chat}, err
+		if err != nil {
+			return nil, err
+		}
+		mutated, err := media.ApplyToolPolicy(chat.Object, media.ToolPolicyFor(false))
+		if err != nil {
+			return nil, mediaError(err)
+		}
+		return &Request{Kind: kind, Chat: chat, Mutated: mutated}, nil
 	}
 	src, err := jsondoc.Object(raw)
 	if err != nil {
@@ -207,7 +207,11 @@ func Decode(kind Kind, raw []byte) (*Request, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Request{Kind: kind, Chat: chat, Source: src, tools: tools}, nil
+	mutated, err := media.ApplyToolPolicy(chat.Object, media.ToolPolicyFor(true))
+	if err != nil {
+		return nil, mediaError(err)
+	}
+	return &Request{Kind: kind, Chat: chat, Source: src, Mutated: mutated, tools: tools}, nil
 }
 
 func function(name, description, schema any, path string) (map[string]any, error) {

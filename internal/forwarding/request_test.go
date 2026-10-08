@@ -76,6 +76,7 @@ func TestConversationSources(t *testing.T) {
 }
 func FuzzParse(f *testing.F) {
 	f.Add(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+	f.Add(`{"model":"m","messages":[{"role":"user","content":[{"type":"image_url","image_url":"data:image/png;base64,iVBORw0KGgo="}]}]}`)
 	f.Add(`null`)
 	f.Fuzz(func(t *testing.T, s string) {
 		if len(s) > 1<<20 {

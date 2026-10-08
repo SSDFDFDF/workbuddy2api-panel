@@ -3,6 +3,7 @@
 Run with openai==3.26.0 and anthropic==1.12.1 (not project runtime dependencies).
 Never point this script at real accounts: test-only model IDs and credentials.
 """
+import base64
 import json
 import sys
 
@@ -102,6 +103,60 @@ for stream in (False, True):
             assert final.content[0].text == "工具完成", final
         else:
             assert result.content[0].text == "你好", result
+
+# Image parts: the official SDK's field shapes must map onto the upstream's only
+# media form (object image_url with an inline data URL), and tool-result images
+# must be hoisted into a user message after the tool batch by default.
+png_b64 = base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()
+data_url = "data:image/png;base64," + png_b64
+image_input = [{"role": "user", "content": [
+    {"type": "input_image", "image_url": data_url},
+    {"type": "input_text", "text": "看图"},
+]}]
+for stream in (False, True):
+    params = dict(model="cn:images", store=False, input=image_input)
+    if stream:
+        with o.responses.stream(**params) as s:
+            list(s)
+            result = s.get_final_response()
+    else:
+        result = o.responses.create(**params)
+    check_usage(result)
+    assert result.output_text == "你好", result
+image_messages = [{"role": "user", "content": [
+    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": png_b64}},
+    {"type": "text", "text": "看图"},
+]}]
+for stream in (False, True):
+    params = dict(model="cn:images", max_tokens=100, messages=image_messages)
+    if stream:
+        with a.messages.stream(**params) as s:
+            list(s)
+            result = s.get_final_message()
+    else:
+        result = a.messages.create(**params)
+    check_usage(result, True)
+    assert result.content[0].text == "你好", result
+tool_image_messages = [
+    {"role": "assistant", "content": [
+        {"type": "tool_use", "id": "shot", "name": "shot", "input": {"n": 9007199254740993}},
+    ]},
+    {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "shot", "content": [
+            {"type": "text", "text": "captured"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": png_b64}},
+        ]},
+    ]},
+]
+for stream in (False, True):
+    params = dict(model="cn:images-tool", max_tokens=100, messages=tool_image_messages)
+    if stream:
+        with a.messages.stream(**params) as s:
+            list(s)
+            result = s.get_final_message()
+    else:
+        result = a.messages.create(**params)
+    assert result.content[0].text == "工具完成", result
 
 # Tool-choice constraints are part of the translated contract, not hints that
 # a completed upstream response may silently violate.
@@ -277,4 +332,4 @@ for client, params in (
 
 o.close()
 a.close()
-print(f"SDK smoke passed: openai {openai.__version__}, anthropic {anthropic.__version__}; text/history/tools/name-dialects/namespaces/compact-aliases/retired-history/empty-results/text-results/tool-choice/two-turn/length/partial-tools/truncation/usage")
+print(f"SDK smoke passed: openai {openai.__version__}, anthropic {anthropic.__version__}; text/history/tools/name-dialects/namespaces/compact-aliases/retired-history/empty-results/text-results/images/tool-image-hoist/tool-choice/two-turn/length/partial-tools/truncation/usage")

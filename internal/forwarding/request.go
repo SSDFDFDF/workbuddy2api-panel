@@ -3,11 +3,13 @@ package forwarding
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/jsondoc"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/media"
 )
 
 const MaxRequestBytes = 32 << 20
@@ -222,6 +224,16 @@ func Parse(raw []byte) (*Request, error) {
 	}
 	if len(pending) > 0 {
 		return nil, invalid("messages", "unresolved tool calls")
+	}
+	// 媒体形状归一与资源校验（internal/media）：字符串 image_url → 对象形态、
+	// 外链/非 data URL/超限图明确 400。这里同时覆盖原生 Chat 与跨协议桥接
+	// （跨协议先转成 Chat 形态再走本函数），上游 prepareBody 的二次 Parse 幂等。
+	if _, err := media.Normalize(obj); err != nil {
+		var me *media.Error
+		if errors.As(err, &me) {
+			return nil, &InvalidRequest{Param: me.Param, Message: me.Message}
+		}
+		return nil, invalid("messages", err.Error())
 	}
 	ids := []any{obj["conversation_id"], obj["conversationId"]}
 	if m, ok := obj["metadata"].(map[string]any); ok {
