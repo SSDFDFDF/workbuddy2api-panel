@@ -381,10 +381,17 @@ func main() {
 		GlobalEnabled: cfg.Global.Enabled,
 		// 裸名默认域解析器（cn/global/auto），与粘性闭包共用同一实例。
 		RealmResolver: realmResolver,
+		// 服务级入站准入（读取 + 解析 + 图片校验的并发/字节预算），见 server/ingress.go。
+		MaxInflightRequests: cfg.Server.MaxInflightRequests,
+		MaxInflightBytesMB:  cfg.Server.MaxInflightBytesMB,
+		IngressWait:         cfg.IngressWaitDur,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// 入站满载观测（仅在确实发生等待/拒绝时打印，常态零输出）。
+	stopIngressLog := h.StartIngressLog(30 * time.Second)
+	defer stopIngressLog()
 	go sch.Run(ctx)
 	sch.StartBalanceRefresh(ctx, cfg.BalanceRefreshInterval)
 
@@ -417,6 +424,13 @@ func main() {
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.ListenAndServe() }()
 
+	switch {
+	case cfg.Server.MaxInflightRequests > 0 || cfg.Server.MaxInflightBytesMB > 0:
+		log.Printf("入站准入：并发解析上限 %d 请求 / %d MiB（满载等待 %s，超时回 503 server_busy）",
+			cfg.Server.MaxInflightRequests, cfg.Server.MaxInflightBytesMB, cfg.IngressWaitDur)
+	default:
+		log.Printf("入站准入已关闭（server.max_inflight_requests / max_inflight_bytes_mb 均为 0）")
+	}
 	log.Printf("workbuddy2api listening on %s (api_key=%v)，管理面板 http://127.0.0.1%s/panel/", cfg.Listen, cfg.APIKey != "", panelListenPath(cfg.Listen))
 	select {
 	case err := <-serveErr:
@@ -680,6 +694,8 @@ func restartRequiredFields(c *Config) []string {
 	out = append(out, "session_sticky.ttl", "session_sticky.gc_interval")
 	out = append(out, "logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb")
 	out = append(out, "server.read_timeout")
+	// 入站准入三项在装配期构造 limiter（含上限与等待时长），改值需重启。
+	out = append(out, "server.max_inflight_requests", "server.max_inflight_bytes_mb", "server.ingress_wait")
 	out = append(out, "proxy_url")
 	out = append(out, "resin_url", "resin_platform_name", "resin_mode", "resin_auth_version")
 	// model_default_realm 在装配期构造 RealmResolver（handler + 粘性闭包共享），需重启。

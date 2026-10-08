@@ -4,6 +4,9 @@
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
   "server": {
+    "max_inflight_requests": 64,
+    "max_inflight_bytes_mb": 256,
+    "ingress_wait": "5s",
     "read_timeout": "300s"
   },
   "panel": {

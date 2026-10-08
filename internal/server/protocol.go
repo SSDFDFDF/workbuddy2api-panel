@@ -3,7 +3,6 @@ package server
 import (
 	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/json"
 	"io"
 	"net/http"
 
@@ -104,15 +103,4 @@ func (o inferenceOutput) Aggregate(r io.Reader, opts ...upstream.StreamOption) (
 		return &protocol.Completion{Raw: raw}, nil
 	}
 	return protocol.Aggregate(r, o.request, opts...)
-}
-
-func encodedRequest(req *protocol.Request, original []byte) ([]byte, error) {
-	// 原生 Chat 未改写时的严格透传快路径：原字节出站。改写过的对象（工具图片抬升）
-	// 与跨协议请求（Kind != Chat：内容已转换为 Chat 形态）都必须重新序列化。
-	// 注：出站前上游侧 prepareBody 仍会 Parse/Encode，所以字段顺序不在保证范围；
-	// 这里保的是“不需要改写时不额外重排”。
-	if req.Kind == protocol.Chat && !req.Mutated {
-		return original, nil
-	}
-	return json.Marshal(req.Chat.Object)
 }

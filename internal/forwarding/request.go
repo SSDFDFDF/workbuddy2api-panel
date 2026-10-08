@@ -330,18 +330,20 @@ func reasoning(obj map[string]any) error {
 	return nil
 }
 
-// Encode performs only declared WorkBuddy wire conversions. No model-name heuristics.
-func (r *Request) Encode(model string) ([]byte, error) {
-	// The document belongs to this request; each encoding starts from a fresh copy.
-	raw, _ := json.Marshal(r.Object)
-	obj, err := jsondoc.Object(raw)
-	if err != nil {
-		return nil, err
-	}
+// EncodeObject 对 obj（调用方拥有的可变副本）就地应用声明的 WorkBuddy 线格式转换。
+// 不序列化、不改动调用方原始文档。
+//
+// 为什么拆出对象版本：旧实现的 Encode 靠 json.Marshal → jsondoc.Object 拿一份副本，
+// 等于为「不污染入参」这件小事付出了整包序列化 + 整包解析的代价；而调用方往往
+// 紧接着还要再做一次改写（缓存键注入）并序列化——合并到同一次序列化里就省下一遍。
+func EncodeObject(obj map[string]any, model string) {
 	obj["model"] = model
 	obj["stream"] = true
 	if _, ok := obj["stream_options"]; !ok {
 		obj["stream_options"] = map[string]any{"include_usage": true}
+	}
+	if _, ok := obj["reasoning_summary"]; !ok {
+		obj["reasoning_summary"] = "auto"
 	}
 	// WorkBuddy's native output budget is max_tokens. Retain exact numeric value.
 	if v, ok := obj["max_completion_tokens"]; ok {
@@ -349,9 +351,10 @@ func (r *Request) Encode(model string) ([]byte, error) {
 		delete(obj, "max_completion_tokens")
 	}
 	if tc, ok := obj["tool_choice"].(map[string]any); ok {
-		typ := tc["type"].(string)
-		if typ == "function" {
-			obj["tool_choice"] = tc["function"].(map[string]any)["name"]
+		if typ, _ := tc["type"].(string); typ == "function" {
+			if fn, ok := tc["function"].(map[string]any); ok {
+				obj["tool_choice"] = fn["name"]
+			}
 		} else {
 			obj["tool_choice"] = typ
 		}
@@ -380,5 +383,12 @@ func (r *Request) Encode(model string) ([]byte, error) {
 	} else if effort != "" {
 		obj["reasoning_effort"] = effort
 	}
+}
+
+// Encode performs only declared WorkBuddy wire conversions. No model-name heuristics.
+func (r *Request) Encode(model string) ([]byte, error) {
+	// The document belongs to this request; each encoding starts from a fresh copy.
+	obj := jsondoc.CopyObject(r.Object)
+	EncodeObject(obj, model)
 	return json.Marshal(obj)
 }

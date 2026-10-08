@@ -21,6 +21,7 @@ import (
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/forwarding"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/jsondoc"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/proxy"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/scrub"
@@ -806,24 +807,70 @@ func (c *Client) chatBase(a *auth.Auth) string {
 	return "https://www.workbuddy.cn"
 }
 
-// prepareBody validates and encodes one request.
+// ChatInput 一次出站 chat 请求的请求体来源。
 //
-// 指纹改写（可选层，默认关闭）挂在**同一次 Parse 之后**：不额外解析、不额外
-// 序列化，也不改变验证契约（未知字段照旧原样保留、不修复历史）。
+// 两种调用方式：
+//   - Req 非 nil：调用方（handler）已解析并校验过文档，出站**不再重复解析**。
+//     大 payload（base64 图片、长上下文）下这是最省的一遍——整包解析成本与字节数成正比。
+//   - Req 为 nil：按 Body 解析（panel/scheduler 等没有解析产物的调用方）。
+type ChatInput struct {
+	Req *forwarding.Request
+	// Raw 与 Req 对应的原始字节，仅用于指纹层哨兵预检（~13 GB/s 扫描）；
+	// nil = 跳过预检，指纹层启用时直接全量遍历对象（语义相同，仅少一次廉价预扫）。
+	Raw []byte
+	// Body 原始请求体（仅在 Req 为 nil 时使用）。
+	Body []byte
+	// Model 出站模型名（realm 前缀须由调用方剥离）。空 = 用文档内的 model。
+	Model string
+}
+
+// buildOutbound 构造最终出站请求体：解析（仅需要时）→ 深拷贝 → 指纹改写
+// → 线格式转换 → 缓存键注入 → **唯一一次**序列化。
+//
+// 为什么合并成一次序列化：这几步此前各自做一遍「解析 + marshal」（Encode 内部还有
+// 一次 marshal→解析的深拷贝舞、缓存键注入又一次），实测 5 MiB 图片请求要付
+// 3 遍解析 + 3 遍序列化（~92 ms / 121 MB 分配）。现在为 1 遍解析（可省）+ 1 遍序列化。
+func (c *Client) buildOutbound(in ChatInput, realm, uid, conversationID, principal string) ([]byte, error) {
+	r := in.Req
+	raw := in.Raw
+	if r == nil {
+		parsed, err := forwarding.Parse(in.Body)
+		if err != nil {
+			return nil, err
+		}
+		r, raw = parsed, in.Body
+	}
+	// 调用方文档只读：改写一律在深拷贝上进行（拷贝只复制容器，叶子值共享，
+	// 成本与 payload 字节数无关）。
+	obj := jsondoc.CopyObject(r.Object)
+	c.scrubObject(obj, raw)
+	model := in.Model
+	if model == "" {
+		model = r.Model
+	}
+	forwarding.EncodeObject(obj, model)
+	c.injectCacheKeyObject(obj, realm, uid, conversationID, principal)
+	return json.Marshal(obj)
+}
+
+// scrubObject 应用指纹改写层。raw 非 nil 时先做哨兵预检（未命中即跳过整次对象遍历）；
+// raw 为 nil 时直接全量遍历——语义不变，只是少一次廉价预扫。
 //
 // 两道闸控成本：
 //  1. 开关关闭（默认）→ 一个 atomic 读取，其余零开销；
 //  2. 开关打开但请求体无指纹哨兵 → scrub.Sentinel 在原始字节上扫 5 个必要
 //     子串（~13 GB/s），未命中即跳过整次遍历（实测干净路径 0 分配）。
-func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) ([]byte, error) {
-	r, err := forwarding.Parse(body)
-	if err != nil {
-		return nil, err
+//
+// 不改验证契约：未知字段照旧原样保留、不修复历史（改写只作用于已识别的指纹字段）。
+func (c *Client) scrubObject(obj map[string]any, raw []byte) {
+	l := c.Fingerprints.Load()
+	if !l.Enabled() {
+		return
 	}
-	if l := c.Fingerprints.Load(); l.Dirty(body) {
-		l.Object(r.Object)
+	if raw != nil && !l.Dirty(raw) {
+		return
 	}
-	return r.Encode(r.Model)
+	l.Object(obj)
 }
 
 // effortsSnapshot 返回 effort 能力缓存副本；nil 表示未知（透传不降级）。
@@ -1034,6 +1081,13 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte, clientIP string, meta Cha
 // #119 后 global 出站固定 /v2，该兜底保留——上游对 /v2 是否需要 system 无实测
 // 反证，删了无回滚路径）。
 func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byte, clientIP string, meta ChatMeta) (rc io.ReadCloser, status int, respBody []byte, err error) {
+	return c.ChatStreamInput(ctx, a, ChatInput{Body: body}, clientIP, meta)
+}
+
+// ChatStreamInput 同 ChatStreamContext，但接受**已解析并校验过**的请求文档，
+// 跳过出站的重复解析（见 ChatInput）。handler 走这条路径；panel/scheduler 等
+// 没有解析产物的调用方继续用 ChatStreamContext（内部走 Body 解析）。
+func (c *Client) ChatStreamInput(ctx context.Context, a *auth.Auth, in ChatInput, clientIP string, meta ChatMeta) (rc io.ReadCloser, status int, respBody []byte, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1041,11 +1095,10 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	if a.IsGlobal() && !c.GlobalEnabled {
 		return nil, 400, nil, &Error{Kind: ErrBadParams, Status: 400, Msg: "global realm disabled"}
 	}
-	prepared, prepErr := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID)
+	prepared, prepErr := c.buildOutbound(in, a.Realm(), a.UID, meta.ConversationID, meta.PrincipalID)
 	if prepErr != nil {
 		return nil, 400, []byte(prepErr.Error()), &Error{Kind: ErrBadParams, Status: 400, Msg: prepErr.Error()}
 	}
-	prepared = c.injectCacheKey(prepared, a.Realm(), a.UID, meta.ConversationID, meta.PrincipalID)
 	// reqCtx 的 cancel 在每个出口显式调用（Do 失败 / ≥400 / 成功分支移交 monitorBody），
 	// 循环本身各分支必 return——无循环尾兜底代码（此前外层 var cancel 从未赋值 +
 	// 尾部不可达 cancel() 是潜伏 nil-panic，已删；chatPaths 恒非空由构造保证）。

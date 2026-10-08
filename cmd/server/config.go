@@ -20,6 +20,13 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
+// 入站准入的缺省值（server.* 可覆盖）。与 internal/server 的默认值保持一致；
+// 这里单独定义一份，避免 cmd/server 为了两个数字反向依赖 server 包的内部常量。
+const (
+	defaultMaxInflightRequests = 64
+	defaultMaxInflightBytesMB  = 256
+)
+
 // Config 顶层配置。
 type Config struct {
 	ConfigVersion int    `json:"config_version"`
@@ -103,6 +110,19 @@ type Config struct {
 	} `json:"logging"`
 
 	Server struct {
+		// MaxInflightRequests 服务级入站准入：并发「读取 + 整包解析 + 图片校验」的
+		// 请求数上限。0 = 不限制该项。缺省 64。
+		//
+		// 为什么需要：账号租约（单账号在途上限）在选号之后才申请，而最贵的
+		// io.ReadAll（最多 32 MiB）+ JSON 解析 + 图片 base64 校验发生在它之前——
+		// 没有这道闸门时该阶段的内存放大与并发数成正比，与账号数无关。
+		MaxInflightRequests int `json:"max_inflight_requests"`
+		// MaxInflightBytesMB 同上，按 Content-Length 计的并发字节预算（MiB）。
+		// 0 = 不限制该项。缺省 256。无 Content-Length（chunked）按 2 MiB 计入。
+		MaxInflightBytesMB int `json:"max_inflight_bytes_mb"`
+		// IngressWait 准入满载时的等待上限（如 "5s"；"0" = 立即拒绝）。
+		// 等待期间不持有内存，只占连接；超时后回 503 server_busy。
+		IngressWait string `json:"ingress_wait"`
 		// ReadTimeout 入站请求读取（含 body 上传）总时长上限（issue #100）。
 		// http.Server 的 ReadTimeout 覆盖整个请求读取：大上下文/文件块请求经
 		// 反代链转发时上传可超过旧固定值 60s，被掐后客户端拿到
@@ -324,6 +344,8 @@ type Config struct {
 	CostExploreIntervalDur time.Duration `json:"-"`
 	// ServerReadTimeoutDur 解析后的入站请求读取上限（issue #100）；0 = 不限制。
 	ServerReadTimeoutDur time.Duration `json:"-"`
+	// IngressWaitDur 解析后的入站准入等待上限（server.ingress_wait）；0 = 满载立即拒绝。
+	IngressWaitDur time.Duration `json:"-"`
 	// ProxyClient 解析校验后的代理接入实例（普通代理或 Resin）；nil = 未接入
 	// （JSON 不序列化）。
 	ProxyClient *proxy.Client `json:"-"`
@@ -340,6 +362,9 @@ func Default() *Config {
 	c.Cooldown.SoftRate = "600s"
 	c.Cooldown.SoftRateMax = "2h"
 	c.Server.ReadTimeout = "300s"
+	c.Server.MaxInflightRequests = defaultMaxInflightRequests
+	c.Server.MaxInflightBytesMB = defaultMaxInflightBytesMB
+	c.Server.IngressWait = "5s"
 	c.Panel.PackageDetailLimit = 5
 	// 工具结果图片策略默认 auto（原生 Chat 透传 / 桥接抬升）。显式写成 auto 而不是留
 	// 空串，是为了面板下拉有匹配项：空串在 <select> 里匹配不上任何 option，回显会是
@@ -652,6 +677,24 @@ func (c *Config) normalize() error {
 	}
 	if c.ServerReadTimeoutDur < 0 {
 		return fmt.Errorf("server.read_timeout: 负时长 %q 无意义", c.Server.ReadTimeout)
+	}
+	// 入站准入（server.max_inflight_requests / max_inflight_bytes_mb / ingress_wait）：
+	// 0 是合法值（= 该项不限制）；负值无语义，fail fast——静默钳 0 会把保护悄悄
+	// 关掉，与 read_timeout 的处理风格一致。
+	if c.Server.MaxInflightRequests < 0 {
+		return fmt.Errorf("server.max_inflight_requests: 负值 %d 无意义（0 = 不限制）", c.Server.MaxInflightRequests)
+	}
+	if c.Server.MaxInflightBytesMB < 0 {
+		return fmt.Errorf("server.max_inflight_bytes_mb: 负值 %d 无意义（0 = 不限制）", c.Server.MaxInflightBytesMB)
+	}
+	if c.Server.IngressWait == "" {
+		c.Server.IngressWait = "5s"
+	}
+	if c.IngressWaitDur, err = time.ParseDuration(c.Server.IngressWait); err != nil {
+		return fmt.Errorf("server.ingress_wait: %w", err)
+	}
+	if c.IngressWaitDur < 0 {
+		return fmt.Errorf("server.ingress_wait: 负时长 %q 无意义（\"0\" = 满载立即拒绝）", c.Server.IngressWait)
 	}
 	if c.SoftRateDur, err = time.ParseDuration(c.Cooldown.SoftRate); err != nil {
 		return fmt.Errorf("cooldown.soft_rate: %w", err)

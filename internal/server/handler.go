@@ -21,6 +21,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/forwarding"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/jsondoc"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/media"
@@ -93,6 +94,13 @@ type Config struct {
 	// 来自 logging.request_client_info（缺省 true）；关闭时 reqlog 事件的来源字段
 	// 保持为空，归档与面板都不出现来源信息。
 	RecordClientInfo bool
+
+	// MaxInflightRequests / MaxInflightBytesMB / IngressWait 服务级入站准入
+	// （见 ingress.go）：限制「同时读取 + 整包解析 + 图片校验」的请求数与字节预算。
+	// 0 = 该项不限制。三者都为 0 时准入闸门完全关闭（保持旧行为）。
+	MaxInflightRequests int
+	MaxInflightBytesMB  int
+	IngressWait         time.Duration
 }
 
 // loadLive 返回当前运行期快照；Live 为 nil 时用静态字段合成。
@@ -167,6 +175,8 @@ const ServiceName = "workbuddy2api"
 type Handler struct {
 	cfg Config
 	mux *http.ServeMux
+	// ingress 服务级入站准入（读 + 解析阶段的并发/字节预算）。见 ingress.go。
+	ingress *ingressLimiter
 }
 
 // NewHandler 构建 handler。
@@ -190,7 +200,11 @@ func NewHandler(cfg Config) *Handler {
 			"": {Mode: cfg.PromptMode, Text: cfg.PromptText},
 		}
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
+	h := &Handler{
+		cfg:     cfg,
+		mux:     http.NewServeMux(),
+		ingress: newIngressLimiter(cfg.MaxInflightRequests, cfg.MaxInflightBytesMB, cfg.IngressWait),
+	}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responses))
 	h.mux.HandleFunc("POST /v1/messages", h.withMessagesAuth(h.messages))
@@ -296,6 +310,9 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		// redis_dropped_writes 异步镜像队列满导致丢弃的笔数（0 = 无丢弃）：
 		// 与 redis_mode 并列，回答“镜像到底有没有跟上”。零值也显式写出。
 		"redis_dropped_writes": droppedWrites,
+		// ingress 读/解析阶段的准入观测（未启用限制时全零）。
+		// rejected > 0 表示网关曾因并发/字节预算对客户端回 503。
+		"ingress": h.ingress.Stats(),
 		// model_locks 当前有未过期模型级限流的 (域, 模型) 全清单：账号池视图回答
 		// 「哪些号不能用」，本键回答「哪些模型不能用、锁了几个号、还要锁多久」。
 		// 与 ModelBlocked（请求失败时的单模型判定）互补；无锁时为 null。零回归只增键。
@@ -585,6 +602,19 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 	// 客户端 IP 提取（按请求传递到 ChatStream，不透传时 upstream 侧忽略）；
 	// 消除早年共享字段方案的并发交叉污染（issue：ClientIP 竞态）。
 	clientIP := upstream.ExtractClientIP(r)
+	// 服务级准入（ingress.go）：io.ReadAll（最多 32 MiB）+ 整包解析 + 图片校验
+	// 是网关最贵的一段，且发生在账号租约之前——没有这道闸门时其并发不受任何约束。
+	// 名额只覆盖到这里为止：解析完成后立刻释放（长 SSE 流不占名额）。
+	release, admitted := h.ingress.Acquire(ctx, r.ContentLength)
+	if !admitted {
+		h.ingress.rejectLog()
+		out.ErrorHint(w, http.StatusServiceUnavailable, "server_busy",
+			"gateway is busy ingesting requests, please retry", upstream.NoHealthyAccountHint())
+		return
+	}
+	// 读 + 解析期间持名额；defer 兜住所有提前返回路径（release 幂等）。
+	defer release()
+
 	// Bound the original client body before decoding or translating it.
 	r.Body = http.MaxBytesReader(w, r.Body, forwarding.MaxRequestBytes)
 	body, err := io.ReadAll(r.Body)
@@ -601,6 +631,9 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 	if err == nil {
 		err = request.Chat.ResolveHeaders(r.Header)
 	}
+	// 读取 + 解析 + 图片校验已完成：立刻释放准入名额（后续上游流式转发
+	// 可能是分钟级，不能占用入站名额）。release 幂等，defer 仍会兜底。
+	release()
 	if err != nil {
 		out.Error(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
@@ -612,10 +645,15 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 	if !peek.Stream {
 		w = newWriteDeadlineWriter(w, nonStreamWriteTimeout)
 	}
-	body, err = encodedRequest(request, body)
-	if err != nil {
-		out.Error(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
+	// body 是入站原始字节，仅作为指纹层哨兵预检的来源（不再用于出站序列化：
+	// 出站统一从已解析文档构造，见下 upstream.ChatInput）。当字节与文档不同源时
+	// 不能拿它做预检，否则可能漏掉只在文档变换后才出现的指纹。
+	sentinelRaw := body
+	if kind != protocol.Chat || request.Mutated {
+		// 跨协议：body 是 Responses/Anthropic 原始字节，与 Chat 形态文档不同源；
+		// Mutated：文档已被工具图片抬升改写。两种情况下哨兵扫描对象不可靠，
+		// 交给指纹层全量遍历（语义不变，仅少一次廉价预扫）。
+		sentinelRaw = nil
 	}
 
 	// realm 前缀解析（D6）：model 名可能带 "[realm:]" 前缀。剥出 realm + bareModel，
@@ -807,12 +845,9 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 		}
 	}
 
-	// outbound model 名重写为 bareModel（D6）：realm 前缀是网关侧路由协议，
-	// 上游不认前缀（global 账号也请求裸模型名）。裸名时 bareModel==peek.Model 恒等。
-	baseBody := body
-	if bareModel != peek.Model {
-		baseBody = rewriteModel(baseBody, bareModel)
-	}
+	// 出站基线：模型名统一由 upstream 从文档设置（realm 前缀由 bareModel 剥除），
+	// 不再对字节做一次 rewriteModel 往返（旧实现：解析 + 重新序列化）。
+	baseObj := peek.Object
 
 	// 会话头族（issue #35）：后台按 X-Conversation-Request-ID（对话轮级）聚合请求，
 	// 官方客户端一次 user send 内所有 tool call/重试/换号复用同一个 ID。此处**轮转
@@ -912,15 +947,25 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 			}
 		}
 
-		// 系统提示词组合：按实际选中账号所属域应用（同一网关对 CN 与 Global 可配不同规则）
-		attemptBody := baseBody
+		// 系统提示词组合：按实际选中账号所属域应用（同一网关对 CN 与 Global 可配不同规则）。
+		// 组合在**深拷贝**上进行（baseObj 在整个轮转循环里只读），避免一次「字节解析 +
+		// 重新序列化」的往返；未启用规则时零拷贝直接复用基线对象。
+		attemptObj := baseObj
+		attemptRaw := sentinelRaw
 		if rule, ok := h.promptRuleFor(acct.Realm()); ok {
-			attemptBody = prompt.Compose(baseBody, rule.Text, rule.Mode)
+			attemptObj = jsondoc.CopyObject(baseObj)
+			prompt.ComposeObject(attemptObj, rule.Text, rule.Mode)
+			// 组合后的文档与入站字节不同源：哨兵预检不再适用于本对象（见上）。
+			attemptRaw = nil
 		}
+		attempt := *peek
+		attempt.Object = attemptObj
+		attempt.Model = bareModel
 
 		// 客户端 IP 按请求传递（PassthroughIP 开启时注入；消除共享字段竞态）。
 		attemptStarted := time.Now()
-		rc, status, respBody, terr := h.cfg.Upstream.ChatStreamContext(r.Context(), acct, attemptBody, clientIP, chatMeta)
+		rc, status, respBody, terr := h.cfg.Upstream.ChatStreamInput(r.Context(), acct,
+			upstream.ChatInput{Req: &attempt, Raw: attemptRaw, Model: bareModel}, clientIP, chatMeta)
 		// 分类信封一次成型：upstream 已在错误路径返回 *upstream.Error（Kind +
 		// Retry-After 头解析）。传输层错误（非 *Error）走抖动换号分支；防御分支
 		// （terr 为 nil 但 status>=400，如 ErrNone 兜底）回落本地 Classify，双保险。

@@ -304,6 +304,9 @@ uv run --no-project --with openai==3.26.0 --with anthropic==1.12.1 python -c \
 | `auth_dir` | `./auths` | 账号凭证目录 |
 | `state_file` | `./data/state.json` | 账号池状态持久化文件 |
 | `server.read_timeout` | `300s` | 入站请求读取（含 body 上传）总时长上限；大上下文/文件块经反代转发超时会 400 `read body: i/o timeout`；`0` = 不限制；改动需重启（#100） |
+| `server.max_inflight_requests` | `64` | 服务级入站准入：并发「读取 + 整包解析 + 图片校验」的请求数上限；`0` = 不限制；改动需重启 |
+| `server.max_inflight_bytes_mb` | `256` | 同上，按 `Content-Length` 计的并发字节预算（MiB）；chunked 按 2 MiB 计入；`0` = 不限制；改动需重启 |
+| `server.ingress_wait` | `5s` | 准入满载时的等待上限，超时回 503 `server_busy`；`0` = 立即拒绝；改动需重启 |
 | `panel.package_detail_limit` | `5` | 积分构成页单账号默认展示的最早到期包数；其余未用完包与已用完包聚合折叠 |
 | `logging.request_archive_enabled` | `true` | 请求元数据 JSONL 归档开关；不记录提示词、响应正文或 Authorization |
 | `logging.request_retention_days` | `7` | 请求归档保留天数；超期文件在启动和周期清理时删除 |

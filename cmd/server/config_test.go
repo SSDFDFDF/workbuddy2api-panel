@@ -1294,3 +1294,49 @@ func TestSaveConfigRejectsInvalidMediaPolicy(t *testing.T) {
 		t.Fatalf("rejected save must not change the live policy: %+v", got)
 	}
 }
+
+// TestIngressConfigDefaultsAndValidation 入站准入配置的缺省、显式值与非法值。
+//
+// 语义要点：0 是合法值（= 该项不限制），负值必须 fail fast——静默钳 0 会把
+// 保护悄悄关掉，这正是 read_timeout 已经采用的处理风格。
+func TestIngressConfigDefaultsAndValidation(t *testing.T) {
+	// 缺省：三个键都给推荐值（配置里不写也应生效）。
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Server.MaxInflightRequests != 64 || c.Server.MaxInflightBytesMB != 256 {
+		t.Errorf("缺省准入上限 = %d/%d，want 64/256", c.Server.MaxInflightRequests, c.Server.MaxInflightBytesMB)
+	}
+	if c.IngressWaitDur != 5*time.Second {
+		t.Errorf("缺省 ingress_wait=%v want 5s", c.IngressWaitDur)
+	}
+
+	// 显式值：0 合法（关闭该项），"0" wait 合法（满载立即拒绝）。
+	fp2 := filepath.Join(dir, "c2.json")
+	os.WriteFile(fp2, []byte(`{"server":{"max_inflight_requests":0,"max_inflight_bytes_mb":0,"ingress_wait":"0"}}`), 0o600)
+	c2, err := Load(fp2)
+	if err != nil {
+		t.Fatalf("0 是合法值，不应报错: %v", err)
+	}
+	if c2.Server.MaxInflightRequests != 0 || c2.Server.MaxInflightBytesMB != 0 || c2.IngressWaitDur != 0 {
+		t.Errorf("显式 0 未被保留: %+v", c2.Server)
+	}
+
+	// 负值 fail fast；非法时长 fail fast。
+	for _, body := range []string{
+		`{"server":{"max_inflight_requests":-1}}`,
+		`{"server":{"max_inflight_bytes_mb":-1}}`,
+		`{"server":{"ingress_wait":"-1s"}}`,
+		`{"server":{"ingress_wait":"abc"}}`,
+	} {
+		fp3 := filepath.Join(dir, "c3.json")
+		os.WriteFile(fp3, []byte(body), 0o600)
+		if _, err := Load(fp3); err == nil {
+			t.Errorf("%s 应报错", body)
+		}
+	}
+}

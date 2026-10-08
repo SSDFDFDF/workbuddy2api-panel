@@ -154,16 +154,105 @@ func Source(s Spec) string {
 //
 // 所有分支均为"绝不失败"：坏 JSON / 空 body → 原样返回。
 func Compose(body []byte, systemPrompt, mode string) []byte {
-	switch mode {
-	case ModeReplace:
-		return Rewrite(body, systemPrompt)
-	case ModeAppend:
-		return Append(body, systemPrompt)
-	case ModeAfter:
-		return ComposeAfter(body, systemPrompt)
-	default:
+	return composeBytes(body, systemPrompt, mode)
+}
+
+// ComposeObject 就地把网关提示词按 mode 组合进 obj（调用方拥有的可变副本），
+// 返回是否有改动。这是三条组合规则的唯一实现——Compose/Rewrite/Append/
+// ComposeAfter 与出站对象链路都收敛到这里，避免"字节版与对象版各写一份"再次分叉。
+//
+// mode 语义见 Compose 注释；none/未知取值不动文档。
+func ComposeObject(obj map[string]any, systemPrompt, mode string) bool {
+	return composeObject(obj, systemPrompt, mode)
+}
+
+// composeBytes 字节入口：解析 → 对象级组合 → 序列化。
+// 解析失败或无需改动时原样返回（绝不失败：出站改写不得阻塞转发）。
+func composeBytes(body []byte, systemPrompt, mode string) []byte {
+	if len(body) == 0 || systemPrompt == "" {
 		return body
 	}
+	obj, err := jsondoc.Object(body)
+	if err != nil {
+		return body
+	}
+	if !composeObject(obj, systemPrompt, mode) {
+		return body
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// composeObject 三条组合规则的共用实现（就地修改 obj）。
+//
+//   - ModeReplace：删全部 system/developer，网关提示词置于首位；
+//   - ModeAppend ：[客户端开头 system 块] [网关] [其余]；
+//   - ModeAfter  ：[网关] [客户端开头 system 块] [其余]。
+//
+// "开头连续块"只认 messages 头部连续的 system/developer，遇第一条其它角色即停；
+// 中途的 system 消息位置不变、不重排（避免扰动 tool 结果与文本的相邻性）。
+func composeObject(obj map[string]any, systemPrompt, mode string) bool {
+	if obj == nil || systemPrompt == "" {
+		return false
+	}
+	switch mode {
+	case ModeReplace, ModeAppend, ModeAfter:
+	default:
+		return false // none / 未知：不改写
+	}
+	msgs, ok := obj["messages"].([]any)
+	if !ok {
+		// 无 messages 字段或类型不符 → 插入单条 system 后原样保留其余字段。
+		obj["messages"] = []any{systemMessage(systemPrompt)}
+		return true
+	}
+	// 开头连续 system/developer 块长度（ModeReplace 不需要，但计算成本可忽略）。
+	prefix := 0
+	for _, m := range msgs {
+		mm, ok := m.(map[string]any)
+		if !ok {
+			break
+		}
+		role, _ := mm["role"].(string)
+		if role != "system" && role != "developer" {
+			break
+		}
+		prefix++
+	}
+	gw := systemMessage(systemPrompt)
+	switch mode {
+	case ModeReplace:
+		kept := make([]any, 0, len(msgs)+1)
+		for _, m := range msgs {
+			if mm, ok := m.(map[string]any); ok {
+				if role, _ := mm["role"].(string); role == "system" || role == "developer" {
+					continue
+				}
+			}
+			kept = append(kept, m)
+		}
+		obj["messages"] = append([]any{gw}, kept...)
+	case ModeAppend:
+		out := make([]any, 0, len(msgs)+1)
+		out = append(out, msgs[:prefix]...)
+		out = append(out, gw)
+		out = append(out, msgs[prefix:]...)
+		obj["messages"] = out
+	case ModeAfter:
+		out := make([]any, 0, len(msgs)+1)
+		out = append(out, gw)
+		out = append(out, msgs[:prefix]...)
+		out = append(out, msgs[prefix:]...)
+		obj["messages"] = out
+	}
+	return true
+}
+
+func systemMessage(text string) map[string]any {
+	return map[string]any{"role": "system", "content": text}
 }
 
 // Rewrite 解析 OpenAI 请求体并替换系统提示词：
@@ -174,47 +263,7 @@ func Compose(body []byte, systemPrompt, mode string) []byte {
 // 解析失败 → 原样返回（绝不失败）：Rewrite 是出站改写的关键路径，
 // 任何解析错误都不应阻塞请求转发，让上游按其原始语义处理。
 func Rewrite(body []byte, systemPrompt string) []byte {
-	if len(body) == 0 || systemPrompt == "" {
-		return body
-	}
-	obj, err := jsondoc.Object(body)
-	if err != nil {
-		return body
-	}
-	msgs, ok := obj["messages"].([]any)
-	if !ok {
-		// 无 messages 字段或类型不符 → 插入单条 system 后原样保留其余字段。
-		obj["messages"] = []any{map[string]any{"role": "system", "content": systemPrompt}}
-		if out, err := json.Marshal(obj); err == nil {
-			return out
-		}
-		return body
-	}
-	// 过滤掉所有 system/developer 消息，保留 user/assistant/tool 及其他角色。
-	kept := make([]any, 0, len(msgs)+1)
-	for _, m := range msgs {
-		mm, ok := m.(map[string]any)
-		if !ok {
-			kept = append(kept, m)
-			continue
-		}
-		role, _ := mm["role"].(string)
-		if role == "system" || role == "developer" {
-			continue
-		}
-		kept = append(kept, m)
-	}
-	// 头部插入单条 system 消息（prepend 避免整体重排语义）。
-	rewritten := append(
-		[]any{map[string]any{"role": "system", "content": systemPrompt}},
-		kept...,
-	)
-	obj["messages"] = rewritten
-	out, err := json.Marshal(obj)
-	if err != nil {
-		return body
-	}
-	return out
+	return composeBytes(body, systemPrompt, ModeReplace)
 }
 
 // ComposeAfter 在 messages 头部插入网关 system，而客户端"开头连续
@@ -232,46 +281,7 @@ func Rewrite(body []byte, systemPrompt string) []byte {
 // 即停；中途 system 消息位置不变、不重排——避免扰动 tool 结果的相邻性）。
 // 守卫与 Rewrite/Append 逐条一致：空 body / 空 systemPrompt / 坏 JSON → 原样返回。
 func ComposeAfter(body []byte, systemPrompt string) []byte {
-	if len(body) == 0 || systemPrompt == "" {
-		return body
-	}
-	obj, err := jsondoc.Object(body)
-	if err != nil {
-		return body
-	}
-	msgs, ok := obj["messages"].([]any)
-	if !ok {
-		// 无 messages 字段或类型不符 → 插入单条 system 后原样保留其余字段。
-		obj["messages"] = []any{map[string]any{"role": "system", "content": systemPrompt}}
-		if out, err := json.Marshal(obj); err == nil {
-			return out
-		}
-		return body
-	}
-	// 扫描开头连续 system/developer 块，遇第一条非 system/developer 即停。
-	blockLen := 0
-	for _, m := range msgs {
-		mm, ok := m.(map[string]any)
-		if !ok {
-			break
-		}
-		role, _ := mm["role"].(string)
-		if role != "system" && role != "developer" {
-			break
-		}
-		blockLen++
-	}
-	gw := map[string]any{"role": "system", "content": systemPrompt}
-	rewritten := make([]any, 0, len(msgs)+1)
-	rewritten = append(rewritten, gw)
-	rewritten = append(rewritten, msgs[:blockLen]...)
-	rewritten = append(rewritten, msgs[blockLen:]...)
-	obj["messages"] = rewritten
-	out, err := json.Marshal(obj)
-	if err != nil {
-		return body
-	}
-	return out
+	return composeBytes(body, systemPrompt, ModeAfter)
 }
 
 // Append 解析 OpenAI 请求体并在"开头连续 system/developer 块"之后插入一条
@@ -291,45 +301,5 @@ func ComposeAfter(body []byte, systemPrompt string) []byte {
 // 还是 developer。网关消息角色用 system 而非 developer——上游 role 白名单
 // 不含 developer，插 developer 等于制造一次必然归一与多余的 11128 风险窗口。
 func Append(body []byte, systemPrompt string) []byte {
-	if len(body) == 0 || systemPrompt == "" {
-		return body
-	}
-	obj, err := jsondoc.Object(body)
-	if err != nil {
-		return body
-	}
-	msgs, ok := obj["messages"].([]any)
-	if !ok {
-		// 无 messages 字段或类型不符 → 插入单条 system 后原样保留其余字段。
-		obj["messages"] = []any{map[string]any{"role": "system", "content": systemPrompt}}
-		if out, err := json.Marshal(obj); err == nil {
-			return out
-		}
-		return body
-	}
-	// 扫描开头连续 system/developer 块，遇第一条非 system/developer 即停。
-	insertAt := 0
-	for _, m := range msgs {
-		mm, ok := m.(map[string]any)
-		if !ok {
-			break
-		}
-		role, _ := mm["role"].(string)
-		if role != "system" && role != "developer" {
-			break
-		}
-		insertAt++
-	}
-	gw := map[string]any{"role": "system", "content": systemPrompt}
-	// 已有消息逐字不动：只在插入点拼接，不重排、不改写任何元素。
-	rewritten := make([]any, 0, len(msgs)+1)
-	rewritten = append(rewritten, msgs[:insertAt]...)
-	rewritten = append(rewritten, gw)
-	rewritten = append(rewritten, msgs[insertAt:]...)
-	obj["messages"] = rewritten
-	out, err := json.Marshal(obj)
-	if err != nil {
-		return body
-	}
-	return out
+	return composeBytes(body, systemPrompt, ModeAppend)
 }

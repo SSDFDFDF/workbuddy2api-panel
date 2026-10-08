@@ -113,3 +113,44 @@ func Int(v any) (int64, bool) {
 	}
 	return 0, false
 }
+
+// Copy returns a deep copy of a document produced by Decode/Object.
+//
+// 为什么需要它：出站链路需要在「不污染调用方文档」的前提下就地应用改写
+// （线格式转换、指纹改写、缓存键注入）。此前的做法是 json.Marshal → 再解析一次
+// 来拿副本——对一个 5 MiB 图片请求来说，这一次往返就是数十毫秒与数十 MB 分配。
+// 深拷贝只复制容器（map/slice），叶子值（json.Number/string/bool/nil）按值共享：
+// 它们本身不可变，共享是安全的，且这让大 payload 的拷贝成本与字节数**无关**
+// （base64 图片仍是同一个 string，不做 memcpy）。
+//
+// 未识别的类型原样返回（防御：Decode 只产出上述类型，但调用方可能塞入别的值）。
+func Copy(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, e := range t {
+			out[k] = Copy(e)
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i, e := range t {
+			out[i] = Copy(e)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+// CopyObject deep-copies an object document（nil 安全）。
+func CopyObject(m map[string]any) map[string]any {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = Copy(v)
+	}
+	return out
+}

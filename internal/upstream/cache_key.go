@@ -58,6 +58,8 @@ func LoadCacheSecret(path string) ([]byte, error) {
 	return b, nil
 }
 
+// injectCacheKey 注入 prompt_cache_key（字节入口，语义见 injectCacheKeyObject）。
+// 解析失败或无需注入时原样返回（尽量不动调用方字节）。
 func (c *Client) injectCacheKey(body []byte, aRealm, uid, conversation, principal string) []byte {
 	if len(c.CacheSecret) < 32 || conversation == "" {
 		return body
@@ -66,8 +68,27 @@ func (c *Client) injectCacheKey(body []byte, aRealm, uid, conversation, principa
 	if err != nil {
 		return body
 	}
-	if _, present := obj["prompt_cache_key"]; present {
+	if !c.injectCacheKeyObject(obj, aRealm, uid, conversation, principal) {
 		return body
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// injectCacheKeyObject 就地注入 prompt_cache_key（obj 必须是调用方拥有的可变副本），
+// 返回是否注入。客户端自带该键时保留原值（不覆盖）。
+//
+// 拆出对象版本的目的：缓存键必须在**线格式转换之后**计算（材料含最终 model）且需要
+// 在序列化之前写入，把它合并进同一次序列化就省掉一整遍解析 + marshal。
+func (c *Client) injectCacheKeyObject(obj map[string]any, aRealm, uid, conversation, principal string) bool {
+	if len(c.CacheSecret) < 32 || conversation == "" || obj == nil {
+		return false
+	}
+	if _, present := obj["prompt_cache_key"]; present {
+		return false
 	}
 	p := c.Profiles[aRealm]
 	profile, _ := json.Marshal(p)
@@ -75,9 +96,5 @@ func (c *Client) injectCacheKey(body []byte, aRealm, uid, conversation, principa
 	mac := hmac.New(sha256.New, c.CacheSecret)
 	_, _ = mac.Write(material)
 	obj["prompt_cache_key"] = "wb2-" + hex.EncodeToString(mac.Sum(nil))
-	out, err := json.Marshal(obj)
-	if err != nil {
-		return body
-	}
-	return out
+	return true
 }
