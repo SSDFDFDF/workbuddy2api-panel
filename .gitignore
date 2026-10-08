@@ -19,6 +19,8 @@ config.json
 # Build artifacts
 *.tmp
 __pycache__/
+/dist/
+/coverage.out
 
 # Backups (contains auth tokens)
 backups/
@@ -33,6 +35,7 @@ docs/
 
 # Windows binaries
 /wb2api.exe
+/signin_bin.exe
 /login.exe
 /credit.exe
 
