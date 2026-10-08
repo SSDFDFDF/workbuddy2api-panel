@@ -45,6 +45,12 @@ const CFG_MAP = {
   resin_url: ['resin_url'], resin_platform_name: ['resin_platform_name'],
   resin_mode: ['resin_mode'], resin_auth_version: ['resin_auth_version'],
   request_client_info: ['logging', 'request_client_info'],
+  // 服务级入站准入（server.*）：只覆盖「读取 + 整包解析 + 图片校验」，长流不占名额。
+  // 三项都在装配期构造 limiter（含等待时长），改动需重启。
+  max_inflight_requests: ['server', 'max_inflight_requests'],
+  max_inflight_bytes_mb: ['server', 'max_inflight_bytes_mb'],
+  ingress_wait: ['server', 'ingress_wait'],
+  read_timeout: ['server', 'read_timeout'],
 };
 /* 「覆盖型」文本字段：空串本身是有意义的取值（= 回落到内置默认），必须照发。
  *
@@ -288,13 +294,17 @@ function collectConfig() {
 }
 
 /* Go 时长字段即时校验：空 = 沿用现值（collectConfig 跳过发送）；非空必须是
-   ParseDuration 语法（30m / 2h / 600s / 1h30m，可组合可带小数）。与后端
-   config.go normalize() 的 time.ParseDuration 同口径，脏值在前端就地标红，
-   不再等到保存被拒。 */
-const DURATION_RE = /^(\d+(\.\d+)?(ns|us|µs|ms|s|m|h))+$/;
+   ParseDuration 语法（30m / 2h / 600s / 1h30m，可组合可带小数）或裸 "0"。
+   与后端 config.go normalize() 的 time.ParseDuration 同口径，脏值在前端就地标红，
+   不再等到保存被拒。
+   裸 "0" 必须放行：服务端准入/超时三项都用它表示“不限制 / 满载立即拒绝”
+   （server.read_timeout、server.ingress_wait），而 Go 的 time.ParseDuration("0")
+   是合法的。若按“必须带单位”校验，用户填 0 会被标红，而后端其实收得下。 */
+const DURATION_RE = /^0$|^(\d+(\.\d+)?(ns|us|µs|ms|s|m|h))+$/;
 const DURATION_FIELDS = ['soft_rate', 'soft_rate_max', 'breaker_cooldown', 'breaker_cooldown_max',
-  'degrade_cooldown', 'degrade_cooldown_max', 'cost_explore_interval', 'expiring_soon', 'ttl'];
-const DURATION_TIP = '格式应为 Go 时长：30m / 2h / 600s / 1h30m';
+  'degrade_cooldown', 'degrade_cooldown_max', 'cost_explore_interval', 'expiring_soon', 'ttl',
+  'read_timeout', 'ingress_wait'];
+const DURATION_TIP = '格式应为 Go 时长：30m / 2h / 600s / 1h30m（0 = 不限制）';
 function durationBad(name) {
   const el = $('cfgForm').elements[name];
   if (!el) return false;

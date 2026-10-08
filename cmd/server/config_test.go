@@ -1340,3 +1340,62 @@ func TestIngressConfigDefaultsAndValidation(t *testing.T) {
 		}
 	}
 }
+
+// TestSaveConfigIngressRoundTrip 面板保存路径的类型往返（server.* 入站准入四项）：
+// 面板提交的是 JSON（number → int，时长 → 字符串），后端走
+// merge → pruneUnknownKeys → ParseConfig。钉住三件事：
+//   - 四项都不是未知键（不被剪掉）；
+//   - 数值落到 int 字段（不是字符串），且 **0 是合法取值**（"不限制"）——前端把
+//     0 与空串区分开正是为此（见 internal/panel/frontend_test.go 的 CollectIngressPolicy）；
+//   - 时长字面量（含裸 "0"）被解析成对应 duration，而不是被当成缺省值回落。
+func TestSaveConfigIngressRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"listen":":1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// 与前端 collectConfig 相同形态：两个上限是 Number，两个时长是字符串。
+	payload := []byte(`{"listen":":1","server":{"max_inflight_requests":0,"max_inflight_bytes_mb":64,"ingress_wait":"0","read_timeout":"600s"}}`)
+	restart, err := saveConfig(payload, path, livecfg.New(livecfg.Snapshot{}), pool.New(""), &upstream.Client{}, scheduler.New(scheduler.Config{}))
+	if err != nil {
+		t.Fatalf("saveConfig: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "max_inflight_unset") {
+		t.Fatal("未知键混入落盘内容")
+	}
+	parsed, err := ParseConfig(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 0 必须原样保留（显式关掉并发上限），不能回落成默认 64。
+	if parsed.Server.MaxInflightRequests != 0 {
+		t.Errorf("max_inflight_requests=%d want 0（显式 0 = 不限制，不得回落默认）", parsed.Server.MaxInflightRequests)
+	}
+	if parsed.Server.MaxInflightBytesMB != 64 {
+		t.Errorf("max_inflight_bytes_mb=%d want 64", parsed.Server.MaxInflightBytesMB)
+	}
+	// 裸 "0" 解析为 0 时长（= 满载立即拒绝），不是缺省 5s。
+	if parsed.Server.IngressWait != "0" || parsed.IngressWaitDur != 0 {
+		t.Errorf("ingress_wait=%q dur=%v want \"0\"/0（裸 0 = 立即拒绝，非缺省 5s）",
+			parsed.Server.IngressWait, parsed.IngressWaitDur)
+	}
+	if parsed.ServerReadTimeoutDur != 600*time.Second {
+		t.Errorf("read_timeout dur=%v want 600s", parsed.ServerReadTimeoutDur)
+	}
+	// 装配期字段：面板必须提示这四项需重启（否则用户改完以为即时生效）。
+	need := []string{"server.max_inflight_requests", "server.max_inflight_bytes_mb",
+		"server.ingress_wait", "server.read_timeout"}
+	got := map[string]bool{}
+	for _, f := range restart {
+		got[f] = true
+	}
+	for _, f := range need {
+		if !got[f] {
+			t.Errorf("restart_required 缺 %s（实际 %v）", f, restart)
+		}
+	}
+}

@@ -443,6 +443,22 @@
               <input name="package_detail_limit" type="number" min="1" placeholder="5">
               <span class="hint">积分构成页按最早到期展示，其余未用完包聚合</span></label>
 
+            <div class="sub-hd">入站准入（内存保护）</div>
+            <div class="grid3">
+              <label class="fld"><span class="lb">并发准入上限 <span class="badge b-restart">需重启</span></span>
+                <input name="max_inflight_requests" type="number" min="0" placeholder="64">
+                <span class="hint">同时「读取 + 解析 + 图片校验」的请求数上限；0 = 不限制</span></label>
+              <label class="fld"><span class="lb">并发字节预算 <span class="badge b-restart">需重启</span></span>
+                <input name="max_inflight_bytes_mb" type="number" min="0" placeholder="256">
+                <span class="hint">按 Content-Length 计的 MiB 上限；0 = 不限制。单请求实际驻留约 2 倍体积</span></label>
+              <label class="fld"><span class="lb">满载等待 <span class="badge b-restart">需重启</span></span>
+                <input name="ingress_wait" placeholder="5s">
+                <span class="hint">满载时等待多久再回 503；0 = 立即拒绝；格式 5s / 500ms</span></label>
+            </div>
+            <label class="fld"><span class="lb">入站读取超时 <span class="badge b-restart">需重启</span></span>
+              <input name="read_timeout" placeholder="300s">
+              <span class="hint">含 body 上传的总时长上限；大上下文/文件块经反代超时会 400（issue #100）；0 = 不限制</span></label>
+
             <div class="sub-hd">超时控制</div>
             <div class="grid3">
               <label class="fld"><span class="lb">短请求超时 <span class="badge b-restart">需重启</span></span>

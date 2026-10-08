@@ -1437,3 +1437,140 @@ process.stdout.write(JSON.stringify([media.tool_images, media.image_transcode,
 		t.Fatalf("collectConfig media=%s want %s", strings.TrimSpace(string(out)), want)
 	}
 }
+
+// TestAppJSCollectIngressPolicy 钉住 server.* 入站准入四项在面板上的保存口径：
+//
+//   - 两个上限是 number（Go 侧 int），必须走 Number()；尤其 **0 不能被当成"没填"**：
+//     空 → undefined（不下发），而 "0" → 0（要下发，它是"不限制"的合法取值）。
+//     若把 0 与空串混为一谈，用户想关掉限制时保存后其实没改。
+//   - ingress_wait / read_timeout 是 Go 时长字符串，照原样下发（裸 "0" 合法）。
+func TestAppJSCollectIngressPolicy(t *testing.T) {
+	html := string(indexHTML)
+	form := html[strings.Index(html, `<form id="cfgForm">`):]
+	form = form[:strings.Index(form, "</form>")]
+	for _, name := range []string{"max_inflight_requests", "max_inflight_bytes_mb"} {
+		// 属性顺序无关：先取出该 input 标签，再在标签内断言 type=number
+		// （Go 侧是 int，text 会下发 "64" 导致 json 解码失败）。
+		tag := regexp.MustCompile(`<input[^>]*name="` + name + `"[^>]*>`).FindString(form)
+		if tag == "" {
+			t.Errorf("配置表单缺 %s 控件", name)
+			continue
+		}
+		if !strings.Contains(tag, `type="number"`) {
+			t.Errorf("%s 必须是 type=number，实际：%s", name, tag)
+		}
+	}
+	for _, name := range []string{"ingress_wait", "read_timeout"} {
+		if !regexp.MustCompile(`<input[^>]*name="` + name + `"`).MatchString(form) {
+			t.Errorf("配置表单缺 %s 控件", name)
+		}
+	}
+
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; collect config test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('const CFG_MAP');
+const end = src.indexOf('/* Go 时长字段即时校验');
+if (start < 0 || end < 0 || end < start) throw new Error('collectConfig region not found');
+const mk = v => ({ type: 'text', value: v });
+const num = v => ({ type: 'number', value: v });
+const cfgForm = { elements: {
+  max_inflight_requests: num('0'),          // 显式 0 = 关掉并发上限
+  max_inflight_bytes_mb: num('64'),         // 数字原样
+  ingress_wait: mk('0'),                    // 裸 0 = 满载立即拒绝
+  read_timeout: mk('600s'),
+  max_inflight_unset: num(''),              // 空 = 不下发（对照组）
+}};
+const ctx = {
+  Date, Number, String, Math, Map, Array, Object, isNaN, URLSearchParams, Set,
+  document: { getElementById: () => cfgForm },
+  $: () => cfgForm,
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.collectConfig = collectConfig;', ctx);
+const out = ctx.collectConfig();
+const srv = out.server || {};
+process.stdout.write(JSON.stringify([
+  typeof srv.max_inflight_requests, srv.max_inflight_requests,
+  typeof srv.max_inflight_bytes_mb, srv.max_inflight_bytes_mb,
+  srv.ingress_wait, srv.read_timeout,
+  Object.prototype.hasOwnProperty.call(srv, 'max_inflight_unset')
+]));`
+	f, err := os.CreateTemp(t.TempDir(), "cfgingress-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), panelJSFile(t)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("collectConfig node test failed: %v\n%s", err, out)
+	}
+	// [0 是 number 且为 0（未被当成"没填"）, 64 是 number, 两个时长原样下发, 空值不下发]
+	const want = `["number",0,"number",64,"0","600s",false]`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("collectConfig server=%s want %s", strings.TrimSpace(string(out)), want)
+	}
+}
+
+// TestAppJSDurationZeroAllowed 钉住时长校验器放行裸 "0"。
+//
+// server.read_timeout / server.ingress_wait 都用 "0" 表示"不限制 / 满载立即拒绝"，
+// 而 Go 的 time.ParseDuration("0") 是合法的。若前端正则要求"必须带单位"，用户填 0
+// 会被当场标红、提示格式错误，而后端其实收得下——一处纯前端的假告警。
+func TestAppJSDurationZeroAllowed(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; duration validator test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('/* Go 时长字段即时校验');
+const end = src.indexOf("$('cfgForm').addEventListener('input'");
+if (start < 0 || end < 0 || end < start) throw new Error('duration region not found');
+const mk = v => ({ type: 'text', value: v, classList: { toggle() {} }, title: '' });
+const cfgForm = { elements: {
+  ingress_wait: mk('0'), read_timeout: mk('0'),
+  soft_rate: mk('0'), ttl: mk('30m'),
+}};
+const ctx = {
+  Date, Number, String, Math, Map, Array, Object, isNaN, URLSearchParams, Set,
+  document: { getElementById: () => cfgForm },
+  $: () => cfgForm,
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) +
+  '\nthis.bad = n => durationBad(n); this.mark = () => markDurationFields();', ctx);
+const f = cfgForm.elements;
+f.ingress_wait.value = '5s';   const ok5s = ctx.bad('ingress_wait');
+f.ingress_wait.value = '5';    const noUnit = ctx.bad('ingress_wait');
+f.ingress_wait.value = 'abc';  const junk = ctx.bad('ingress_wait');
+f.ingress_wait.value = '0';    ctx.mark();          // 合法：不应标红
+const zeroClean = !f.ingress_wait.title && !f.read_timeout.title;
+f.ingress_wait.value = '';     const empty = ctx.bad('ingress_wait');
+process.stdout.write(JSON.stringify([ok5s, noUnit, junk, zeroClean, empty, ctx.bad('ttl')]));`
+	f, err := os.CreateTemp(t.TempDir(), "cfgdur-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), panelJSFile(t)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("duration validator node test failed: %v\n%s", err, out)
+	}
+	// [5s 合法, "5" 缺单位被标红, abc 被标红, 裸 0 不标红, 空值放行, ttl=30m 合法]
+	const want = `[false,true,true,true,false,false]`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("durationBad=%s want %s", strings.TrimSpace(string(out)), want)
+	}
+}
