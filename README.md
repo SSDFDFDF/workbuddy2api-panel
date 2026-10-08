@@ -67,7 +67,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI / Anthropic 协议桥接网关**，
 | 🖼️ **图片输入** | 三入口用户图片统一支持（Chat `image_url` 字符串/对象、Responses `input_image`、Messages `image` base64）；出站归一为上游唯一接受的 data URL 对象形态，外链/超限/音视频 part 明确 400 |
 | 🧰 **工具结果图片** | `media.tool_images` 三档策略（auto/passthrough/hoist/reject）；桥接入口默认把工具图片抬升为工具批次后的 user 图片消息（官方 custom-model 插件同构），原生 Chat 默认不改写 |
 | 🪄 **图片转码/压缩** | 可选（默认全关）：`gif/bmp/tiff` → PNG 无损转码；1080 / 2000 两档等比缩放 + JPEG 质量阶梯（对齐官方客户端）。关闭时请求路径不解码图片 |
-| 💬 **系统提示词体系** | `none`/`replace`/`after`/`append` 四种组合位置；五种内置预设；按账号域（CN/Global）分别配置；面板可预览生效正文 |
+| 💬 **系统提示词体系** | `none`/`replace`/`after`/`append` 四种组合位置；七种内置预设；按账号域（CN/Global）分别配置；面板可预览生效正文 |
 | 🗑️ **指纹改写层** | 可选：改写 user/assistant/tool 消息里的上游黑名单指纹串；支持自定义词/句规则（热生效） |
 | 🧬 **分域客户端特征** | 按「账号域 × 请求用途」生成版本、Origin、语言与 UA，不随代理域名漂移 |
 | 🌐 **出站代理** | 普通正向代理 + Resin 粘性代理池；支持按账号开关 |
@@ -329,7 +329,7 @@ uv run --no-project --with openai==3.26.0 --with anthropic==1.12.1 python -c \
 | `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |
 | `upstream.profiles.<realm>` | 内置 | 按账号域覆盖客户端版本 / CLI 版本 / 产品名 / Origin / 语言 / 各用途 UA（`client_version`、`cli_version`、`product_name`、`application_name`、`origin`、`language`、`user_agents.<用途>`） |
 | `prompt.mode` | `none` | 系统提示词组合位置：`none` = 不改写；`replace` = 只留网关提示词（删客户端 system/developer）；`after` = 网关在前 + 客户端块紧随其后；`append` = 客户端块在前 + 网关在后。支持 `prompt.profiles.<realm>.mode` 按域覆盖 |
-| `prompt.preset` | `default` | 内置预设名（见下表）；`minimal`/`coding`/`tool-agent`/`assistant` 按域取中/英文正文 |
+| `prompt.preset` | `default` | 内置预设名（见下方「内置预设」表）；`minimal` / `official*` 均按域取中/英文正文；空 = `default` |
 | `prompt.file` | 空 | 提示词文件路径（优先级低于内联正文、高于预设）；不可读 → 启动报错 |
 | `prompt.text` | 空 | 内联提示词正文，优先生效（无需额外落盘文件） |
 | `prompt.profiles.<realm>` | `{}` | 按账号域（`cn` / `global`）覆盖 `mode`/`preset`/`file`/`text` |
@@ -363,6 +363,32 @@ uv run --no-project --with openai==3.26.0 --with anthropic==1.12.1 python -c \
 | `resin_auth_version` | `V1` | 正向代理凭证版本：`V1`（`Platform.Account:Token`）/ `LEGACY_V0`（`Token:Platform:Account`），按部署实际值选，不自动切换 |
 | `use_proxy`（每账号） | `true` | 账号级代理开关（auth 文件顶层键，面板账号行内「代理 开/关」可切换）：`false` 时该账号所有出站请求直连，其余账号不受影响 |
 
+### 内置预设（`prompt.preset`）
+
+面板下拉的清单由后端 `prompt.Presets()` 生成（前端不硬编码）；每个预设按账号域（`cn` / `global`）选正文，未分域的文件（`default.md`）两份共用。
+正文与官方模板/抓包的逐标签差异见 `docs/PRESET_DIFF_ANALYSIS.md`（本地参考，`docs/` 不入版本库）。
+
+| 预设 | 分域 | 字符数（CN / Global） | 适用场景 |
+|---|---|---|---|
+| `default` | 共用 | 401 / 401 | 通用工程助手：结论先行、最小改动、工具契约、安全红线 |
+| `official` | cn / global | 9,355 / 9,040 | 官方英文原文（护栏段逐字）：26 模块形态，仅换域差异；通用 agent |
+| `official-compact` | cn / global | 1,581 / 1,584 | 官方英文原文：完整官方 `content_policy` + 身份 + 工具纪律，省略其余模块 |
+| `official-quick` | cn / global | 2,390 / 2,634 | 官方英文原文（Quick 模板）：无工具纯问答；适合聊天类客户端 |
+| `official-ask` | cn / global | 5,780 / 5,490 | 官方英文原文（Ask 片段）：只读分析，不落盘、不执行命令 |
+| `official-plan` | cn / global | 7,175 / 6,885 | 官方英文原文（Plan 片段）：计划先行、逐步验证 |
+| `minimal` | cn / global | 146 / 383 | 最短可用人格（自撰；CN 中文） |
+
+**CN 域不是中文翻译版**：官方自带没有中文系统提示词正文（CN 抓包 37,839 字符里含中文的只有 10 行，
+`interactionmode/*/fragments/*.md` 全英文，`workbuddy-prompt.tpl` 中文字符仅 65/31,476）。
+所以 `official*` 系列两域共用同一套官方英文正文，只换官方真实存在的域差异：
+产品名（`WorkBuddy` / `WorkBuddy AI`）、数据目录（`.workbuddy` / `.workbuddy-ai`）、
+`<regional_conventions>` 有无（模板 `{% if not IsOversea %}`）、`<response_language>`、
+`<agent_mail>` 有无（`{% if IsPersonalEdition %}`）。中文只出现在官方自己就是中文的两处。
+证据与逐标签对照见 `docs/PRESET_DIFF_ANALYSIS.md`。
+
+> `official-quick` / `official-ask` 声明了「没有工具 / 不能写」，建议只在 `prompt.mode=replace` 下使用；
+> `after` / `append` 会与客户端自己的系统提示词叠加，可能出现能力声明冲突。
+
 ### 上游超时语义（三段各归其位）
 
 | 字段 | 作用对象 | 默认 | 行为 |
@@ -387,6 +413,12 @@ uv run --no-project --with openai==3.26.0 --with anthropic==1.12.1 python -c \
 
 上游客户端特征与风控体系的逆向分析（两个官方安装包解包、提示词构成、指纹清单、
 11128 归因）见 **[docs/WORKBUDDY_CLIENT_FEATURES_ANALYSIS.md](docs/WORKBUDDY_CLIENT_FEATURES_ANALYSIS.md)**。
+
+官方提示词**明文模板原件**（79 个 `.tpl` / fragment，逐字节 SHA256 校验）归档于
+**[docs/official-templates/README.md](docs/official-templates/README.md)**，含目录清单、
+变量表、两阶段装配管线与片段清单；重新导出：`make templates-export`。
+内置预设（`prompt.preset`）的取值、分域字符数与适用场景见上方「配置说明」的内置预设表，
+或 `internal/prompt/presets/`；逐标签差异分析见 `docs/PRESET_DIFF_ANALYSIS.md`。
 
 ## 免责声明
 

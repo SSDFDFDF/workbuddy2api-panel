@@ -58,7 +58,7 @@ git log --oneline <已同步基线>..upstream/main     # 列出待判定提交�
 | 1 | **转发契约（严格、不改写）** | 出站只做校验与编码：未知字段与大整数完整保留，无法表达的输入直接 400；删除系统提示词清洗、内容拦截降级重试、思考自动补档、effort 降抬档、GPT `max_tokens` 抬升、工具历史重排 | 生效（无开关） |
 | 2 | **响应统一管线** | 流式与非流式共用同一 SSE 解析与完成判定；HTTP 错误与 `error` 帧同一分类；按 choice index 独立聚合；错误帧/截断不再伪装成功；新增首模型事件/首生成/尾部阶段超时 | 生效 |
 | 3 | **重试与账号策略** | 仅「明确未受理」才换号；已生成/已提交一律不重放；限流与配额不跨账号绕过 | 生效 |
-| 4 | **系统提示词体系** | 组合位置 `none`/`replace`/`after`/`append` + 内置预设库 + 按账号域覆盖 + 面板预览 | `none` |
+| 4 | **系统提示词体系** | 组合位置 `none`/`replace`/`after`/`append` + 七种内置预设（`default` / `official` / `official-compact` / `official-quick` / `official-ask` / `official-plan` / `minimal`）+ 按账号域覆盖 + 面板预览；官方明文模板原件归档见 [docs/official-templates/README.md](docs/official-templates/README.md) | `none` |
 | 5 | **出站指纹改写层** | 改写 user/assistant/tool/推理/工具入参里的已知指纹串（内置 7 类 + 自定义规则） | `false` |
 | 6 | **分域身份与 UA** | 按 `realm × 用途` 生成版本、产品名、Origin、语言与 UA；不随代理域名变化 | CN `5.7.6`/Global `5.6.2` |
 | 7 | **缓存键** | `prompt_cache_key` 改 HMAC 派生（持久化 secret）；无显式会话则不生成 | 生效 |
@@ -148,7 +148,7 @@ content:[]。空数组保持原形，不作为 null、缺失结果或虚构文�
 | 工具结果图片策略 | **新增** `internal/media/{policy,hoist}.go`；`internal/protocol/request.go`（Decode 按入口策略）、`internal/server/protocol.go`（Mutated 重序列化）、`cmd/server/{config,main}.go` |
 | 图片转码/压缩 | **新增** `internal/media/image.go`（解码/缩放/JPEG 阶梯，依赖 `golang.org/x/image`）；`cmd/server/{config,main}.go`；面板表单项（`internal/panel/{index.html,js/30-config.js}`） |
 | 重试与账号策略 | `internal/server/handler.go`、`internal/upstream/client.go` |
-| 系统提示词 | **新增** `internal/prompt/`、`cmd/server/prompt_config.go`、`cmd/server/prompt_preview.go` |
+| 系统提示词 | **新增** `internal/prompt/`、`cmd/server/prompt_config.go`、`cmd/server/prompt_preview.go`（官方明文模板原件归档见 [docs/official-templates/README.md](docs/official-templates/README.md)，重新导出：`make templates-export`） |
 | 指纹改写 | **新增** `internal/scrub/` |
 | 分域身份与 UA | **新增** `internal/upstream/identity.go`、`internal/auth/snapshot.go`；`internal/upstream/{headers,client,desktop,hint,usage}.go` |
 | 缓存键 / 配置容错 | `internal/upstream/cache_key.go`、`cmd/server/{config,config_warnings,main}.go` |

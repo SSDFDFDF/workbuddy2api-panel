@@ -34,10 +34,20 @@ const (
 // 内置预设名（config prompt.preset / prompt.profiles.<realm>.preset 取值）。
 // 完整清单与说明见 preset.go 的 presetCatalog（Presets() 对面板输出）。
 const (
-	// PresetDefault 通用工程助手（presets/default.md，约 2 KB，分域共用）。
+	// PresetDefault 通用工程助手（presets/default.md，约 0.4K 字符，分域共用）。
 	PresetDefault = "default"
-	// PresetMinimal 极简（presets/minimal.<realm>.md，约 10 行）。
+	// PresetMinimal 极简（presets/minimal.<realm>.md，CN 约 0.15K / Global 约 0.4K 字符）。
 	PresetMinimal = "minimal"
+	// PresetOfficial 官方骨架：实机抓包 craft 模式 26 模块的全量形态（presets/official.<realm>.md）。
+	PresetOfficial = "official"
+	// PresetOfficialCompact 官方骨架缩略版（presets/official-compact.<realm>.md）。
+	PresetOfficialCompact = "official-compact"
+	// PresetOfficialQuick 官方 Quick 模式：无工具纯问答（presets/official-quick.<realm>.md）。
+	PresetOfficialQuick = "official-quick"
+	// PresetOfficialAsk 官方 Ask 模式：只读分析与问答（presets/official-ask.<realm>.md）。
+	PresetOfficialAsk = "official-ask"
+	// PresetOfficialPlan 官方 Plan 模式：计划先行、逐步验证（presets/official-plan.<realm>.md）。
+	PresetOfficialPlan = "official-plan"
 )
 
 // Spec 一段提示词的来源声明（未解析）。三个字段按优先级取用：Text > File > Preset。

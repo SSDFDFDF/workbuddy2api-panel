@@ -102,6 +102,17 @@ release: ## 五平台二进制 + zip/tar.gz + checksums（输出到 dist/）
 version: ## 打印源码版本号
 	@echo $(APP_VERSION)
 
+# ---- 官方提示词模板导出（本地参考资料，输出到 docs/，不进版本库）----
+# 用法详见 docs/official-templates/README.md；WB_INSTALLER 支持通配符，取版本号最大者。
+WB_INSTALLER ?= ../WorkBuddy-win32-x64-user-*.exe
+.PHONY: templates-export
+
+templates-export: ## 从官方安装包导出提示词模板（WB_INSTALLER=<exe> 可覆盖）
+	@f="$$(ls -1 $(WB_INSTALLER) 2>/dev/null | sort -V | tail -1)"; \
+	test -n "$$f" || { echo "找不到安装包：$(WB_INSTALLER)（用 WB_INSTALLER=<exe> 指定）"; exit 1; }; \
+	echo "安装包：$$f"; \
+	python3 scripts/extract-official-templates.py "$$f"
+
 # ---- 测试与检查 ----------------------------------------------------------
 .PHONY: test
 test: ## 完整测试套件（node 存在时包含前端 JS 冒烟）

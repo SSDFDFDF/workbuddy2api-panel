@@ -278,7 +278,7 @@ func TestLoadFileMissingFailsFast(t *testing.T) {
 // 且有分域的预设两份正文必须不同（否则"分域"是假的）。
 func TestPresetCatalogComplete(t *testing.T) {
 	infos := Presets()
-	if len(infos) < 5 {
+	if len(infos) < 4 {
 		t.Fatalf("catalog too small: %d", len(infos))
 	}
 	for _, in := range infos {
@@ -311,6 +311,44 @@ func TestPresetCatalogComplete(t *testing.T) {
 			for _, b := range banned {
 				if strings.Contains(text, b) {
 					t.Errorf("preset %s/%s contains banned fingerprint %q", in.Name, realm, b)
+				}
+			}
+		}
+	}
+}
+
+// TestPresetStaticAndToolAgnostic 预设正文是静态网关闭环文本：
+//   - 不得残留模板标记（模板原件在两阶段渲染后才成为正文，`{{ }}`/`{% %}` 会变成
+//     模型读不懂的字面噪声）；
+//   - 不得点名官方专有工具/能力（present_files、Skill、TaskCreate、agent mail、云端记忆等）——
+//     第三方客户端不具备这些能力，点名等于诱导工具幻觉与行为偏差。
+//
+// 该约束来自 docs/PRESET_DIFF_ANALYSIS.md：标签名与顺序保留，标签内容必须工具无关
+// （可空或中性）。新增预设若需要引用"工具"，请用"本请求声明的工具"这类通用措辞。
+func TestPresetStaticAndToolAgnostic(t *testing.T) {
+	markers := []string{"{{", "{%", "{#"}
+	proprietary := []string{
+		"present_files", "automation_update", "widget_guidelines", "show_widget",
+		"TaskCreate", "TaskGet", "TaskUpdate", "TaskList", "AskUserQuestion",
+		"search_and_install_skills", "conversation_search", "install_binary",
+		"mcp__agent-mail", "DeferExecuteTool", "ToolSearch", "ImageGen", "VideoGen",
+		"suggest_plugin_install", "search_plugins",
+	}
+	for _, in := range Presets() {
+		for _, realm := range []string{"cn", "global"} {
+			text, err := presetContent(in.Name, realm)
+			if err != nil {
+				t.Errorf("preset %s/%s: %v", in.Name, realm, err)
+				continue
+			}
+			for _, m := range markers {
+				if strings.Contains(text, m) {
+					t.Errorf("preset %s/%s contains template marker %q", in.Name, realm, m)
+				}
+			}
+			for _, p := range proprietary {
+				if strings.Contains(text, p) {
+					t.Errorf("preset %s/%s names official-only capability %q", in.Name, realm, p)
 				}
 			}
 		}

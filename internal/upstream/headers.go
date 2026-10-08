@@ -5,6 +5,7 @@ package upstream
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -146,6 +147,7 @@ type ChatMeta struct {
 	AgentType             string
 	Traceparent           string
 	B3TraceID             string
+	ACPConnectionID       string // acp-connection-id：官方客户端会话连接标识（UUIDv4）
 }
 
 // ChatHeaders 在 common 之上加 chat 专属的账号头。
@@ -194,6 +196,14 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 	// 官方桌面端标准产品身份与 Agent 意图头（daemon-bootstrap 对齐）。
 	req.Header.Set("X-Private-Data", "true")
 	req.Header.Set("X-Agent-Intent", "craft")
+	// 官方客户端内嵌 Stainless Node SDK 运行时头族（实机抓包对齐）。
+	req.Header.Set("x-stainless-arch", "x64")
+	req.Header.Set("x-stainless-lang", "js")
+	req.Header.Set("x-stainless-os", "Windows")
+	req.Header.Set("x-stainless-package-version", "6.25.0")
+	req.Header.Set("x-stainless-retry-count", "0")
+	req.Header.Set("x-stainless-runtime", "node")
+	req.Header.Set("x-stainless-runtime-version", "v22.21.1")
 	// 客户端 IP 透传（仅 PassthroughIP=true 且本次请求带 IP）。
 	c.injectClientIP(req, clientIP)
 	// 设备风控头：auth 每号 > config 全局 > 文件兜底；空则不注入。
@@ -242,6 +252,17 @@ func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 	if meta.ConversationID != "" {
 		req.Header.Set("X-Conversation-ID", meta.ConversationID)
 	}
+	// acp-connection-id：会话连接标识（入站透传优先；缺失时由会话派生稳定 UUID 或新建）。
+	acpID := meta.ACPConnectionID
+	if acpID == "" && meta.ConversationID != "" {
+		h := session.RequestIDForKey("acp:" + meta.ConversationID)
+		acpID = fmt.Sprintf("%s-%s-%s-%s-%s", h[0:8], h[8:12], h[12:16], h[16:20], h[20:32])
+	} else if acpID == "" {
+		h := session.NewMessageID()
+		acpID = fmt.Sprintf("%s-%s-%s-%s-%s", h[0:8], h[8:12], h[12:16], h[16:20], h[20:32])
+	}
+	req.Header.Set("acp-connection-id", acpID)
+
 	req.Header.Set("X-Conversation-Request-ID", convReqID)
 	req.Header.Set("X-Conversation-Message-ID", messageID)
 	req.Header.Set("X-Request-ID", messageID)

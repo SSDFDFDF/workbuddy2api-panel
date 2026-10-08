@@ -7,6 +7,12 @@
 //
 // 新增预设只需放文件 + 在 catalog 里登记一行，面板会自动列出（列表由
 // Presets() 生成，前端不硬编码）。
+//
+// 素材来源：官方 Windows 安装包里的明文 Nunjucks 模板（`resources/templates/*.tpl`、
+// `resources/plugins/workbuddy-builtin/{welcomemode,interactionmode,prompt-common}/**`）。
+// 原件归档、变量表、两阶段装配管线与重新导出方法见 `docs/official-templates/README.md`
+// （注意 `docs/` 被 .gitignore 忽略，属于本地参考资料）。本目录的预设是**从抓包渲染产物
+// 蒸馏的网关闭环正文**，不是模板原件的复制。
 package prompt
 
 import (
@@ -42,32 +48,44 @@ var presetCatalog = []struct {
 }{
 	{
 		name:   PresetDefault,
-		label:  "通用工程助手",
-		desc:   "约 2 KB，工程立场/最小改动/验证闭环；中英共用一份正文",
+		label:  "通用默认",
+		desc:   "分域共用，0.4K 字符：自撰工程助手纪律（结论先行、最小改动、工具契约、安全红线）",
 		realms: nil,
+	},
+	{
+		name:   PresetOfficial,
+		label:  "官方骨架",
+		desc:   "全文官方英文原文（CN 9.4K / Global 9.0K 字符）：实机抓包 26 模块形态，仅换产品名/数据目录/区域/语言等域差异",
+		realms: []string{"cn", "global"},
+	},
+	{
+		name:   PresetOfficialCompact,
+		label:  "官方精简",
+		desc:   "全文官方英文原文（CN/Global 1.6K 字符）：完整官方 content_policy + 身份 + 工具纪律，省略其余模块",
+		realms: []string{"cn", "global"},
+	},
+	{
+		name:   PresetOfficialQuick,
+		label:  "官方快速",
+		desc:   "全文官方英文原文（CN 2.4K / Global 2.6K 字符）：无工具纯问答，对应官方 Quick 模式模板",
+		realms: []string{"cn", "global"},
+	},
+	{
+		name:   PresetOfficialAsk,
+		label:  "官方只读",
+		desc:   "全文官方英文原文（CN 5.8K / Global 5.5K 字符）：只读分析与问答，不落盘、不执行；对应官方 Ask 模式片段",
+		realms: []string{"cn", "global"},
+	},
+	{
+		name:   PresetOfficialPlan,
+		label:  "官方计划",
+		desc:   "全文官方英文原文（CN 7.2K / Global 6.9K 字符）：计划先行、逐步验证；对应官方 Plan 模式片段",
+		realms: []string{"cn", "global"},
 	},
 	{
 		name:   PresetMinimal,
 		label:  "极简",
-		desc:   "约 10 行，量级对齐官方 Quick 模式模板；按域取中/英文",
-		realms: []string{"cn", "global"},
-	},
-	{
-		name:   "coding",
-		label:  "编码代理",
-		desc:   "工具调用纪律 + 最小改动 + 自证闭环；贴近交互式编码代理的行为契约",
-		realms: []string{"cn", "global"},
-	},
-	{
-		name:   "tool-agent",
-		label:  "函数调用",
-		desc:   "面向 function calling 会话：schema 精确、参数不猜、不叙述调用细节",
-		realms: []string{"cn", "global"},
-	},
-	{
-		name:   "assistant",
-		label:  "通用助手",
-		desc:   "非工程向：问答/写作/解释；结论先行、区分事实与判断",
+		desc:   "CN 0.15K / Global 0.4K 字符：最短可用人格，量级对齐官方 Quick 模板",
 		realms: []string{"cn", "global"},
 	},
 }

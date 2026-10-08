@@ -869,6 +869,7 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 		TraceID:               r.Header.Get("X-Trace-ID"),
 		Traceparent:           r.Header.Get("traceparent"),
 		B3TraceID:             r.Header.Get("X-B3-TraceId"),
+		ACPConnectionID:       r.Header.Get("acp-connection-id"),
 	}
 	if chatMeta.ConversationRequestID == "" {
 		chatMeta.ConversationRequestID = session.NewMessageID()
