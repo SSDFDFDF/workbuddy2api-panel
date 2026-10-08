@@ -80,10 +80,10 @@ type Event struct {
 	HasCredit        bool      `json:"credit_known"`
 	// CacheHitTokens / CacheMissTokens 上游前缀缓存命中/未命中 token（issue #92）。
 	// 上游未回该维度时两者皆零值省略；hit=0 + miss>0 即整段未命中。
-	CacheHitTokens  int64 `json:"cache_hit_tokens,omitempty"`
-	CacheMissTokens int64 `json:"cache_miss_tokens,omitempty"`
-	ClientIP         string    `json:"client_ip,omitempty"`
-	UserAgent        string    `json:"user_agent,omitempty"`
+	CacheHitTokens  int64  `json:"cache_hit_tokens,omitempty"`
+	CacheMissTokens int64  `json:"cache_miss_tokens,omitempty"`
+	ClientIP        string `json:"client_ip,omitempty"`
+	UserAgent       string `json:"user_agent,omitempty"`
 }
 
 // Filter 用于从归档中筛选最近记录。字符串字段一律「包含」匹配（大小写不敏感），
@@ -306,17 +306,29 @@ func (w *archiveWriter) enqueue(e Event) {
 	}
 }
 
+// pruneInterval 目录保留/容量清理的扫描间隔。
+//
+// flush（bufio 去缓冲）需要秒级时效，但 prune 是 ReadDir + 逐文件 Info + 排序：
+// 保留期（天级）与容量上限（MB 级）都不需要秒级判定，此前两者共用 1s ticker，
+// 等于每秒白白扫一遍目录。拆开后 flush 仍 1s、prune 降到分钟级。
+// var 而非 const：仅便于测试注入短间隔。
+var pruneInterval = time.Minute
+
 func (w *archiveWriter) run() {
 	defer close(w.done)
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	lastPrune := time.Now()
 	for {
 		select {
 		case e := <-w.ch:
 			w.writeEvent(e)
 		case <-ticker.C:
 			w.flush()
-			w.prune()
+			if now := time.Now(); now.Sub(lastPrune) >= pruneInterval {
+				w.prune()
+				lastPrune = now
+			}
 		case <-w.stop:
 			for {
 				select {

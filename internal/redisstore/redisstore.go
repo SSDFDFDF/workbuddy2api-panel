@@ -54,6 +54,17 @@ const (
 	readTimeout = 3 * time.Second
 )
 
+// loadBindsTimeout LoadBinds 的专用上限（仅启动时同步调用）。
+//
+// 比 readTimeout 宽松很多的原因：启动恢复要读完所有绑定，而 Upstash 公网单次 RTT
+// 50~300ms。旧实现是「SCAN 后逐键 GET」的 N+1，在 3s 上限下绑定稍多就会半途超时、
+// 静默丢弃剩余绑定（粘性重启丢失）。改为批量 MGET 后调用次数与绑定数不再是线性
+// 关系，这里给的是「启动阶段允许慢」的配额，而不是每次 RPC 的上限。
+const loadBindsTimeout = 30 * time.Second
+
+// bindMGetBatch 单次 MGET 的键数量上限（与 SCAN count 同量级）。
+const bindMGetBatch = 200
+
 // New 根据 url+token 构建 Store。
 //   - url 为空 → Noop（纯内存模式）
 //   - url 已是完整 rediss:// URL 则直接 ParseURL；否则用 token 组装 rediss://default:token@host:6379
@@ -320,19 +331,64 @@ func (u *Upstash) LoadState() ([]byte, bool) {
 	return v, true
 }
 
-// LoadBinds 全量读取粘性会话绑定（SCAN bind:* 前缀）。
+// LoadBinds 全量读取粘性会话绑定（SCAN 列举 + 分批 MGET 取值）。
+//
+// 为什么不用逐键 GET：旧实现 SCAN 到的每个 key 都单独 GET 一次，是典型 N+1。
+// Upstash 公网单次 RTT 50~300ms，500 条绑定就是 25~150s——远超 readTimeout(3s)，
+// 结果是启动恢复半途超时、**静默**丢掉剩余绑定（这就是「粘性重启丢失」的成因之一）。
+// MGET 把 N 次 RTT 收敛为 N/200 次。
 func (u *Upstash) LoadBinds() map[string]string {
-	out := map[string]string{}
-	ctx, cancel := context.WithTimeout(context.Background(), readTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), loadBindsTimeout)
 	defer cancel()
-	iter := u.client.Scan(ctx, 0, bindPrefix+"*", 200).Iterator()
+
+	var keys []string
+	iter := u.client.Scan(ctx, 0, bindPrefix+"*", bindMGetBatch).Iterator()
 	for iter.Next(ctx) {
-		key := iter.Val()
-		v, err := u.client.Get(ctx, key).Result()
+		keys = append(keys, iter.Val())
+	}
+	if err := iter.Err(); err != nil {
+		log.Printf("[redisstore] WARN: LoadBinds 列举失败（已取到 %d 个键）: %v", len(keys), err)
+	}
+	if len(keys) == 0 {
+		return map[string]string{}
+	}
+
+	out := make(map[string]string, len(keys))
+	for i := 0; i < len(keys); i += bindMGetBatch {
+		end := i + bindMGetBatch
+		if end > len(keys) {
+			end = len(keys)
+		}
+		vals, err := u.client.MGet(ctx, keys[i:end]...).Result()
 		if err != nil {
+			log.Printf("[redisstore] WARN: LoadBinds 批量取值失败（键 %d..%d）: %v", i, end-1, err)
 			continue
 		}
-		out[strings.TrimPrefix(key, bindPrefix)] = v
+		for k, v := range decodeBindValues(keys[i:end], vals) {
+			out[k] = v
+		}
+	}
+	if len(out) < len(keys) {
+		// 缺失不一定是错误（键可能在列举与取值之间过期），但差异较大时值得看见。
+		log.Printf("[redisstore] LoadBinds: 列举 %d 个键，取到 %d 个绑定", len(keys), len(out))
+	}
+	return out
+}
+
+// decodeBindValues 将 MGET 的返回值解为 key→uid。
+// 值为 nil（键已过期/不存在）或非 string 的条目跳过；键前缀已剥。
+// 抽成纯函数以便直接测试 nil/异常值的处理（真实 Redis 才能造出 nil）。
+func decodeBindValues(keys []string, vals []any) map[string]string {
+	out := make(map[string]string, len(keys))
+	for i, v := range vals {
+		if i >= len(keys) {
+			break
+		}
+		s, ok := v.(string)
+		if !ok || s == "" {
+			continue
+		}
+		out[strings.TrimPrefix(keys[i], bindPrefix)] = s
 	}
 	return out
 }

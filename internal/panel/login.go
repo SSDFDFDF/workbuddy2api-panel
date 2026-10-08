@@ -162,8 +162,9 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 	}
 	p.loginMu.Lock()
 	// 顺手回收过期会话，防"开弹窗走开"的 state 滞留。
+	now := time.Now()
 	for s, sess := range p.logins {
-		if time.Since(sess.created) > loginTTL {
+		if sess.expiredAt(now) {
 			delete(p.logins, s)
 		}
 	}
@@ -174,6 +175,13 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 }
 
 // loginPoll 轮询登录态。未完成 → {done:false}；完成 → 建凭证、落盘、热加载、签到。
+// loginPoll 轮询设备授权结果。
+//
+// TTL 强制：loginTTL 是「授权 URL 最长有效期」的公开语义（loginSession 与
+// panel.go 的注释均如此声明），但此前只在**下一次 loginStart** 的顺手清理里生效——
+// 已经拿到 state 的轮询完全不受时限约束：开弹窗后放着不管，过期的 state 仍能完成
+// 登录并落盘凭证。这里在入口显式判定并回收（poll 是唯一的读取点，兼作清理点，
+// 无需额外 ticker）。
 func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	state := r.URL.Query().Get("state")
 	if state == "" {
@@ -182,7 +190,16 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	}
 	p.loginMu.Lock()
 	sess, known := p.logins[state]
+	expired := known && sess.expiredAt(time.Now())
+	if expired {
+		delete(p.logins, state) // 超期即回收，不再允许完成登录
+	}
 	p.loginMu.Unlock()
+	if expired {
+		writeJSON(w, http.StatusOK, map[string]any{"done": false, "expired": true,
+			"message": "授权会话已过期（超过 " + loginTTL.String() + "），请重新发起添加账号"})
+		return
+	}
 	if !known {
 		writeErr(w, http.StatusNotFound, "unknown or expired state（请重新发起添加账号）")
 		return

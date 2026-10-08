@@ -140,6 +140,13 @@ type loginSession struct {
 	tempIdentity string
 }
 
+// expiredAt 报告会话是否已超过 loginTTL。判定收敛在此处：loginStart 的顺手清理
+// 与 loginPoll 的入口校验必须同口径，否则「下一个弹窗触发清理」与「轮询被拒绝」
+// 会对同一会话给出不同结论（此前 poll 完全不检查超期）。
+func (s loginSession) expiredAt(now time.Time) bool {
+	return now.Sub(s.created) > loginTTL
+}
+
 // New 构建面板。
 func New(cfg Config) *Panel {
 	if cfg.RedisMode == "" {

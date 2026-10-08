@@ -1203,6 +1203,16 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 		writeJSON(w, http.StatusOK, formatted)
 		st.status = http.StatusOK
 		st.outcome = reqlog.OutcomeSuccess
+		// 下游交付失败（慢/已断连客户端）：上游确实生成成功，但客户端没拿到正文。
+		// 不区分的话状态码 200 被当成成功，运维在日志/请求记录里根本看不出这次请求
+		// 结果丢在了网关出口。此处只改观测口径：**不得**重放上游（可能重复扣费）。
+		// 写失败发生在写 deadline 之后（writeDeadlineWriter 记录首次错误）。
+		if dw, ok := w.(*writeDeadlineWriter); ok && dw.err != nil {
+			st.status = http.StatusBadGateway
+			st.outcome = reqlog.OutcomeInterrupted
+			log.Printf("WARN: [server] downstream write failed acct=%s model=%s: %v (upstream succeeded, response not delivered)",
+				logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, dw.err)
+		}
 		st.toks = completionTokens(resp)
 		// 非流式同理：聚合成功（无 error 帧、非空流）才算这一跳成功，事后才记成功/绑粘性。
 		h.cfg.Pool.NoteSuccess(acct.UID)
