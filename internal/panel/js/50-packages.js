@@ -211,17 +211,17 @@ function renderPackages(d, detailLimit) {
       const days = expDaysLeft(first.date, today);
       const dayWord = days === 0 ? '今天' : days === 1 ? '明天' : days + '天后';
       const c = days <= 3 ? 'var(--bad)' : days <= 7 ? 'var(--warn)' : 'inherit';
-      expHtml = '<span style="color:' + c + '"><b>' + esc(first.date) + '</b> · ' + fmtTok(first.remain) +
+      expHtml = '<span class="pk-exp" style="color:' + c + '"><b>' + esc(first.date) + '</b> · ' + fmtTok(first.remain) +
         ' <span class="note">(' + dayWord + ')</span></span>';
     }
     const srcs = pkBySource(a.packages || []);
     const totalSize = srcs.reduce((s, x) => s + (x.size || 0), 0) || 1;
     const srcTags = srcs.slice(0, 3).map(s => {
       const pct = Math.round((s.size || 0) / totalSize * 100);
-      const shortName = esc(s.name.replace(/^CodeBuddy/, '').slice(0, 8));
+      const shortName = esc(s.name.replace(/^CodeBuddy/, ''));
       return '<span class="pk-src-tag" title="' + esc(s.name) + ' 共 ' + fmtTok(s.size) + '">' +
         '<i class="pk-src-dot" style="background:' + colorOf(s.key) + '"></i>' +
-        shortName + ' <b>' + pct + '%</b></span>';
+        '<span class="pk-src-nm">' + shortName + '</span> <b>' + pct + '%</b></span>';
     }).join('');
     const availablePks = (a.packages || []).filter(p => Number(p.remain) > 0).length;
 
@@ -233,7 +233,7 @@ function renderPackages(d, detailLimit) {
       '<td class="num">' + fmtTok(a.size) + '</td>' +
       '<td class="num">' + availablePks + ' / ' + (a.packages || []).length + '</td>' +
       '<td>' + expHtml + '</td>' +
-      '<td>' + (srcTags || '<span class="note">—</span>') + '</td>' +
+      '<td><div class="pk-srcs">' + (srcTags || '<span class="note">—</span>') + '</div></td>' +
       '<td class="acts"><button class="xs" data-pk-view="' + esc(a.uid) + '">包明细</button></td></tr>';
   }).join('');
 

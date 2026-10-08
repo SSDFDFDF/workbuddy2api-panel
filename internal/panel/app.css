@@ -129,11 +129,21 @@ body {
 .split-side { position: sticky; top: 68px; }
 .split-main { min-width: 0; }
 
-.side-tabs {
-  display: flex; flex-direction: column; gap: 3px;
+/* .side-card 是侧栏唯一的卡片外壳（配置导航 / 任务控制台共用）：
+   头 + 体 + 脚三段式；内部组件不再自带边框底色，避免卡片套卡片。 */
+.side-card {
   background: var(--surface); border: 1px solid var(--line); border-radius: 11px;
-  padding: 8px; box-shadow: var(--shadow);
+  box-shadow: var(--shadow); padding: 12px;
 }
+.side-hd {
+  display: flex; align-items: center; gap: 8px;
+  padding: 1px 4px 10px; margin-bottom: 8px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 13.5px; font-weight: 600; color: var(--ink);
+}
+.side-hd svg { flex: none; opacity: .8; }
+
+.side-tabs { display: flex; flex-direction: column; gap: 3px; }
 .side-tab {
   display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px;
   border: 1px solid transparent; background: transparent; color: var(--ink-2); text-align: left;
@@ -154,10 +164,11 @@ body {
 .side-meta { padding: 7px 10px; background: var(--surface-2); border-radius: 7px; font-size: 11px; }
 .side-meta-lbl { color: var(--ink-3); font-weight: 500; display: block; margin-bottom: 2px; }
 .side-meta-val { color: var(--ink-2); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.side-meta-desc { color: var(--ink-3); line-height: 1.55; }
 
-.side-actions { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+.side-actions { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
 .side-btn { width: 100%; justify-content: center; padding: 8px 12px; font-weight: 550; }
-.side-item { margin-bottom: 16px; }
+.side-item { margin-bottom: 10px; }
 .side-item .lb { display: block; font-size: 12px; color: var(--ink-2); font-weight: 550; margin-bottom: 5px; }
 .side-item .hint { display: block; font-size: 11px; color: var(--ink-3); margin-top: 4px; }
 .side-info { padding: 11px 13px; background: var(--surface-2); border: 1px solid var(--line-soft); border-radius: 8px; }
@@ -170,10 +181,14 @@ body {
 @media (max-width: 900px) {
   .split-layout { grid-template-columns: 1fr; gap: 14px; }
   .split-side { position: static; }
-  .side-tabs { flex-direction: row; overflow-x: auto; position: sticky; top: 58px; z-index: 15; padding: 6px; }
-  .side-tab { width: auto; padding: 7px 12px; white-space: nowrap; }
+  /* 窄屏把配置导航压成一条吸顶的横向 Tab 条：卡片外壳保留，标题与
+     文件路径让位；任务控制台侧栏是普通卡片，保持原样。 */
+  #view-config .split-side { position: sticky; top: 58px; z-index: 15; }
+  #view-config .side-card { padding: 6px; }
+  #view-config .side-hd, #view-config .side-foot { display: none; }
+  .side-tabs { flex-direction: row; overflow-x: auto; padding: 2px; gap: 4px; }
+  .side-tab { width: auto; padding: 6px 12px; white-space: nowrap; flex: none; }
   .side-tab-sub { display: none; }
-  .side-foot { display: none; }
 }
 
 /* ── 控件 ─────────────────────────────────────────────────────────── */
@@ -729,23 +744,29 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 
   /* 用量统计条已改用 .kpis（见「用量视图」段），此处不再保留 .stats.compact 变体。 */
 
-  /* 到期提醒卡片（首页）：多列网格最多只占 3 行，内容完整不截断，不影响下方账号表 */
+  /* 到期提醒卡片（首页）：多列网格铺满卡片，不设内部滚动条 */
   .exp-rows {
     display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-    gap: 6px 10px; max-height: 104px; overflow-y: auto; margin-top: 6px;
+    gap: 6px 10px; margin-top: 6px; align-items: start;
   }
   .exp-rows .empty {
     grid-column: 1 / -1; width: 100%; text-align: center; padding: 18px 0;
   }
   .exp-row {
-    display: flex; align-items: center; gap: 8px; padding: 4px 8px;
+    display: flex; align-items: center; gap: 8px; padding: 4px 8px; min-width: 0;
     background: var(--surface-2); border: 1px solid var(--line-soft);
     border-radius: 6px; font-size: 12px; min-height: 28px;
   }
   .exp-row:hover { background: var(--surface); border-color: var(--line); }
   .exp-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
-  .exp-nm { font-weight: 600; flex: none; white-space: nowrap; }
-  .exp-main { color: var(--ink-2); font-size: 11.5px; white-space: nowrap; }
+  .exp-nm {
+    font-weight: 600; flex: 0 1 auto; min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .exp-main {
+    color: var(--ink-2); font-size: 11.5px; flex: 1; min-width: 0;
+    overflow-wrap: anywhere;
+  }
   .exp-main b { font-family: var(--mono); font-variant-numeric: tabular-nums; }
   .exp-main.err { color: var(--bad); }
 
@@ -759,11 +780,17 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .pg-acts { display: flex; align-items: center; gap: 6px; }
   .pg-acts button { padding: 3px 10px; font-size: 12px; }
 
-  /* 积分构成单表格：来源文字与占比标签 */
+  /* 积分构成单表格：来源文字与占比标签。标签本身可换行：上游包名能到 20+ 字，
+     不截断又要不把表格撑破，就让长名字在标签内部折行（包名换行比砍掉后半段可读）。 */
+  .acc.pk { min-width: 960px; }                              /* 窄屏走横向滚动，不把账号列压成一列一个字 */
+  .acc.pk td:nth-child(2) { min-width: 150px; }              /* 第 2 列是账号（第 1 列是 .mark 色条） */
+  .pk-srcs { display: flex; flex-wrap: wrap; gap: 3px 4px; max-width: 340px; }
   .pk-src-tag {
-    display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px;
+    display: inline; padding: 2px 6px;
     background: var(--surface-2); border-radius: 4px; font-size: 11.5px;
-    color: var(--ink-2); white-space: nowrap; margin: 1px 2px;
+    color: var(--ink-2); box-decoration-break: clone; -webkit-box-decoration-break: clone;
   }
-  .pk-src-tag b { font-family: var(--mono); color: var(--accent); font-weight: 600; }
-  .pk-src-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+  .pk-src-nm { overflow-wrap: anywhere; }
+  .pk-src-tag b { font-family: var(--mono); color: var(--accent); font-weight: 600; white-space: nowrap; }
+  .pk-src-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; vertical-align: middle; margin-right: 3px; }
+  .pk-exp { white-space: nowrap; }
