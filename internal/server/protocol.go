@@ -99,7 +99,7 @@ func (o inferenceOutput) Aggregate(r io.Reader, opts ...upstream.StreamOption) (
 	if o.kind == protocol.Chat {
 		return upstream.Aggregate(r, opts...)
 	}
-	return protocol.Aggregate(r, opts...)
+	return protocol.Aggregate(r, o.request, opts...)
 }
 
 func encodedRequest(req *protocol.Request, original []byte) ([]byte, error) {

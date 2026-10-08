@@ -288,6 +288,10 @@ func (b *responseBuilder) format(resp map[string]any) (map[string]any, error) {
 		}
 	}
 	ids := map[string]bool{}
+	declared := map[string]bool{}
+	for _, name := range declaredToolNames(b.req) {
+		declared[name] = true
+	}
 	for _, v := range calls {
 		call, ok := v.(map[string]any)
 		if !ok {
@@ -308,6 +312,9 @@ func (b *responseBuilder) format(resp map[string]any) (map[string]any, error) {
 		}
 		if strings.TrimSpace(id) == "" || strings.TrimSpace(name) == "" || ids[id] {
 			return nil, fmt.Errorf("missing or duplicate upstream tool identity")
+		}
+		if !declared[name] {
+			return nil, fmt.Errorf("upstream tool name does not match declared tools")
 		}
 		ids[id] = true
 		input, err := jsondoc.Object([]byte(args))

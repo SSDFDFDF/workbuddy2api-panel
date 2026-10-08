@@ -25,9 +25,9 @@ const toolsStream = `data: {"choices":[{"index":0,"delta":{"content":"checking"}
 
 func testRequest(t *testing.T, kind Kind) *Request {
 	if kind == Responses {
-		return mustDecode(t, kind, `{"model":"cn:demo","store":false,"input":"hi"}`)
+		return mustDecode(t, kind, `{"model":"cn:demo","store":false,"input":"hi","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"},"strict":false},{"type":"function","name":"other","parameters":{"type":"object"},"strict":false}]}`)
 	}
-	return mustDecode(t, kind, `{"model":"cn:demo","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`)
+	return mustDecode(t, kind, `{"model":"cn:demo","max_tokens":100,"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"lookup","input_schema":{"type":"object"}},{"name":"other","input_schema":{"type":"object"}}]}`)
 }
 
 func events(t *testing.T, raw string, kind Kind) []map[string]any {
@@ -68,7 +68,7 @@ func TestTextAndToolStreams(t *testing.T) {
 				if strings.Contains(rec.Body.String(), "[DONE]") {
 					t.Fatal("Chat terminator leaked")
 				}
-				resp, err := Aggregate(strings.NewReader(raw))
+				resp, err := Aggregate(strings.NewReader(raw), r)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -232,7 +232,7 @@ func TestStreamFailuresAndIncomplete(t *testing.T) {
 func TestAggregateStreamRejectSameOrdering(t *testing.T) {
 	raw := strings.Replace(toolsStream, `"finish_reason":"tool_calls"`, `"finish_reason":null`, 1)
 	raw = strings.Replace(raw, "data: [DONE]", `data: {"choices":[{"index":0,"delta":{"content":"late"},"finish_reason":"tool_calls"}]}`+"\n\ndata: [DONE]", 1)
-	if _, err := Aggregate(strings.NewReader(raw)); err == nil {
+	if _, err := Aggregate(strings.NewReader(raw), testRequest(t, Responses)); err == nil {
 		t.Fatal("aggregate reordered text")
 	}
 	for _, kind := range []Kind{Responses, Anthropic} {
@@ -253,7 +253,7 @@ func TestJSONSnapshotAndMissingUsage(t *testing.T) {
 			t.Fatal(rec.Body.String())
 		}
 	}
-	resp, err := Aggregate(strings.NewReader(`{"object":"chat.completion","choices":[{"index":0,"message":{"content":"hi"},"finish_reason":"stop"}]}`))
+	resp, err := Aggregate(strings.NewReader(`{"object":"chat.completion","choices":[{"index":0,"message":{"content":"hi"},"finish_reason":"stop"}]}`), testRequest(t, Responses))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +291,7 @@ func TestDownstreamWriteFailure(t *testing.T) {
 func TestOwnOutputCanBeReplayed(t *testing.T) {
 	for _, kind := range []Kind{Responses, Anthropic} {
 		r := testRequest(t, kind)
-		resp, err := Aggregate(strings.NewReader(toolsStream))
+		resp, err := Aggregate(strings.NewReader(toolsStream), r)
 		if err != nil {
 			t.Fatal(err)
 		}

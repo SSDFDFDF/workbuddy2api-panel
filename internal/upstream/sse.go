@@ -107,6 +107,7 @@ type completionState struct {
 	aggregate         bool
 	bytes             int
 	emptyToolIdentity bool
+	declaredToolNames map[string]bool
 }
 type choiceState struct {
 	fields            map[string]any
@@ -114,6 +115,10 @@ type choiceState struct {
 	tools             map[int]map[string]any
 	finish            string
 	emptyToolIdentity bool
+	declaredToolNames map[string]bool
+	toolNames         map[int]*toolNameState
+	messageStrings    map[string]*strings.Builder
+	toolStrings       map[int]map[string]*strings.Builder
 }
 
 func newCompletion(n int, aggregate bool) *completionState {
@@ -150,7 +155,12 @@ func mergeStable(dst, src map[string]any, ignore map[string]bool, strict bool) e
 	}
 	return nil
 }
-func appendString(dst map[string]any, k string, v any) error {
+
+// appendString keeps a growing buffer instead of copying the entire prefix on
+// every frame. Builders stay behind pointers (a non-zero Builder must not be
+// copied). String() exposes an immutable prefix without a second allocation;
+// subsequent appends never overwrite bytes already visible to maps/observers.
+func appendString(dst map[string]any, buffers map[string]*strings.Builder, k string, v any) error {
 	if v == nil {
 		return nil
 	}
@@ -158,8 +168,15 @@ func appendString(dst map[string]any, k string, v any) error {
 	if !ok {
 		return fmt.Errorf("invalid string delta %s", k)
 	}
-	old, _ := dst[k].(string)
-	dst[k] = old + s
+	b := buffers[k]
+	if b == nil {
+		b = &strings.Builder{}
+		old, _ := dst[k].(string)
+		b.WriteString(old)
+		buffers[k] = b
+	}
+	b.WriteString(s)
+	dst[k] = b.String()
 	return nil
 }
 func mergeList(dst map[string]any, k string, v any) error {
@@ -181,12 +198,15 @@ func (c *choiceState) mergeMessage(m map[string]any, snapshot, strict bool) erro
 				return fmt.Errorf("conflicting message snapshot field %s", k)
 			}
 			c.message[k] = v
+			// A snapshot may replace empty/null fields. Re-seed any later
+			// delta from that exact snapshot, not a stale buffer.
+			delete(c.messageStrings, k)
 		}
 		return nil
 	}
 	for _, k := range []string{"content", "reasoning", "reasoning_content", "refusal"} {
 		if v, ok := m[k]; ok {
-			if err := appendString(c.message, k, v); err != nil {
+			if err := appendString(c.message, c.messageStrings, k, v); err != nil {
 				return err
 			}
 		}
@@ -267,10 +287,20 @@ func (c *choiceState) mergeMessage(m map[string]any, snapshot, strict bool) erro
 					to = map[string]any{}
 					t["function"] = to
 				}
+				if c.toolStrings[idx] == nil {
+					c.toolStrings[idx] = map[string]*strings.Builder{}
+				}
 				// Native adapter follows incremental name semantics, including delayed names.
 				for _, k := range []string{"name", "arguments"} {
 					if v, ok := fn[k]; ok {
-						if err := appendString(to, k, v); err != nil {
+						if k == "name" && c.declaredToolNames != nil {
+							if c.toolNames[idx] == nil {
+								c.toolNames[idx] = &toolNameState{declared: c.declaredToolNames}
+							}
+							if err := c.toolNames[idx].add(v); err != nil {
+								return err
+							}
+						} else if err := appendString(to, c.toolStrings[idx], k, v); err != nil {
 							return err
 						}
 					}
@@ -322,7 +352,9 @@ func (s *completionState) add(obj map[string]any) error {
 		seen[i] = true
 		c := s.choices[i]
 		if c == nil {
-			c = &choiceState{fields: map[string]any{"index": i}, message: map[string]any{}, tools: map[int]map[string]any{}, emptyToolIdentity: s.emptyToolIdentity}
+			c = &choiceState{fields: map[string]any{"index": i}, message: map[string]any{}, tools: map[int]map[string]any{}, emptyToolIdentity: s.emptyToolIdentity,
+				declaredToolNames: s.declaredToolNames, toolNames: map[int]*toolNameState{},
+				messageStrings: map[string]*strings.Builder{}, toolStrings: map[int]map[string]*strings.Builder{}}
 			s.choices[i] = c
 		}
 		if c.finish != "" {
@@ -388,7 +420,14 @@ func (s *completionState) add(obj map[string]any) error {
 func (c *choiceState) validateTools() error {
 	calls := []any{}
 	if len(c.tools) > 0 {
-		for _, t := range c.tools {
+		for index, t := range c.tools {
+			if state := c.toolNames[index]; state != nil {
+				name, err := state.name()
+				if err != nil {
+					return err
+				}
+				t["function"].(map[string]any)["name"] = name
+			}
 			calls = append(calls, t)
 		}
 	} else {
@@ -405,6 +444,9 @@ func (c *choiceState) validateTools() error {
 		args, ok := fn["arguments"].(string)
 		if name == "" || id == "" || !ok {
 			return fmt.Errorf("incomplete tool call")
+		}
+		if c.declaredToolNames != nil && !c.declaredToolNames[name] {
+			return fmt.Errorf("upstream tool name does not match declared tools")
 		}
 		if _, err := jsondoc.Decode([]byte(args)); err != nil {
 			return fmt.Errorf("invalid completed tool arguments: %w", err)
@@ -524,6 +566,7 @@ type streamOptions struct {
 	firstGeneration   time.Duration
 	tail              time.Duration
 	emptyToolIdentity bool
+	declaredToolNames map[string]bool
 }
 
 func WithErrorFrameObserver(fn func(string)) StreamOption {
@@ -741,6 +784,7 @@ func consume(r io.Reader, s *completionState, emit func(sseEvent, map[string]any
 				for _, c := range s.choices {
 					for _, k := range []string{"content", "reasoning", "reasoning_content", "refusal", "annotations"} {
 						delete(c.message, k)
+						delete(c.messageStrings, k)
 					}
 					delete(c.fields, "logprobs")
 				}
@@ -760,6 +804,7 @@ func ConsumeCompletion(r io.Reader, emit func(map[string]any) error, opts ...Str
 	}
 	s := newCompletion(o.expected, true)
 	s.emptyToolIdentity = o.emptyToolIdentity
+	s.declaredToolNames = o.declaredToolNames
 	err := consume(r, s, func(_ sseEvent, obj map[string]any) error {
 		if emit == nil {
 			return nil

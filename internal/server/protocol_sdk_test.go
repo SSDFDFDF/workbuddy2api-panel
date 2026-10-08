@@ -71,10 +71,17 @@ func TestProtocolSDKSmoke(t *testing.T) {
 			finish = "length"
 		}
 		body := fmt.Sprintf("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":%q},\"finish_reason\":%q}]}\n\n", text, finish)
-		if model == "tools" && results == 0 {
+		if strings.HasPrefix(model, "tools") && results == 0 {
+			first, second := "look", "up"
+			if model == "tools-repeated" {
+				first, second = "lookup", "lookup"
+			}
+			if model == "tools-cumulative" {
+				first, second = "look", "lookup"
+			}
 			body = `data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"a","type":"function","function":{"name":"","arguments":"{"}},{"index":1,"id":"b","type":"function","function":{"name":"lookup","arguments":"{\"n\":2}"}}]}}]}` + "\n\n" +
-				`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"","type":"","function":{"name":"look","arguments":"\"n\":"}}]}}]}` + "\n\n" +
-				`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"up","arguments":"9007199254740993}"}}]},"finish_reason":"tool_calls"}]}` + "\n\n"
+				`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"","type":"","function":{"name":"` + first + `","arguments":"\"n\":"}},{"index":1,"function":{"name":"lookup"}}]}}]}` + "\n\n" +
+				`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"` + second + `","arguments":"9007199254740993}"}}]},"finish_reason":"tool_calls"}]}` + "\n\n"
 		}
 		body += usage
 		if model == "truncated" {

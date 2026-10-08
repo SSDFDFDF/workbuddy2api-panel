@@ -74,7 +74,7 @@ func Stream(w http.ResponseWriter, r io.Reader, req *Request, hint func(string) 
 		return emit("response.content_part.added", map[string]any{"item_id": b.messageID, "output_index": 0, "content_index": 0,
 			"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}, "logprobs": []any{}}})
 	}
-	opts = append(opts, upstream.WithEmptyToolIdentityDeltas())
+	opts = completionOptions(req, opts)
 	resp, err := upstream.ConsumeCompletion(r, func(chunk map[string]any) error {
 		if err := order.observe(chunk); err != nil {
 			return err

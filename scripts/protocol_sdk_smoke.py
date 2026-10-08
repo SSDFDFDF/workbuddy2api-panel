@@ -40,7 +40,8 @@ atools = [{"name": "lookup", "input_schema": schema}]
 initial = [{"role": "user", "content": "hi"}]
 
 for stream in (False, True):
-    for model in ("text", "tools", "length"):
+    for model in ("text", "tools", "tools-repeated", "tools-cumulative", "length"):
+        is_tools = model.startswith("tools")
         params = dict(model="cn:" + model, store=False, input=initial, tools=otools)
         if stream:
             with o.responses.stream(**params) as s:
@@ -56,7 +57,7 @@ for stream in (False, True):
             result = o.responses.create(**params)
         check_usage(result)
         assert result.status == ("incomplete" if model == "length" else "completed")
-        if model == "tools":
+        if is_tools:
             calls = result.output
             assert [v.call_id for v in calls] == ["a", "b"]
             assert [v.name for v in calls] == ["lookup", "lookup"]
@@ -84,8 +85,8 @@ for stream in (False, True):
         else:
             result = a.messages.create(**params)
         check_usage(result, True)
-        assert result.stop_reason == {"text": "end_turn", "length": "max_tokens", "tools": "tool_use"}[model]
-        if model == "tools":
+        assert result.stop_reason == ("tool_use" if is_tools else {"text": "end_turn", "length": "max_tokens"}[model])
+        if is_tools:
             calls = result.content
             assert [v.id for v in calls] == ["a", "b"]
             assert calls[0].input["n"] == 9007199254740993
@@ -101,6 +102,17 @@ for stream in (False, True):
             assert final.content[0].text == "工具完成", final
         else:
             assert result.content[0].text == "你好", result
+
+# EasyInputMessage assistant history and output replay are both text inputs.
+for typ in ("input_text", "output_text"):
+    history = initial + [
+        {"role": "assistant", "content": [{"type": typ, "text": "之前的回答"}]},
+        {"role": "user", "content": "continue"},
+    ]
+    assert o.responses.create(model="cn:text", store=False, input=history).output_text == "你好"
+    with o.responses.stream(model="cn:text", store=False, input=history) as s:
+        list(s)
+        assert s.get_final_response().output_text == "你好"
 
 with o.responses.stream(model="cn:truncated", store=False, input="hi") as s:
     events = list(s)
@@ -127,4 +139,4 @@ for client, params in (
 
 o.close()
 a.close()
-print(f"SDK smoke passed: openai {openai.__version__}, anthropic {anthropic.__version__}; text/tools/two-turn/length/truncation/usage")
+print(f"SDK smoke passed: openai {openai.__version__}, anthropic {anthropic.__version__}; text/history/tools/name-dialects/two-turn/length/truncation/usage")

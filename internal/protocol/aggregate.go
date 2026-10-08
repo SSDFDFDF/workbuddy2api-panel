@@ -59,8 +59,7 @@ func (o *outputOrder) observe(chunk map[string]any) error {
 	return nil
 }
 
-func Aggregate(r io.Reader, opts ...upstream.StreamOption) (map[string]any, error) {
+func Aggregate(r io.Reader, req *Request, opts ...upstream.StreamOption) (map[string]any, error) {
 	order := &outputOrder{}
-	opts = append(opts, upstream.WithEmptyToolIdentityDeltas())
-	return upstream.ConsumeCompletion(r, order.observe, opts...)
+	return upstream.ConsumeCompletion(r, order.observe, completionOptions(req, opts)...)
 }

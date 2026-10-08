@@ -178,11 +178,13 @@ func responsesRequest(src map[string]any) (map[string]any, error) {
 				if role != "user" && role != "assistant" && role != "system" && role != "developer" {
 					return nil, invalid(p+".role", "unsupported message role")
 				}
-				typ := "input_text"
+				types := []string{"input_text"}
 				if role == "assistant" {
-					typ = "output_text"
+					// EasyInputMessage permits assistant input_text; replayed
+					// ResponseOutputMessage uses output_text. Both are lossless.
+					types = append(types, "output_text")
 				}
-				content, err := textParts(m["content"], p+".content", typ)
+				content, err := textParts(m["content"], p+".content", types...)
 				if err != nil {
 					return nil, err
 				}

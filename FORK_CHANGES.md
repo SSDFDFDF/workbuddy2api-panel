@@ -84,7 +84,9 @@ git log --oneline <已同步基线>..upstream/main     # 列出待判定提交�
 
 跨协议兼容不得引入模型名猜测式补丁：不自动删除不支持参数、不搬移 system、
 不改写 Schema、不伪造 reasoning / 工具结果、不将截断转为成功。
-工具空 identity 续传的兼容仅由新协议消费者显式启用；非空身份冲突仍报错，原生 Chat 不变。
+工具空 identity 续传与名称方言解析仅由新协议消费者显式启用；非空 ID 冲突仍报错，原生 Chat 不变。
+名称的重复 / 累计 / 分片解释仅在唯一匹配本次工具声明时采用；未声明、缺失和歧义均失败。
+长流正文与工具参数改用增量缓冲，保留快照冲突规则与原生流式已发送正文的释放行为。
 缓存计数桥接只映射已观测字段，不把 cache miss 当 cache write。
 
 本阶段参考 CLIProxyAPI、llm-rosetta、cc-switch，独立实现而非直接移植源码：
@@ -114,7 +116,7 @@ git log --oneline <已同步基线>..upstream/main     # 列出待判定提交�
 | 能力 | 主要文件 |
 | --- | --- |
 | 转发契约 | **新增** `internal/forwarding/`、`internal/jsondoc/` |
-| 响应管线 | `internal/upstream/sse.go`、`internal/upstream/idle.go` |
+| 响应管线 | `internal/upstream/{sse,tool_names}.go`、`internal/upstream/idle.go` |
 | Responses / Messages | **新增** `internal/protocol/`、`internal/server/protocol.go`；`internal/server/{handler,logging}.go`；`upstream.ConsumeCompletion` 共享消费接口 |
 | 重试与账号策略 | `internal/server/handler.go`、`internal/upstream/client.go` |
 | 系统提示词 | **新增** `internal/prompt/`、`cmd/server/prompt_config.go`、`cmd/server/prompt_preview.go` |
@@ -138,6 +140,8 @@ Responses / Messages 已覆盖本地假上游及官方 Python SDK 的文本 / �
 go build ./... && go vet ./...
 go test ./... -count=1
 go test -race ./internal/protocol ./internal/server ./internal/upstream ./internal/forwarding ./internal/scrub
+go test ./internal/protocol -run '^$' -bench '^BenchmarkLongCompletion$' -benchmem
+go test ./internal/upstream -run '^$' -fuzz FuzzToolNameResolution -fuzztime 5s -parallel 2
 ```
 
 ---

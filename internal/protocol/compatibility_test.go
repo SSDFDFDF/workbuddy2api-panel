@@ -15,7 +15,7 @@ const emptyIdentityStream = `data: {"choices":[{"index":0,"delta":{"tool_calls":
 	`data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":4}}` + "\n\ndata: [DONE]\n\n"
 
 func TestEmptyToolIdentityContinuations(t *testing.T) {
-	resp, err := Aggregate(strings.NewReader(emptyIdentityStream))
+	resp, err := Aggregate(strings.NewReader(emptyIdentityStream), testRequest(t, Responses))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestEmptyToolIdentityContinuations(t *testing.T) {
 		strings.Replace(emptyIdentityStream, `"id":"","type":""`, `"id":"conflict","type":""`, 1),
 		strings.Replace(emptyIdentityStream, `"index":0,"id":"","type":""`, `"id":"","type":""`, 1),
 	} {
-		if _, err := Aggregate(strings.NewReader(raw)); err == nil {
+		if _, err := Aggregate(strings.NewReader(raw), testRequest(t, Responses)); err == nil {
 			t.Fatal("conflicting/ambiguous identity accepted")
 		}
 		for _, kind := range []Kind{Responses, Anthropic} {
@@ -140,7 +140,7 @@ func FuzzResponsePipeline(f *testing.F) {
 		if len(raw) > 1<<16 {
 			t.Skip()
 		}
-		completion, aggregateErr := Aggregate(strings.NewReader(raw))
+		completion, aggregateErr := Aggregate(strings.NewReader(raw), testRequest(t, Responses))
 		for _, kind := range []Kind{Responses, Anthropic} {
 			req := testRequest(t, kind)
 			err := aggregateErr
@@ -162,7 +162,7 @@ func TestUnrepresentableResponseFields(t *testing.T) {
 		`"annotations":{"text":"not-an-array"}`,
 	} {
 		raw := `data: {"choices":[{"index":0,"delta":{"content":"hi",` + field + `},"finish_reason":"stop"}]}` + "\n\n"
-		if _, err := Aggregate(strings.NewReader(raw)); err == nil {
+		if _, err := Aggregate(strings.NewReader(raw), testRequest(t, Responses)); err == nil {
 			t.Fatalf("silently lost response data: %s", field)
 		}
 		for _, kind := range []Kind{Responses, Anthropic} {
@@ -176,7 +176,7 @@ func TestUnrepresentableResponseFields(t *testing.T) {
 			`data: {"choices":[{"index":0,"message":{"content":"hi"},"finish_reason":"stop"}]}` + "\n\n",
 		`data: {"choices":[{"index":0,"delta":{"content":"hi"},"message":{"content":"hi"},"finish_reason":"stop"}]}` + "\n\n",
 	} {
-		if _, err := Aggregate(strings.NewReader(raw)); err == nil {
+		if _, err := Aggregate(strings.NewReader(raw), testRequest(t, Responses)); err == nil {
 			t.Fatal("mixed snapshot and delta accepted")
 		}
 		for _, kind := range []Kind{Responses, Anthropic} {
@@ -200,7 +200,7 @@ func TestInvalidToolsAreNotDroppedOrInvented(t *testing.T) {
 			}
 		}
 	}
-	resp, _ := Aggregate(strings.NewReader(toolsStream))
+	resp, _ := Aggregate(strings.NewReader(toolsStream), testRequest(t, Responses))
 	calls := resp["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)["tool_calls"].([]any)
 	calls[0].(map[string]any)["type"] = "custom"
 	for _, kind := range []Kind{Responses, Anthropic} {
@@ -209,7 +209,7 @@ func TestInvalidToolsAreNotDroppedOrInvented(t *testing.T) {
 		}
 	}
 	legacy := `{"object":"chat.completion","choices":[{"index":0,"message":{"content":"","function_call":{"name":"x","arguments":"{}"}},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
-	if _, err := Aggregate(strings.NewReader(legacy)); err == nil {
+	if _, err := Aggregate(strings.NewReader(legacy), testRequest(t, Responses)); err == nil {
 		t.Fatal("legacy tool silently lost")
 	}
 	// Keep JSON fixtures syntactically checked even when a validation path rejects early.

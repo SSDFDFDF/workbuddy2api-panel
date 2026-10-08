@@ -91,6 +91,51 @@ func TestUnsupportedAndInvalidRequests(t *testing.T) {
 	}
 }
 
+func TestResponsesAssistantTextForms(t *testing.T) {
+	for _, content := range []string{
+		`"你好"`,
+		`[{"type":"input_text","text":"你好"}]`,
+		`[{"type":"output_text","text":"你好","annotations":[],"logprobs":[]}]`,
+		`[{"type":"input_text","text":"你"},{"type":"output_text","text":"好"}]`,
+	} {
+		r := mustDecode(t, Responses, `{"model":"x","store":false,"input":[{"role":"user","content":"hi"},{"role":"assistant","content":`+content+`},{"role":"user","content":"continue"}]}`)
+		msgs := r.Chat.Object["messages"].([]any)
+		if len(msgs) != 3 || msgs[1].(map[string]any)["role"] != "assistant" {
+			t.Fatal(msgs)
+		}
+		v := msgs[1].(map[string]any)["content"]
+		var text string
+		switch v := v.(type) {
+		case string:
+			text = v
+		case []any:
+			for _, part := range v {
+				p := part.(map[string]any)
+				if p["type"] != "text" {
+					t.Fatal(p)
+				}
+				text += p["text"].(string)
+			}
+		}
+		if text != "你好" {
+			t.Fatal(text)
+		}
+	}
+	for _, item := range []string{
+		`{"role":"user","content":[{"type":"output_text","text":"hi"}]}`,
+		`{"role":"assistant","content":[{"type":"input_text","text":"hi","annotations":[]}]}`,
+		`{"role":"assistant","content":[{"type":"output_text","text":"hi","annotations":[{"url":"x"}]}]}`,
+		`{"role":"assistant","content":[{"type":"input_image","image_url":"https://example.com/x.png"}]}`,
+		`{"role":"assistant","content":[{"type":"input_text","text":42}]}`,
+		`{"role":"assistant","content":[{"type":"input_text","text":"hi","cache_control":{"type":"ephemeral"}}]}`,
+		`{"role":"assistant","phase":"commentary","content":[{"type":"input_text","text":"hi"}]}`,
+	} {
+		if _, err := Decode(Responses, []byte(`{"model":"x","store":false,"input":[`+item+`]}`)); err == nil {
+			t.Fatal("lost unsupported history information", item)
+		}
+	}
+}
+
 func TestNativeRequestStillPreservesExtensions(t *testing.T) {
 	r := mustDecode(t, Chat, `{"model":"x","messages":[{"role":"user","content":"hi"}],"custom":{"n":9007199254740993}}`)
 	if r.Chat.Object["custom"] == nil {
@@ -101,6 +146,7 @@ func TestNativeRequestStillPreservesExtensions(t *testing.T) {
 func FuzzRequestDecode(f *testing.F) {
 	f.Add(`{"model":"x","store":false,"input":"hi"}`)
 	f.Add(`{"model":"x","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`)
+	f.Add(`{"model":"x","store":false,"input":[{"role":"assistant","content":[{"type":"input_text","text":"hi"},{"type":"output_text","text":"there","annotations":[]}]}]}`)
 	f.Fuzz(func(t *testing.T, body string) {
 		if len(body) > 1<<16 {
 			t.Skip()

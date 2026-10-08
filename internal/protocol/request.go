@@ -108,7 +108,7 @@ func sampling(src, dst map[string]any, maxTemperature float64) error {
 	return nil
 }
 
-func textParts(v any, path string, allowedType string) (any, error) {
+func textParts(v any, path string, allowedTypes ...string) (any, error) {
 	if s, ok := v.(string); ok {
 		return s, nil
 	}
@@ -123,8 +123,19 @@ func textParts(v any, path string, allowedType string) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		typ, _ := m["type"].(string)
+		supported := false
+		for _, allowedType := range allowedTypes {
+			if typ == allowedType {
+				supported = true
+				break
+			}
+		}
+		if !supported {
+			return nil, invalid(p+".type", "only "+strings.Join(allowedTypes, " or ")+" is supported")
+		}
 		allowed := "type text"
-		if allowedType == "output_text" {
+		if typ == "output_text" {
 			allowed += " annotations logprobs"
 			for _, key := range []string{"annotations", "logprobs"} {
 				if v := m[key]; v != nil {
@@ -137,9 +148,6 @@ func textParts(v any, path string, allowedType string) (any, error) {
 		}
 		if err = fields(m, p, allowed); err != nil {
 			return nil, err
-		}
-		if m["type"] != allowedType {
-			return nil, invalid(p+".type", "only "+allowedType+" is supported")
 		}
 		s, err := stringValue(m["text"], p+".text")
 		if err != nil {

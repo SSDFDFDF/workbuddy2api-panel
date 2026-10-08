@@ -236,13 +236,13 @@ Anthropic SDK 的 `base_url` 为 `http://localhost:7863`，使用 `client.messag
 **支持范围与工具回传**
 
 - 支持文本、普通 function/client tools、流式与非流式、基础采样和工具选择；工具 schema 原样保留，不自动改写 `$ref`。
-- Responses 支持 `instructions`、message / function_call / function_call_output；上一轮 `response.output` 加入完整历史，结果用 `{"type":"function_call_output","call_id":"...","output":"结果"}` 回传。关联键为 **call_id，不是 item id**。`metadata` 只在本次响应回显，不作为服务端会话。
+- Responses 支持 `instructions`、message / function_call / function_call_output；assistant 文本历史可使用 `input_text` 或 `output_text`（非空 annotations 等信息仍拒绝）。上一轮 `response.output` 加入完整历史，结果用 `{"type":"function_call_output","call_id":"...","output":"结果"}` 回传。关联键为 **call_id，不是 item id**。`metadata` 只在本次响应回显，不作为服务端会话。
 - Anthropic 支持顶层 system、text / tool_use / tool_result；回传上一轮 assistant content，再以 user 的 tool_result blocks 提供结果。`tool_use.input` 必须为对象。assistant 文本须在工具前，user 的工具结果须在普通文本前；不重排历史、不补缺失或重复的工具结果。
 - 不支持服务端存储 / `previous_response_id` / `conversation` / 后台生成、图片 / 音视频 / 文件、原生 thinking、严格 Schema、托管工具、beta / cache_control、`count_tokens`。非空 `stop_sequences`、`tool_result.is_error:true` 等无法等价表达的输入明确拒绝，不静默降级。原生 Chat 的扩展字段保留策略不变。
 
 **流式与用量边界**
 
-- 文本实时输出；工具按独立 index 聚合，支持名称晚到 / 分片和空 identity 续传，完整完成并验证 JSON 后才发送工具事件，避免客户端执行半截调用。非空身份冲突、畸形工具或无法无损表达的响应明确失败，不丢坏工具后报成功。
+- 文本实时输出；工具按独立 index 聚合，支持名称晚到、重复完整名、累计前缀、名称分片和空 identity 续传。名称必须唯一匹配本次声明的工具，缺名、未声明或多种解释同时成立时失败，不按“只有一个工具”猜测补名。完整完成并验证 JSON 后才发送工具事件，避免客户端执行半截调用；非空 ID 冲突、畸形工具或无法无损表达的响应明确失败，不丢坏工具后报成功。此名称兼容只用于新协议，原生 Chat 仍保留字面增量行为。
 - 空流、错误帧、缺失 finish 的 EOF 不伪装成功，不触发生成重放；开流前返回 HTTP 错误，开流后为 `response.failed` / Anthropic `error`。
 - 文本 `length` 对应 `response.incomplete` / `stop_reason:max_tokens`。OpenAI SDK `3.26.0` 的 `get_final_response()` 只处理 completed；截断须读取 incomplete 事件的 response，不能依赖该 helper。工具被截断则失败，不补 `{}`。
 - 内部按原始上游 usage 记账。缓存别名不相加，cache miss 不作 cache write；Anthropic 输入扣除已观测缓存读写，SSE 初始 0 为临时计数，最终 `message_delta.usage` 覆盖。旧客户端是否支持最终输入计数更新需单独验证。
