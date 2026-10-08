@@ -5,7 +5,6 @@ package pool
 import (
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -15,7 +14,17 @@ type Pool struct {
 	mu      sync.RWMutex
 	byUID   map[string]*entry
 	stateFp string
-	dirty   atomic.Bool // 内存有变更待落盘
+
+	// rev/savedRev 持久化版本号：任何影响 state.json 的变更都在**持 p.mu 时**
+	// 让 rev 自增；savedRev 为已成功落盘的版本。落盘（序列化 + 磁盘 I/O + Redis
+	// 镜像）在锁外进行，成功后仅把 savedRev 推进到**快照当时的 rev**——期间产生的
+	// 新变更（rev 更大）仍然待落盘：既不因慢磁盘阻塞选号/记账，也不丢更新。
+	// 写入顺序由 saveMu 串行化。
+	rev      uint64
+	savedRev uint64
+	// saveMu 串行化落盘（后台 flusher 与 Flush/Remove/SyncToDir 的手动落盘共用）。
+	// 锁序：只能 saveMu → p.mu，绝不反向（持 p.mu 时不得调 save）。
+	saveMu sync.Mutex
 	// store 池状态快照镜像（redisstore.Store）；nil = 无需镜像（未配置 Redis / Noop 之外也可能 nil）。
 	// SaveState/LoadState 经它接线，与本地 state.json 并存作启动恢复备份。
 	store StoreSnapshotter
@@ -277,6 +286,9 @@ func (p *Pool) SetStore(s StoreSnapshotter) {
 // RestoreFromSnapshot 择新恢复：比较本地 state.json 与 Redis 快照，采用较新者。
 // 无快照、快照无 savedAt、或本地不存在/不可读时，都会被判定为"本地优先/跳过快照"，
 // 同时打一条恢复来源日志。必须在 SyncToDir 之前调用（SyncToDir 只增删不入值）。
+// markDirtyLocked 标记内存状态有变更（自增持久化版本号）。调用方必须已持有 p.mu。
+func (p *Pool) markDirtyLocked() { p.rev++ }
+
 // Acquire 为 uid 占一个在途名额（会话粘性命中后调用）；池上限内返回 true。
 // 名额用 entry.inFlight 原子自增，满额返回 false。上限按账号 realm 分档
 // （global 档 maxInFlightGlobal，P1-1；未设置回落 maxInFlight）。
@@ -343,7 +355,6 @@ func (p *Pool) Add(a *auth.Auth) {
 // 剔除结果持久化回 state.json，避免已删账号在下次启动时被 load() 复活。
 func (p *Pool) SyncToDir(auths []*auth.Auth) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	seen := make(map[string]bool, len(auths))
 	for _, a := range auths {
 		seen[a.UID] = true
@@ -357,7 +368,11 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 		}
 	}
 	if changed {
-		p.saveLocked()
+		p.markDirtyLocked()
+	}
+	p.mu.Unlock()
+	if changed {
+		p.save()
 	}
 }
 
@@ -366,14 +381,16 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 // 在途请求的 Release 对已删条目是 no-op，无需等待。
 func (p *Pool) Remove(uid string) *auth.Auth {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	e, ok := p.byUID[uid]
 	if !ok {
+		p.mu.Unlock()
 		return nil
 	}
 	delete(p.byUID, uid)
-	p.dirty.Store(true)
-	p.saveLocked()
+	p.markDirtyLocked()
+	p.mu.Unlock()
+	// 落盘在锁外：慢磁盘不得阻塞在途选号/记账。
+	p.save()
 	return e.a
 }
 

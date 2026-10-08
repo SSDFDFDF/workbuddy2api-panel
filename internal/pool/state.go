@@ -66,7 +66,7 @@ func (p *Pool) ReviveDisabled(uid string) {
 		e.disabled = false
 		e.reason = ""
 		e.sessionDeadFails = 0
-		p.dirty.Store(true)
+		p.markDirtyLocked()
 	}
 }
 
@@ -92,7 +92,7 @@ func (p *Pool) Revive(uid string) bool {
 	e.fails = 0
 	e.retryCount = 0
 	e.breakerUntil = time.Time{}
-	p.dirty.Store(true)
+	p.markDirtyLocked()
 	return true
 }
 
@@ -144,7 +144,7 @@ func (p *Pool) ReenableIfCredits(uid string, remain, total int64) {
 		e.creditsExpiring = 0
 		e.creditsEarliestExpiry = time.Time{}
 		e.creditsEarliestRemaining = 0
-		p.dirty.Store(true)
+		p.markDirtyLocked()
 	}
 }
 
@@ -157,7 +157,7 @@ func (p *Pool) NoteError(uid string) {
 		e.errTotal++
 		e.lastErr = time.Now()
 		p.recordBreakerFailureLocked(e)
-		p.dirty.Store(true)
+		p.markDirtyLocked()
 	}
 }
 
@@ -183,7 +183,7 @@ func (p *Pool) NoteSuccess(uid string) {
 		e.sessionDeadFails = 0
 		e.consecutiveFails = 0
 		e.degradeUntil = time.Time{}
-		p.dirty.Store(true)
+		p.markDirtyLocked()
 	}
 }
 
@@ -261,7 +261,7 @@ func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 			Samples:   prev.Samples + 1,
 		}
 	}
-	p.dirty.Store(true) // 账本已持久化：写入口统一置脏
+	p.markDirtyLocked() // 账本已持久化：写入口统一置脏
 }
 
 // RecordTokenUsage 记录一次实际发起的聊天账号尝试及上游返回的 usage 增量。
@@ -305,7 +305,7 @@ func (p *Pool) RecordTokenUsage(uid string, delta TokenUsageDelta) {
 		// 失败或缺少 completion_tokens 时不展示上一次请求的旧吞吐速度。
 		usage.LastTokensPerSecond = nil
 	}
-	p.dirty.Store(true)
+	p.markDirtyLocked()
 }
 
 // Status 查询单账号状态。

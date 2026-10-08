@@ -15,7 +15,7 @@ func (p *Pool) SetCredits(uid string, credits, total int64) {
 	if e, ok := p.byUID[uid]; ok {
 		e.credits = credits
 		e.creditsTotal = total
-		p.dirty.Store(true)
+		p.markDirtyLocked()
 	}
 }
 
@@ -58,7 +58,7 @@ func (p *Pool) NoteCheckinDone(uid string) {
 		day := time.Now().Format("2006-01-02")
 		if e.lastCheckinDay != day {
 			e.lastCheckinDay = day
-			p.dirty.Store(true)
+			p.markDirtyLocked()
 		}
 	}
 }
@@ -95,7 +95,7 @@ func (p *Pool) SetCreditsDetailed(uid string, credits, total, expiring int64, ea
 		e.creditsExpiring = expiring
 		e.creditsEarliestExpiry = earliestAt
 		e.creditsEarliestRemaining = earliestRemaining
-		p.dirty.Store(true)
+		p.markDirtyLocked()
 	}
 }
 
@@ -109,7 +109,7 @@ func (p *Pool) ClearExpiringSnapshots() {
 		e.creditsEarliestExpiry = time.Time{}
 		e.creditsEarliestRemaining = 0
 	}
-	p.dirty.Store(true)
+	p.markDirtyLocked()
 }
 
 // Cooldown 冷却账号至 now+d（即时冷却：CoolHard 余额耗尽 / CoolSoft 固定短冷却）。
@@ -130,7 +130,7 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 		// 非模型级冷却入口：清空会参与路由的模型级冷却，避免上一次
 		// 模型豁免泄漏到账号级冷却上；AuditOnly 条目不影响路由，保留展示。
 		clearRoutingModelCooldownsLocked(e)
-		p.dirty.Store(true)
+		p.markDirtyLocked()
 	}
 }
 
@@ -173,7 +173,7 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 			e.reason = reason
 			clearRoutingModelCooldownsLocked(e)
 		}
-		p.dirty.Store(true)
+		p.markDirtyLocked()
 	}
 }
 
@@ -206,7 +206,7 @@ func (p *Pool) RecordModelRateLimitAudit(uid, model, reason string) {
 		Reason:    reason,
 		AuditOnly: true,
 	}
-	p.dirty.Store(true)
+	p.markDirtyLocked()
 }
 
 // clearRoutingModelCooldownsLocked 删除参与选号豁免的模型冷却，保留 AuditOnly 台账。
@@ -270,7 +270,7 @@ func (p *Pool) BlockModelBackoff(uid, model, reason string) {
 		Reason: reason,
 		Hits:   hits,
 	}
-	p.dirty.Store(true)
+	p.markDirtyLocked()
 }
 
 // BlockModelClear 清除 (账号, 模型) 的 11102 负缓存条目（该模型实测又通了）。半开探测
@@ -295,7 +295,7 @@ func (p *Pool) BlockModelClear(uid, model string) {
 	if len(e.modelCooldowns) == 0 {
 		e.modelCooldowns = nil
 	}
-	p.dirty.Store(true)
+	p.markDirtyLocked()
 }
 
 // ModelBlockStatus 描述某模型在全池范围内因模型级冷却而不可选的情况。
@@ -387,7 +387,7 @@ func (p *Pool) CooldownSoftRate(uid string, base time.Duration, resetAt time.Tim
 		e.coolKind = CoolSoft
 		e.reason = reason
 		clearRoutingModelCooldownsLocked(e) // 账号级软冷却：清路由豁免，保留审计台账
-		p.dirty.Store(true)
+		p.markDirtyLocked()
 	}
 }
 

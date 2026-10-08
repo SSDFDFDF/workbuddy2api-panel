@@ -404,20 +404,40 @@ func main() {
 		// （长流式生成合法时长可达数分钟，全局 WriteTimeout 会误杀在途 SSE）。
 		IdleTimeout: 120 * time.Second,
 	}
-	go func() {
-		<-ctx.Done()
-		p.Flush() // 信号触发：先落盘再做优雅停机
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
-	}()
+	// 主流程必须等 Shutdown 真正完成才能返回：否则 main 的 defer（rec.Stop/
+	// requestLog.Close/pool.Close/store.Close）会在在途请求还在写统计时执行，
+	// 造成“服务已停但请求被记账到已关闭组件”的截断。
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.ListenAndServe() }()
 
 	log.Printf("workbuddy2api listening on %s (api_key=%v)，管理面板 http://127.0.0.1%s/panel/", cfg.Listen, cfg.APIKey != "", panelListenPath(cfg.Listen))
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("http: %v", err)
+	select {
+	case err := <-serveErr:
+		// 监听失败（端口占用/地址无效）：直接退出，不做停机流程。
+		if err != nil && err != http.ErrServerClosed {
+			log.Fatalf("http: %v", err)
+		}
+	case <-ctx.Done():
+		// 收到信号先落盘一次（硬杀兜底：Shutdown 若被第二个信号打断，状态已尽力保全）；
+		// 排空在途请求后的最终落盘由 main 的 defer p.Close() 负责。
+		p.Flush()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		err := srv.Shutdown(shutdownCtx)
+		cancel()
+		if err != nil {
+			log.Printf("WARN: 优雅停机未在 %s 内完成（在途请求将随进程退出被中断）: %v", shutdownGrace, err)
+		} else {
+			log.Printf("HTTP 已优雅停机：在途请求处理完毕")
+		}
+		<-serveErr // Shutdown 后 ListenAndServe 立即返回，确保监听 goroutine 已退出
 	}
 	log.Printf("bye")
 }
+
+// shutdownGrace 优雅停机的等待上限：给在途请求（含长 SSE）留出收尾时间，
+// 超时则强断剩余连接并进入退出流程。取 30s 是折中：既不因个别长流无限期
+// 拖住重启，也明显长于旧实现固定的 5s（大上下文请求常常来不及写完）。
+const shutdownGrace = 30 * time.Second
 
 // warmModelRates 启动预热各域模型积分倍率表（供积分保底的目录兜底判定）。
 //

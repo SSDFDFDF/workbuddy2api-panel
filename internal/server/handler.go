@@ -598,6 +598,11 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 	}
 	peek := request.Chat
 	out.request = request
+	// 非流式响应在本地聚合后一次性写出：加写 deadline，防客户端保持连接却不读
+	// 时长期占住 handler／响应内存／账号租约（SSE 已有逐帧 deadline，不重复包装）。
+	if !peek.Stream {
+		w = newWriteDeadlineWriter(w, nonStreamWriteTimeout)
+	}
 	body, err = encodedRequest(request, body)
 	if err != nil {
 		out.Error(w, http.StatusBadRequest, "invalid_request", err.Error())

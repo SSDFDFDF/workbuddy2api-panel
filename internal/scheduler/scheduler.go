@@ -638,25 +638,37 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 	wg.Wait()
 }
 
+// balanceRefreshNow 余额刷新循环的执行入口。生产恒为 RunBalanceRefreshNow；
+// 仅测试注入计数替身（对齐 blackcat.go 的 nowForNightWindow 同一套「可替换点」做法，
+// 避免用例真去访上游）。
+var balanceRefreshNow = func(s *Scheduler) { s.RunBalanceRefreshNow() }
+
 // StartBalanceRefresh 后台周期性余额刷新（独立 ticker goroutine，ctx 取消即停）。
-// interval<=0 不启动（schedule.balance_refresh_enabled=false 时 main 不调用即可）。
 // 独立于 Run 的小时制排程：余额是分钟级观测量，不值得为它扩展 nextFire 的粒度。
 // 运行期可用 SetBalanceInterval 热改间隔（下一轮生效）。
+//
+// interval<=0（config 关闭余额刷新）时**仍然启动循环**，只是进入等待：面板
+// 热开启会调 SetBalanceInterval 并发 rearmBalance 通知，若这里提前返回就没有
+// 任何 goroutine 在监听——“关闭启动 + 面板热开启”会静默失效（实测）。
 func (s *Scheduler) StartBalanceRefresh(ctx context.Context, interval time.Duration) {
-	if interval <= 0 {
-		return
+	if interval > 0 {
+		s.balanceInterval.Store(int64(interval))
 	}
-	s.balanceInterval.Store(int64(interval))
 	go func() {
 		var logged time.Duration
 		for {
 			cur := time.Duration(s.balanceInterval.Load())
 			if cur != logged {
-				log.Printf("scheduler: 余额后台刷新每 %s（暂停中显示 0s）", cur)
+				switch {
+				case cur > 0:
+					log.Printf("scheduler: 余额后台刷新每 %s", cur)
+				case logged > 0:
+					log.Printf("scheduler: 余额后台刷新已暂停（间隔 0，可在面板重新开启）")
+				}
 				logged = cur
 			}
 			if cur <= 0 {
-				// 被热改暂停：等重排通知（重新启用时唤醒）或退出。
+				// 暂停中：等重排通知（重新启用时唤醒）或退出。
 				select {
 				case <-ctx.Done():
 					return
@@ -672,7 +684,7 @@ func (s *Scheduler) StartBalanceRefresh(ctx context.Context, interval time.Durat
 			case <-s.rearmBalance:
 				timer.Stop() // 间隔已变：立刻按新值重算
 			case <-timer.C:
-				s.RunBalanceRefreshNow()
+				balanceRefreshNow(s)
 			}
 		}
 	}()

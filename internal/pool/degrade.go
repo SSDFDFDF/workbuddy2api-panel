@@ -26,18 +26,18 @@ func (p *Pool) NoteFailures(uid string) {
 	}
 	e.consecutiveFails++
 	if e.consecutiveFails < p.degradeThreshold {
-		p.dirty.Store(true)
+		p.markDirtyLocked()
 		return
 	}
 	e.consecutiveFails = 0
 	if !e.degradeUntil.IsZero() && time.Now().Before(e.degradeUntil) {
 		// 降权期内的连败达阈：不延长（取更长者语义由 healthy 或门保证）。计数
 		// 已清零——到期放行后需重新连败满阈值才再降。
-		p.dirty.Store(true)
+		p.markDirtyLocked()
 		return
 	}
 	e.degradeUntil = time.Now().Add(p.degradeDurationLocked())
-	p.dirty.Store(true)
+	p.markDirtyLocked()
 }
 
 // degradeDurationLocked 返回降权时长（当前实现为固定 degradeCooldown，钳到

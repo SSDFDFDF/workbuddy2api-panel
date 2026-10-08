@@ -14,6 +14,11 @@ import (
 
 var flushInterval = 5 * time.Second
 
+// persistWriteHook 仅供测试注入（生产恒 nil）：在真正写磁盘之前调用一次，
+// 用于模拟慢磁盘/在写盘瞬间制造并发变更，验证「锁外的 I/O + 版本号推进」语义。
+// 不得在 hook 内再调 save（会自锁 saveMu）。
+var persistWriteHook func()
+
 // persistLogEvery 连续落盘失败每 N 次打一条提醒（flusher 5s 一把 ≈ 1 分钟一次），
 // 避免磁盘持续满/权限丢失时日志刷屏。
 const persistLogEvery = 12
@@ -95,11 +100,7 @@ func (p *Pool) startFlusher() {
 		for {
 			select {
 			case <-t.C:
-				p.mu.Lock()
-				if p.dirty.Swap(false) {
-					p.saveLocked()
-				}
-				p.mu.Unlock()
+				p.save()
 			case <-stopCh:
 				return
 			}
@@ -108,12 +109,9 @@ func (p *Pool) startFlusher() {
 }
 
 // Flush 同步把内存状态落盘（幂等：无变更不写盘）。供进程退出前调用。
+// 落盘失败不推进已落盘版本，下一次 Flush/后台 tick 会重试（而不是永久停在内存）。
 func (p *Pool) Flush() {
-	p.mu.Lock()
-	if p.dirty.Swap(false) {
-		p.saveLocked()
-	}
-	p.mu.Unlock()
+	p.save()
 }
 
 // Add 加入账号；已存在则保留原状态、更新凭证（upsert 单账号，不影响其他账号）。
@@ -216,27 +214,46 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 }
 
 // applySnapshotLocked 用 Redis 快照覆盖内存状态（已在择新判定后采用）。调用方必须已持有 p.mu。
-// adoptSnapshot 采用 Redis 快照为当前池状态，并置 dirty 让下一次落盘把它物化回本地
+// adoptSnapshot 采用 Redis 快照为当前池状态，并置变更标记让下一次落盘把它物化回本地
 // state.json（否则快照只在内存生效，下次崩溃恢复又回到旧本地文件）。
 func (p *Pool) adoptSnapshot(s snapshot) {
 	p.mu.Lock()
 	p.applySnapshotLocked(s)
+	p.markDirtyLocked()
 	p.mu.Unlock()
-	p.dirty.Store(true)
 }
 func (p *Pool) applySnapshotLocked(s snapshot) {
 	p.byUID = map[string]*entry{}
 	p.applyAccountsLocked(s.Accounts)
 }
-func (p *Pool) saveLocked() {
-	if p.stateFp == "" {
+
+// save 把内存状态落盘（幂等：无变更不写），并在落盘成功后镜像一份快照到 Redis。
+//
+// 重要：序列化与磁盘 I/O（含 MkdirAll/WriteFile/Rename）全在 **p.mu 之外**完成，
+// 不阻塞选号与记账。原子性由「快照版本号」保证：快照时记下 rev，成功后仅把
+// savedRev 推进到该值——落盘期间产生的新变更（rev 更大）仍为待落盘，既不会
+// 丢更新，也不会让失败（磁盘满/权限/卷异常）永久停在内存。
+// 写入顺序由 saveMu 串行化（后台 flusher 与手动 Flush 不互踩 .tmp）。
+func (p *Pool) save() {
+	p.saveMu.Lock()
+	defer p.saveMu.Unlock()
+
+	p.mu.Lock()
+	if p.stateFp == "" || p.rev == p.savedRev {
+		p.mu.Unlock()
 		return
 	}
 	sf := p.stateOverviewLocked()
+	rev := p.rev
+	p.mu.Unlock()
+
 	raw, err := json.MarshalIndent(sf, "", "  ")
 	if err != nil {
 		p.notePersistFail(err)
 		return
+	}
+	if persistWriteHook != nil {
+		persistWriteHook()
 	}
 	if dir := filepath.Dir(p.stateFp); dir != "" {
 		_ = os.MkdirAll(dir, 0o755)
@@ -250,18 +267,14 @@ func (p *Pool) saveLocked() {
 		p.notePersistFail(err)
 		return
 	}
-	if p.persistFails > 0 {
-		// 从连续失败中恢复：打一条恢复日志，避免"错误打完却无人知道已恢复"。
-		log.Printf("pool: state.json 落盘恢复（此前连续失败 %d 次）", p.persistFails)
-		p.persistFails = 0
-	}
-	// 同步镜像一份快照到 Redis（fire-and-forget），与本地 state.json 并存作恢复备份。
+	// 同步镜像一份快照到 Redis（fire-and-forget，不阻塞），与本地 state.json 并存作恢复备份。
 	if p.store != nil {
-		snapRaw, err := json.Marshal(snapshot{stateFile: sf, SavedAt: time.Now()})
-		if err == nil {
+		if snapRaw, mErr := json.Marshal(snapshot{stateFile: sf, SavedAt: time.Now()}); mErr == nil {
 			p.store.SaveState(snapRaw)
 		}
 	}
+
+	p.persistOK(rev)
 }
 
 // notePersistFail 记录一次本地 state.json 落盘失败，并按节流规则决定是否打日志：
@@ -270,12 +283,29 @@ func (p *Pool) saveLocked() {
 // 恢复成功的日志由 saveLocked 在成功路径统一打。与 redisstore 三处异步写的
 // "失败仅打日志、不向上抛"范式对齐，但落盘失败对运维是盲区，故多一层节流（notification）。
 func (p *Pool) notePersistFail(err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.persistFails == 0 {
 		log.Printf("pool: state.json 落盘失败: %v", err)
 	} else if p.persistFails%persistLogEvery == 0 {
 		log.Printf("pool: state.json 连续落盘失败 %d 次: %v", p.persistFails, err)
 	}
 	p.persistFails++
+}
+
+// persistOK 落盘成功后推进已落盘版本，并报告从连续失败中恢复（避免"错误打完却
+// 无人知道已恢复"）。rev 是本次快照对应的版本；仅当它更新时才推进，保证并发
+// save 不会把 savedRev 回退。
+func (p *Pool) persistOK(rev uint64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if rev > p.savedRev {
+		p.savedRev = rev
+	}
+	if p.persistFails > 0 {
+		log.Printf("pool: state.json 落盘恢复（此前连续失败 %d 次）", p.persistFails)
+		p.persistFails = 0
+	}
 }
 
 // stateOverviewLocked 收集当前内存状态为 stateFile（供落盘 + 快照镜像复用）。调用方必须已持 p.mu。
