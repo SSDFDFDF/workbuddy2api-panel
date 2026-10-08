@@ -149,7 +149,9 @@ function mdRowHtml(m, pr) {
   if (m.supports_reasoning && !m.can_disable_thinking) caps.push('<span class="tag warn">思考常开</span>');
   const capCell = '<td>' + (caps.length ? caps.join(' ') : '<span style="color:var(--ink-3)">—</span>') + '</td>';
   const tip = m.description ? ' title="' + esc(m.description) + '"' : '';
-  return '<tr><td class="mark" aria-hidden="true"><i></i></td><td class="who"' + tip + '><div class="nm">' + esc(m.id) + '</div><div class="id">' + esc(m.name || '') + '</div></td>' +
+  return '<tr><td class="mark" aria-hidden="true"><i></i></td>' +
+    '<td class="nm"' + tip + '><b>' + esc(m.id) + '</b></td>' +
+    '<td>' + esc(m.name || '—') + '</td>' +
     capCell +
     '<td class="num">' + rateCell(m) + '</td>' +
     '<td>' + (m.default_effort ? '<span class="tag ok">' + esc(m.default_effort) + '</span>' : '<span style="color:var(--ink-3)">—</span>') + '</td>' +
@@ -162,7 +164,7 @@ function renderModels() {
   const tb = $('mdBody');
   const list = mdSortList(mdAll.filter(m => mdMatch(m)));
   if (!list.length) {
-    tb.innerHTML = '<tr><td colspan="8"><div class="empty">没有符合当前筛选条件的模型</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="9"><div class="empty">没有符合当前筛选条件的模型</div></td></tr>';
     renderPagination($('mdPager'), 1, 1, 0, () => {});
   } else {
     const totalPages = Math.max(1, Math.ceil(list.length / mdPageSize));

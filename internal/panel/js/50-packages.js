@@ -178,7 +178,7 @@ function renderPackages(d, detailLimit) {
   if (!tb) return;
 
   if (!list.length) {
-    tb.innerHTML = '<tr><td colspan="8"><div class="empty">没有账号数据</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="9"><div class="empty">没有账号数据</div></td></tr>';
     renderPagination($('pkPager'), 1, 1, 0, () => {});
     $('pkNote').textContent = '0 个账号';
     return;
@@ -199,27 +199,42 @@ function renderPackages(d, detailLimit) {
   tb.innerHTML = paged.map(a => {
     if (a.error) {
       return '<tr><td class="mark" aria-hidden="true"><i style="background:var(--bad)"></i></td>' +
-        '<td class="who"><div class="nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</div><div class="id">' + esc(a.uid.slice(0, 8)) + '</div></td>' +
+        '<td><b>' + esc(a.nickname || a.uid.slice(0, 8)) + '</b></td>' +
+        '<td><span class="num note">' + esc(a.uid.slice(0, 8)) + '</span></td>' +
         '<td><span class="realm-tag">' + esc(a.realm || '') + '</span></td>' +
-        '<td colspan="5" style="color:var(--bad)">查询失败：' + esc(a.error) + '</td></tr>';
+        '<td colspan="6" style="color:var(--bad)">查询失败：' + esc(a.error) + '</td></tr>';
     }
     const bs = expBatches(a.packages || []).filter(b => expDaysLeft(b.date, today) >= 0);
-    const earliest = bs.length ? bs[0].date : '—';
+    let expHtml = '<span class="note">—</span>';
+    if (bs.length) {
+      const first = bs[0];
+      const days = expDaysLeft(first.date, today);
+      const dayWord = days === 0 ? '今天' : days === 1 ? '明天' : days + '天后';
+      const c = days <= 3 ? 'var(--bad)' : days <= 7 ? 'var(--warn)' : 'inherit';
+      expHtml = '<span style="color:' + c + '"><b>' + esc(first.date) + '</b> · ' + fmtTok(first.remain) +
+        ' <span class="note">(' + dayWord + ')</span></span>';
+    }
     const srcs = pkBySource(a.packages || []);
+    const totalSize = srcs.reduce((s, x) => s + (x.size || 0), 0) || 1;
+    const srcTags = srcs.slice(0, 3).map(s => {
+      const pct = Math.round((s.size || 0) / totalSize * 100);
+      const shortName = esc(s.name.replace(/^CodeBuddy/, '').slice(0, 8));
+      return '<span class="pk-src-tag" title="' + esc(s.name) + ' 共 ' + fmtTok(s.size) + '">' +
+        '<i class="pk-src-dot" style="background:' + colorOf(s.key) + '"></i>' +
+        shortName + ' <b>' + pct + '%</b></span>';
+    }).join('');
     const availablePks = (a.packages || []).filter(p => Number(p.remain) > 0).length;
-    const bar = segBar(srcs.map(x => ({
-      value: x.size, color: colorOf(x.key),
-      title: x.name + ' ' + fmtTok(x.size),
-    })));
 
     return '<tr><td class="mark" aria-hidden="true"><i style="background:var(--ok)"></i></td>' +
-      '<td class="who"><div class="nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</div><div class="id">' + esc(a.uid.slice(0, 8)) + '</div></td>' +
+      '<td><b>' + esc(a.nickname || a.uid.slice(0, 8)) + '</b></td>' +
+      '<td><span class="num note">' + esc(a.uid.slice(0, 8)) + '</span></td>' +
       '<td><span class="realm-tag">' + esc(a.realm || '') + '</span></td>' +
       '<td class="num"><b>' + fmtTok(a.remain) + '</b></td>' +
       '<td class="num">' + fmtTok(a.size) + '</td>' +
       '<td class="num">' + availablePks + ' / ' + (a.packages || []).length + '</td>' +
-      '<td class="num">' + esc(earliest) + '</td>' +
-      '<td>' + bar + '</td></tr>';
+      '<td>' + expHtml + '</td>' +
+      '<td>' + (srcTags || '<span class="note">—</span>') + '</td>' +
+      '<td class="acts"><button class="xs" data-pk-view="' + esc(a.uid) + '">包明细</button></td></tr>';
   }).join('');
 
   renderPagination($('pkPager'), pkPage, totalPages, list.length, p => {
@@ -227,6 +242,39 @@ function renderPackages(d, detailLimit) {
     renderPackages(lastPackages, detailLimit);
   });
 }
+
+function openAccountPackages(uid) {
+  const list = (lastPackages && lastPackages.accounts) || [];
+  const a = list.find(x => x.uid === uid);
+  if (!a) return;
+  if ($('pkModalWho')) $('pkModalWho').textContent = (a.nickname || a.uid.slice(0, 8)) + ' · ' + (a.realm || '');
+  const pks = (a.packages || []).slice().sort((x, y) => {
+    const tx = x.end_time || '9999', ty = y.end_time || '9999';
+    return tx.localeCompare(ty);
+  });
+  const body = $('pkModalBody');
+  if (body) {
+    body.innerHTML = pks.map(p =>
+      '<tr><td class="mark" aria-hidden="true"><i style="background:var(--accent)"></i></td>' +
+      '<td><div class="nm">' + esc(p.name || '(未命名)') + '</div><div class="id">' + esc(p.package_code || '') + '</div></td>' +
+      '<td class="num">' + fmtTok(p.size) + '</td>' +
+      '<td class="num"><b>' + fmtTok(p.remain) + '</b></td>' +
+      '<td class="num">' + fmtTok(p.used) + '</td>' +
+      '<td class="num">' + esc((p.created_at || '').slice(0, 16).replace('T', ' ') || '—') + '</td>' +
+      '<td class="num">' + esc((p.end_time || '').slice(0, 10) || '永久/无') + '</td></tr>'
+    ).join('') || '<tr><td colspan="7"><div class="empty">无积分包记录</div></td></tr>';
+  }
+  if ($('pkVeil')) $('pkVeil').classList.add('on');
+}
+
+if ($('pkTableBody')) $('pkTableBody').onclick = ev => {
+  const btn = ev.target.closest('button[data-pk-view]');
+  if (!btn) return;
+  openAccountPackages(btn.dataset.pkView);
+};
+if ($('btnPkModalClose')) $('btnPkModalClose').onclick = () => {
+  if ($('pkVeil')) $('pkVeil').classList.remove('on');
+};
 
 if ($('pkDetail')) $('pkDetail').addEventListener('click', ev => {
   const btn = ev.target.closest('button[data-pk-group]');

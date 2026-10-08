@@ -203,22 +203,6 @@ if ($('usSort')) $('usSort').onchange = () => {
   renderUsageDim();
 };
 
-function switchUsageTable(showCredit) {
-  const bDim = $('btnShowDimTable'), bCred = $('btnShowCreditTable');
-  const wDim = $('wrapUsDim'), wCred = $('wrapUsCredit');
-  const tDim = $('usDimTabs'), tCred = $('usCreditTabs');
-  const sortWrap = $('usSortWrap');
-  if (bDim) bDim.classList.toggle('on', !showCredit);
-  if (bCred) bCred.classList.toggle('on', showCredit);
-  if (wDim) wDim.hidden = showCredit;
-  if (wCred) wCred.hidden = !showCredit;
-  if (tDim) tDim.hidden = showCredit;
-  if (tCred) tCred.hidden = !showCredit;
-  if (sortWrap) sortWrap.hidden = showCredit;
-}
-if ($('btnShowDimTable')) $('btnShowDimTable').onclick = () => switchUsageTable(false);
-if ($('btnShowCreditTable')) $('btnShowCreditTable').onclick = () => switchUsageTable(true);
-
 /* renderUsageChart 画堆叠柱状图。
  *
  * x 轴是**真实时间轴**，不是按序号等距。这一点很重要：数据里存在 1 小时的

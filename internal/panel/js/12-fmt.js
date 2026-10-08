@@ -125,9 +125,12 @@ function usPct(part, total) {
    withPerf 控制延迟/速率两列；列开关显式传入，避免调用方改动后与表头错列。
    Token 只出一列（合计）——prompt/completion 的绝对量与占比都在构成条的 title 里。 */
 function usRow(name, sub, a, mid, withPerf) {
+  const label = sub
+    ? '<span class="row-cols"><span class="nm">' + esc(name) + '</span><span class="note">' + esc(sub) + '</span></span>'
+    : esc(name);
   return '<tr>' +
     '<td class="mark" aria-hidden="true"></td>' +
-    '<td>' + esc(name) + (sub ? '<div class="note">' + esc(sub) + '</div>' : '') + '</td>' +
+    '<td>' + label + '</td>' +
     (mid || '') +
     '<td class="num">' + fmtTok(a.requests) + '</td>' +
     '<td class="num">' + (a.errors ? '<span style="color:var(--warn)">' + fmtTok(a.errors) + '</span>' : '—') + '</td>' +

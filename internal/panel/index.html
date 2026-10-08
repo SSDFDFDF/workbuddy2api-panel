@@ -134,31 +134,33 @@
     <section class="view" id="view-taskscenter" hidden>
       <div class="split-layout">
         <aside class="split-side">
-          <div class="box">
-            <header>
-              <h3>任务控制台</h3>
-            </header>
-            <div class="pad">
-              <div class="side-actions">
-                <button class="primary side-btn" id="btnRunQueue">执行全部待办</button>
-                <button class="side-btn" id="btnScanAll">扫描账号待办</button>
-                <button class="ghost side-btn" id="btnSchoolVouchers" title="开学季抽奖抽中的第三方券码（活动已结束，历史券码仍可查）">查询抽奖券码</button>
-              </div>
+          <div class="side-card">
+            <div class="side-hd">
+              <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 2.5h10v9H8l-3 3v-3H3z"/><path d="M6 6.5h4M6 9h2.5"/></svg>
+              <span>任务控制台</span>
+            </div>
 
-              <div class="side-item">
-                <span class="lb">执行并发限制</span>
-                <select id="qcConc">
-                  <option value="1" selected>1 个账号并发</option>
-                  <option value="2">2 个账号并发</option>
-                  <option value="3">3 个账号并发</option>
-                </select>
-                <span class="hint">单次推进的并发账号数</span>
-              </div>
+            <div class="side-actions">
+              <button class="primary side-btn" id="btnRunQueue">执行全部待办</button>
+              <button class="side-btn" id="btnScanAll">扫描账号待办</button>
+              <button class="ghost side-btn" id="btnSchoolVouchers" title="开学季抽奖抽中的第三方券码（活动已结束，历史券码仍可查）">查询抽奖券码</button>
+            </div>
 
-              <div class="side-info">
-                <div class="side-info-t">自动任务说明</div>
-                <div class="side-info-d">
-                  扫描全池账号的成长任务，自动筛选可执行待办并排队推进。签到、领 Buddy、对话活跃上报等已完全免端自动完成。
+            <div class="side-item">
+              <span class="lb">执行并发限制</span>
+              <select id="qcConc">
+                <option value="1" selected>1 个账号并发</option>
+                <option value="2">2 个账号并发</option>
+                <option value="3">3 个账号并发</option>
+              </select>
+              <span class="hint">单次推进的并发账号数</span>
+            </div>
+
+            <div class="side-foot">
+              <div class="side-meta">
+                <span class="side-meta-lbl">自动任务规则</span>
+                <div class="side-meta-desc">
+                  全账号待办自动排队推进；签到、领 Buddy、对话活跃上报已完全免端自动完成。
                 </div>
               </div>
             </div>
@@ -243,7 +245,7 @@
         </div>
         <div class="tbl-wrap">
         <table class="acc md">
-          <thead><tr><th class="mark" aria-hidden="true"></th><th>模型</th><th>能力</th><th>积分倍率</th><th>默认档</th><th>支持的思考档位</th><th>上下文长度</th><th>最大输出</th></tr></thead>
+          <thead><tr><th class="mark" aria-hidden="true"></th><th>模型 ID</th><th>模型名称</th><th>能力</th><th>积分倍率</th><th>默认档</th><th>支持的思考档位</th><th>上下文长度</th><th>最大输出</th></tr></thead>
           <tbody id="mdBody"></tbody>
         </table>
         </div>
@@ -268,9 +270,10 @@
           <table class="acc zebra">
             <thead><tr>
               <th class="mark" aria-hidden="true"></th>
-              <th>账号</th><th>域</th>
+              <th>账号</th><th>UID</th><th>域</th>
               <th class="num">剩余积分</th><th class="num">总额度</th>
               <th class="num">可用包数</th><th>最近到期</th><th>主要构成来源</th>
+              <th class="c-acts"></th>
             </tr></thead>
             <tbody id="pkTableBody"></tbody>
           </table>
@@ -292,27 +295,22 @@
           <span class="trange" id="usRange"></span>
           <button class="xs" id="btnUsage">刷新</button>
         </header>
-        <div class="us-kpi-wrap">
-          <div class="us-kpi-grid">
-            <div class="us-kpi-sec">
-              <div class="us-kpi-lbl">调用与 Token 用量</div>
-              <div class="kpis" id="usStats"></div>
-            </div>
-            <div class="us-kpi-sec">
-              <div class="us-kpi-lbl">积分消耗与成本</div>
-              <div class="kpis" id="usCreditStats"></div>
-            </div>
-          </div>
+
+        <div class="kpis-deck">
+          <div class="kpis" id="usStats"></div>
+          <div class="kpis" id="usCreditStats"></div>
         </div>
+
         <div class="uschart">
           <div class="uschart-hd">
             <span class="lb">Token 时序</span>
             <span class="note" id="usChartNote">—</span>
             <span class="grow"></span>
             <span class="legend">
-              <span class="legend-item"><i class="sw sw-p"></i>prompt</span>
-              <span class="legend-item"><i class="sw sw-c"></i>completion</span>
-              <span class="legend-item"><i class="sw sw-t"></i>均值</span>
+              <i class="sw sw-p"></i>prompt
+              <i class="sw sw-c"></i>completion
+              <span class="sep"></span>
+              <i class="sw sw-t"></i>均值
             </span>
           </div>
           <div id="usChart" class="uschart-body"></div>
@@ -322,22 +320,14 @@
       <div class="box">
         <header>
           <h3>用量明细</h3>
-          <span class="vtabs" id="usTableSwitch">
-            <button type="button" class="on" id="btnShowDimTable">Token 明细</button>
-            <button type="button" id="btnShowCreditTable">积分扣除</button>
-          </span>
-          <span class="grow"></span>
           <span class="vtabs" id="usDimTabs">
             <button data-dim="account" class="on">按账号</button>
             <button data-dim="model">按模型</button>
             <button data-dim="realm">按域</button>
           </span>
-          <span class="vtabs" id="usCreditTabs" hidden>
-            <button data-dim="account" class="on">按账号</button>
-            <button data-dim="model">按模型</button>
-          </span>
+          <span class="grow"></span>
           <span class="note" id="usDimNote">—</span>
-          <label class="sel-note" id="usSortWrap">排序
+          <label class="sel-note">排序
             <select id="usSort">
               <option value="total">合计 Token</option>
               <option value="requests">请求数</option>
@@ -346,19 +336,15 @@
             </select>
           </label>
         </header>
-        <div class="tbl-wrap" id="wrapUsDim">
+        <div class="tbl-wrap">
           <table class="acc zebra">
             <thead id="usDimHead"></thead>
             <tbody id="usDimBody"></tbody>
           </table>
         </div>
-        <div class="tbl-wrap" id="wrapUsCredit" hidden>
-          <table class="acc zebra">
-            <thead id="usCreditHead"></thead>
-            <tbody id="usCreditBody"></tbody>
-          </table>
-        </div>
       </div>
+      <div id="usCreditTabs" hidden></div>
+      <table hidden><thead id="usCreditHead"></thead><tbody id="usCreditBody"></tbody></table>
     </section>
 
     <!-- 配置 -->
@@ -367,7 +353,13 @@
         <div class="split-layout">
           <!-- 左侧：设置导航 Tab 侧边栏 -->
           <aside class="split-side">
-            <div class="side-tabs" role="tablist">
+            <div class="side-card">
+              <div class="side-hd">
+                <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.6v1.9M8 12.5v1.9M1.6 8h1.9M12.5 8h1.9M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M12.5 3.5l-1.3 1.3M4.8 11.2l-1.3 1.3"/></svg>
+                <span>配置导航</span>
+              </div>
+
+              <div class="side-tabs" role="tablist">
               <button type="button" class="side-tab on" data-sec="sec-svc" role="tab">
                 <svg class="side-tab-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 2a6 6 0 0 0 0 12M2 8h12"/></svg>
                 <div class="side-tab-text">
@@ -417,6 +409,7 @@
                 <span class="side-meta-lbl">配置文件路径</span>
                 <div class="side-meta-val" id="cfgPath">-</div>
               </div>
+            </div>
             </div>
           </aside>
 
@@ -979,6 +972,36 @@
       <span class="grow"></span>
       <button class="xs" id="btnVcRefresh">刷新</button>
       <button class="xs primary" id="btnVcClose">关闭</button>
+    </footer>
+  </div>
+</div>
+
+<!-- 账号积分包明细 -->
+<div class="veil" id="pkVeil">
+  <div class="dlg" style="width:780px">
+    <header>
+      <h3>积分包明细 <span class="hint" id="pkModalWho"></span></h3>
+      <div class="hint">当前账号下已下发的全部积分包、剩余额度与失效时刻</div>
+    </header>
+    <div class="body">
+      <div class="tbl-wrap">
+        <table class="acc">
+          <thead><tr>
+            <th class="mark" aria-hidden="true"></th>
+            <th>包名 / 来源</th>
+            <th class="num">面额</th>
+            <th class="num">剩余</th>
+            <th class="num">已用</th>
+            <th class="num">发放时刻</th>
+            <th class="num">到期时刻</th>
+          </tr></thead>
+          <tbody id="pkModalBody"></tbody>
+        </table>
+      </div>
+    </div>
+    <footer>
+      <span class="grow"></span>
+      <button class="primary" id="btnPkModalClose">关闭</button>
     </footer>
   </div>
 </div>

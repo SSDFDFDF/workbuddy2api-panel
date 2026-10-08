@@ -582,105 +582,52 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   /* KPI 内的构成条（总 token 卡的 prompt/completion 占比） */
   .kpi .segbar { height: 4px; border-radius: 3px; margin-top: 7px; }
 
-  /* ── 用量与积分总览 KPI 排版优化 ─────────────────────────────────── */
-  .us-kpi-wrap { padding: 14px 17px 0; }
-  .us-kpi-grid { display: grid; grid-template-columns: 3fr 4fr; gap: 16px; align-items: start; }
-  .us-kpi-sec { min-width: 0; }
-  .us-kpi-lbl {
-    font-size: 11px; font-weight: 600; color: var(--ink-3); margin-bottom: 8px;
-    display: flex; align-items: center; gap: 6px;
+  /* ── 用量与积分看板：统一网格平铺 ─────────────────────────────────── */
+  .kpis-deck {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+    padding: 14px 17px 6px;
   }
-  .us-kpi-lbl::after { content: ''; flex: 1; height: 1px; background: var(--line-soft); }
-  .us-kpi-sec .kpis { padding: 0; margin-bottom: 0; gap: 10px; }
-  #usStats { grid-template-columns: repeat(3, 1fr); }
-  #usCreditStats { grid-template-columns: repeat(4, 1fr); }
-
-  @media (max-width: 1100px) {
-    .us-kpi-grid { grid-template-columns: 1fr; gap: 12px; }
-    #usStats { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
-    #usCreditStats { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+  .kpis-deck .kpis {
+    display: contents;
   }
 
+  /* ── Token 时序图：干练通透 ───────────────────────────────────────── */
   .uschart {
-    margin: 12px 17px 16px;
-    border: 1px solid var(--line-soft);
-    border-radius: 9px;
-    background: var(--surface-2);
-    overflow: hidden;
+    margin: 8px 17px 14px;
+    border-top: 1px solid var(--line-soft);
+    background: transparent;
   }
   .uschart-hd {
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 10px 14px;
-    border-bottom: 1px solid var(--line-soft);
-    font-size: 12.5px;
-    flex-wrap: wrap;
+    gap: 10px;
+    padding: 10px 0 4px;
+    font-size: 12px;
   }
-  .uschart-hd .lb {
-    color: var(--ink);
-    font-weight: 600;
-  }
-  .uschart-hd .note {
-    color: var(--ink-3);
-    font-size: 11.5px;
-    font-family: var(--mono);
-  }
+  .uschart-hd .lb { color: var(--ink); font-weight: 600; font-size: 12.5px; }
+  .uschart-hd .note { color: var(--ink-3); font-size: 11px; font-family: var(--mono); }
   .uschart-hd .legend {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 11px;
-    margin-left: auto;
+    color: var(--ink-3); font-size: 11.5px; display: inline-flex;
+    align-items: center; gap: 6px; margin-left: auto;
   }
-  .uschart-hd .legend-item {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 2px 7px;
-    border-radius: 5px;
-    background: var(--surface);
-    border: 1px solid var(--line-soft);
-    color: var(--ink-2);
-  }
-  .uschart-hd .sw {
-    width: 8px;
-    height: 8px;
-    border-radius: 2px;
-    display: inline-block;
-    flex: none;
-  }
+  .uschart-hd .legend .sep { width: 1px; height: 10px; background: var(--line); margin: 0 4px; }
+  .uschart-hd .sw { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
   .uschart-hd .sw-p { background: var(--accent); }
   .uschart-hd .sw-c { background: var(--ok); }
-  .uschart-hd .sw-t { background: var(--warn); }
-  .uschart-body {
-    padding: 10px 12px 6px;
-  }
-  .uschart-body svg {
-    display: block;
-    width: 100%;
-    height: auto;
-  }
+  .uschart-hd .sw-t { background: var(--warn); border-radius: 2px; }
+  .uschart-body { padding: 6px 0 2px; }
+  .uschart-body svg { display: block; width: 100%; height: auto; }
   .uschart-body .ax { stroke: var(--line); stroke-width: 1; }
-  .uschart-body .gl { stroke: var(--line-soft); stroke-width: 1; stroke-dasharray: 3 3; opacity: .65; }
-  .uschart-body .avg { stroke: var(--warn); stroke-width: 1.2; stroke-dasharray: 4 3; opacity: .8; }
-  .uschart-body .tk { fill: var(--ink-3); font: 10px/1 var(--mono); }
-  .uschart-body .tk-avg { fill: var(--warn); font: 550 10px/1 var(--mono); opacity: .95; }
-  .uschart-body .tk-peak { fill: var(--ink); font: 600 10.5px/1 var(--mono); }
-  .uschart-body rect.usbar {
-    cursor: pointer;
-    transition: opacity .15s ease, filter .15s ease;
-  }
-  .uschart-body rect.usbar:hover {
-    opacity: .85;
-    filter: brightness(1.15);
-  }
-  .uschart-body .us-empty {
-    padding: 36px 16px;
-    text-align: center;
-    color: var(--ink-3);
-    font-size: 12.5px;
-  }
+  .uschart-body .gl { stroke: var(--line-soft); stroke-width: 1; stroke-dasharray: 2 4; opacity: .45; }
+  .uschart-body .avg { stroke: var(--warn); stroke-width: 1; stroke-dasharray: 3 3; opacity: .7; }
+  .uschart-body .tk { fill: var(--ink-3); font: 10px var(--mono); }
+  .uschart-body .tk-avg { fill: var(--warn); font: 500 10px var(--mono); opacity: .9; }
+  .uschart-body .tk-peak { fill: var(--ink); font: 600 10px var(--mono); }
+  .uschart-body rect.usbar { transition: opacity .15s ease, filter .15s ease; cursor: pointer; }
+  .uschart-body rect.usbar:hover { opacity: .82; filter: brightness(1.2); }
+  .uschart-body .us-empty { padding: 32px 0; text-align: center; color: var(--ink-3); font-size: 12.5px; }
 
   /* 用量表内的 prompt/completion 占比条（共用 .segbar 基元，只调尺寸）。 */
   .segbar.us-mix { margin-top: 5px; min-width: 60px; }
@@ -811,3 +758,12 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .pg-info { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); }
   .pg-acts { display: flex; align-items: center; gap: 6px; }
   .pg-acts button { padding: 3px 10px; font-size: 12px; }
+
+  /* 积分构成单表格：来源文字与占比标签 */
+  .pk-src-tag {
+    display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px;
+    background: var(--surface-2); border-radius: 4px; font-size: 11.5px;
+    color: var(--ink-2); white-space: nowrap; margin: 1px 2px;
+  }
+  .pk-src-tag b { font-family: var(--mono); color: var(--accent); font-weight: 600; }
+  .pk-src-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
