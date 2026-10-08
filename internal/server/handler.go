@@ -25,6 +25,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/protocol"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
@@ -188,6 +189,8 @@ func NewHandler(cfg Config) *Handler {
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
+	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responses))
+	h.mux.HandleFunc("POST /v1/messages", h.withMessagesAuth(h.messages))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
@@ -198,8 +201,8 @@ func NewHandler(cfg Config) *Handler {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if h.cfg.RequestLog != nil && r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions" {
-		trace := &requestTrace{id: reqlog.NewRequestID(), start: time.Now()}
+	if h.cfg.RequestLog != nil && r.Method == http.MethodPost && isInferencePath(r.URL.Path) {
+		trace := &requestTrace{id: reqlog.NewRequestID(), start: time.Now(), path: r.URL.Path}
 		if h.loadLive().RecordClientInfo {
 			trace.captureClientInfo(r)
 		}
@@ -559,16 +562,20 @@ func cachedModelsSnapshot() []upstream.ModelInfo {
 }
 
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
+	h.inference(w, r, protocol.Chat)
+}
+
+// inference is the single account-routing, retry and accounting path for all
+// protocols. Only input decoding and output encoding depend on the client API.
+func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protocol.Kind) {
+	out := inferenceOutput{kind: kind}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
 	defer cancel()
 	r = r.WithContext(ctx)
 	// 客户端 IP 提取（按请求传递到 ChatStream，不透传时 upstream 侧忽略）；
 	// 消除早年共享字段方案的并发交叉污染（issue：ClientIP 竞态）。
 	clientIP := upstream.ExtractClientIP(r)
-	// 请求体无大小上限（max_body_mb 已移除，对齐上游）：完整读入，超限类问题交由
-	// 上游自然返回错误（其响应经既有错误分类链路透出，信息量更大）。#41 的截断
-	// 防御语义保留在读错误路径——移除预拦截后，截断只可能来自客户端自己断流，
-	// 读 body 出错就地 400，不把半截 JSON 喂上游 unmarshal 报 unexpected EOF 冤枉罚号。
+	// Bound the original client body before decoding or translating it.
 	r.Body = http.MaxBytesReader(w, r.Body, forwarding.MaxRequestBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -577,15 +584,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if errors.As(err, &large) {
 			status = http.StatusRequestEntityTooLarge
 		}
-		writeOpenAIError(w, status, "invalid_request", "read body: "+err.Error())
+		out.Error(w, status, "invalid_request", "read body: "+err.Error())
 		return
 	}
-	peek, err := forwarding.Parse(body)
+	request, err := protocol.Decode(kind, body)
 	if err == nil {
-		err = peek.ResolveHeaders(r.Header)
+		err = request.Chat.ResolveHeaders(r.Header)
 	}
 	if err != nil {
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		out.Error(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	peek := request.Chat
+	out.request = request
+	body, err = encodedRequest(request, body)
+	if err != nil {
+		out.Error(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
 
@@ -595,7 +609,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 回落 cn（零回归）。
 	realm, bareModel := h.realmResolver().Resolve(peek.Model)
 	if strings.TrimSpace(bareModel) == "" || (realm == "global" && !h.cfg.GlobalEnabled) {
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_model", "model realm is disabled or model is empty")
+		out.Error(w, http.StatusBadRequest, "invalid_model", "model realm is disabled or model is empty")
 		return
 	}
 	modelRate := ""
@@ -900,7 +914,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = reqlog.OutcomeInterrupted
 				return
 			}
-			writeOpenAIError(w, st.status, "upstream_transport", "upstream transport failed; request was not replayed")
+			out.Error(w, st.status, "upstream_transport", "upstream transport failed; request was not replayed")
 			return
 		}
 		if status >= 400 {
@@ -930,7 +944,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					// 空 body 兜底：无上游原文可透传，保留可读分类文案（不编造原文）。
 					msg = "content blocked by upstream content firewall"
 				}
-				writeOpenAIErrorHint(w, http.StatusBadRequest, "content_blocked", msg,
+				out.ErrorHint(w, http.StatusBadRequest, "content_blocked", msg,
 					h.hintOf(upstream.ErrContentBlocked, string(respBody), bareModel, reqHasImage, uerr))
 				st.status = http.StatusBadRequest
 				st.outcome = reqlog.OutcomeHTTPError
@@ -945,7 +959,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if kind == upstream.ErrPromptTooLong {
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 				fail(acct.UID)
-				writeOpenAIErrorHint(w, http.StatusBadRequest, "prompt_too_long", promptTooLongMessage(string(respBody)),
+				out.ErrorHint(w, http.StatusBadRequest, "prompt_too_long", promptTooLongMessage(string(respBody)),
 					h.hintOf(upstream.ErrPromptTooLong, string(respBody), bareModel, reqHasImage, uerr))
 				st.status = http.StatusBadRequest
 				st.outcome = reqlog.OutcomeHTTPError
@@ -960,7 +974,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				if strings.TrimSpace(msg) == "" {
 					msg = "image request was rejected by upstream"
 				}
-				writeOpenAIErrorHint(w, http.StatusBadRequest, "image_invalid", msg,
+				out.ErrorHint(w, http.StatusBadRequest, "image_invalid", msg,
 					h.hintOf(upstream.ErrImageInvalid, string(respBody), bareModel, reqHasImage, uerr))
 				st.status = http.StatusBadRequest
 				st.outcome = reqlog.OutcomeHTTPError
@@ -978,7 +992,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				if strings.TrimSpace(msg) == "" {
 					msg = "chat request body was rejected by upstream"
 				}
-				writeOpenAIErrorHint(w, http.StatusBadRequest, "bad_params", msg,
+				out.ErrorHint(w, http.StatusBadRequest, "bad_params", msg,
 					h.hintOf(upstream.ErrBadParams, string(respBody), bareModel, reqHasImage, uerr))
 				st.status = http.StatusBadRequest
 				st.outcome = reqlog.OutcomeHTTPError
@@ -996,7 +1010,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				if uerr.RetryAfter > 0 {
 					w.Header().Set("Retry-After", fmt.Sprint(int(uerr.RetryAfter.Seconds())+1))
 				}
-				writeJSON(w, st.status, upstream.ErrorResponse(kind, string(respBody)))
+				out.JSON(w, st.status, upstream.ErrorResponse(kind, string(respBody)))
 				return
 			}
 			// WAF IP 级 fail-fast（优先于 rotateBackoff 退避——IP 级拦截时退避无意义）：
@@ -1025,7 +1039,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 组装请求上下文做判定）。
 			// errFrame：上游 error 帧原文（观察者旁路采集），用于流尾的账号处置。
 			var errFrame string
-			sErr := upstream.StreamHint(w, rc, upstream.FrameHintFunc(func() upstream.HintContext {
+			sErr := out.Stream(w, rc, upstream.FrameHintFunc(func() upstream.HintContext {
 				return h.hintContext(bareModel, reqHasImage)
 			}), upstream.WithErrorFrameObserver(func(payload string) { errFrame = payload }), upstream.WithExpectedChoices(peek.N), upstream.WithFrameObserver(stats.Observe), upstream.WithResponseTimeouts(timeouts.FirstModelEvent, timeouts.FirstGeneration, timeouts.Tail))
 			switch {
@@ -1101,8 +1115,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		observed := &chatStatsReader{start: st.start}
 		timeouts := h.cfg.Upstream.StreamTimeouts
-		resp, err := upstream.Aggregate(rc, upstream.WithExpectedChoices(peek.N), upstream.WithFrameObserver(observed.Observe), upstream.WithResponseTimeouts(timeouts.FirstModelEvent, timeouts.FirstGeneration, timeouts.Tail))
+		resp, err := out.Aggregate(rc, upstream.WithExpectedChoices(peek.N), upstream.WithFrameObserver(observed.Observe), upstream.WithResponseTimeouts(timeouts.FirstModelEvent, timeouts.FirstGeneration, timeouts.Tail))
 		rc.Close()
+		var formatted map[string]any
+		if err == nil {
+			formatted, err = protocol.Format(request, resp)
+		}
 		if err != nil {
 			credit, hasCredit := observed.Credit()
 			recordAttempt(acct.UID, observed.Usage(), credit, hasCredit, attemptStarted, 0)
@@ -1110,10 +1128,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			var fe *upstream.FrameError
 			if errors.As(err, &fe) {
 				h.applyErrorPolicy(acct.UID, fe.Kind, fe.Payload, bareModel, nil)
-				writeJSON(w, fe.Status, upstream.ErrorResponse(fe.Kind, fe.Payload))
+				out.JSON(w, fe.Status, upstream.ErrorResponse(fe.Kind, fe.Payload))
 				st.status = fe.Status
 			} else {
-				writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
+				out.Error(w, http.StatusBadGateway, "upstream_parse", err.Error())
 				st.status = http.StatusBadGateway
 			}
 			st.outcome = reqlog.OutcomeHTTPError
@@ -1130,7 +1148,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if st.hasCache {
 			cacheMissWarn.noteCacheTokens(bareModel, st.promptTokens, st.cacheHit, st.cacheMiss)
 		}
-		writeJSON(w, http.StatusOK, resp)
+		writeJSON(w, http.StatusOK, formatted)
 		st.status = http.StatusOK
 		st.outcome = reqlog.OutcomeSuccess
 		st.toks = completionTokens(resp)
@@ -1223,7 +1241,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		status = http.StatusBadRequest
 	}
-	writeOpenAIErrorHint(w, status, code, msg, hint)
+	out.ErrorHint(w, status, code, msg, hint)
 	st.status = status
 	st.outcome = reqlog.OutcomeHTTPError
 }

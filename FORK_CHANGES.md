@@ -69,6 +69,7 @@ git log --oneline <已同步基线>..upstream/main     # 列出待判定提交�
 | 12 | **裸模型名默认域** | `model_default_realm = cn / global / auto` | `cn` |
 | 13 | **客户端特征对齐** | 稳定设备/会话指纹、硬件特征离散化、`/v2/report` 桌面指纹、版本自检 | 启用 |
 | 14 | **面板版本配置** | 占位符来自后端内置基线（不硬编码）；「一键填入已拉取版本」；CLI 版本需人工核对 | 生效 |
+| 15 | **Responses / Anthropic 桥接** | `/v1/responses` 无状态文本 / function tools；`/v1/messages` 文本 / client tools。复用原有执行、重试、用量与日志；跨协议未知字段拒绝，原生 Chat 保留扩展。见 [兼容说明](README.md#protocol-compatibility) | 生效（限定子集） |
 
 ---
 
@@ -80,6 +81,22 @@ git log --oneline <已同步基线>..upstream/main     # 列出待判定提交�
 
 同理不要带回写死下限的降级改写（如上游 `fd3e142` 的 GPT `max_tokens` 抬升），它属 §2 第 1 条
 「转发契约」的删除范围。
+
+跨协议兼容不得引入模型名猜测式补丁：不自动删除不支持参数、不搬移 system、
+不改写 Schema、不伪造 reasoning / 工具结果、不将截断转为成功。
+工具空 identity 续传的兼容仅由新协议消费者显式启用；非空身份冲突仍报错，原生 Chat 不变。
+缓存计数桥接只映射已观测字段，不把 cache miss 当 cache write。
+
+本阶段参考 CLIProxyAPI、llm-rosetta、cc-switch，独立实现而非直接移植源码：
+
+| 参考处理 | 取舍 |
+|---|---|
+| cc-switch：空工具 identity、晚到名称、并行分片，DeepSeek 缓存别名 | 借鉴无损数据形态处理与回归场景；不按模型名启用，原生 Chat 不变 |
+| llm-rosetta：MiniMax `reasoning_split` / `<think>` 拆解，DeepSeek / Moonshot 删除参数及 system 前移 | 不采用：WorkBuddy 未验证，自动删参数或重排消息会改变请求意图 |
+| cc-switch：Moonshot `$ref` 兄弟字段改为 `allOf` | 不采用：原补丁限定直连 Moonshot 的 Responses→Chat，不能套用到 WorkBuddy |
+| CLIProxyAPI / cc-switch：budget→effort、档位钳位；Kimi / DeepSeek 工具历史 reasoning 补全 | 不采用：不自动升降档、不补造推理；新协议暂不支持 thinking，原 Chat 保留已有字段 |
+
+厂商直连补丁不等于 WorkBuddy 能力；后续采用补丁须提供真实上游脱敏请求 / 原始帧依据与回归测试。
 
 ## 4. 配置不兼容（旧键不识别、不迁移：启动告警、面板保存时丢弃）
 
@@ -98,6 +115,7 @@ git log --oneline <已同步基线>..upstream/main     # 列出待判定提交�
 | --- | --- |
 | 转发契约 | **新增** `internal/forwarding/`、`internal/jsondoc/` |
 | 响应管线 | `internal/upstream/sse.go`、`internal/upstream/idle.go` |
+| Responses / Messages | **新增** `internal/protocol/`、`internal/server/protocol.go`；`internal/server/{handler,logging}.go`；`upstream.ConsumeCompletion` 共享消费接口 |
 | 重试与账号策略 | `internal/server/handler.go`、`internal/upstream/client.go` |
 | 系统提示词 | **新增** `internal/prompt/`、`cmd/server/prompt_config.go`、`cmd/server/prompt_preview.go` |
 | 指纹改写 | **新增** `internal/scrub/` |
@@ -111,13 +129,15 @@ git log --oneline <已同步基线>..upstream/main     # 列出待判定提交�
 
 默认 chat 端点与 profile 头、`max_completion_tokens` 映射、`tool_choice` 的 none/required/具名、
 思考关闭编码与 effort 档位、`n>1`、logprobs、JSON Schema、图片、工具名增量方言。
+Responses / Messages 已覆盖本地假上游及官方 Python SDK 的文本 / 工具 / 两轮回传 / SSE，
+仍未做真实 WorkBuddy 和完整 Codex / Claude Code 端到端验收；不能将协议测试视为模型能力证明。
 
 ## 7. 验证
 
 ```bash
 go build ./... && go vet ./...
 go test ./... -count=1
-go test -race ./internal/server ./internal/upstream ./internal/forwarding ./internal/scrub
+go test -race ./internal/protocol ./internal/server ./internal/upstream ./internal/forwarding ./internal/scrub
 ```
 
 ---

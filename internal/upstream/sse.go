@@ -101,17 +101,19 @@ func (r *eventReader) next() (sseEvent, error) {
 }
 
 type completionState struct {
-	top       map[string]any
-	choices   map[int]*choiceState
-	expected  int
-	aggregate bool
-	bytes     int
+	top               map[string]any
+	choices           map[int]*choiceState
+	expected          int
+	aggregate         bool
+	bytes             int
+	emptyToolIdentity bool
 }
 type choiceState struct {
-	fields  map[string]any
-	message map[string]any
-	tools   map[int]map[string]any
-	finish  string
+	fields            map[string]any
+	message           map[string]any
+	tools             map[int]map[string]any
+	finish            string
+	emptyToolIdentity bool
 }
 
 func newCompletion(n int, aggregate bool) *completionState {
@@ -238,7 +240,21 @@ func (c *choiceState) mergeMessage(m map[string]any, snapshot, strict bool) erro
 				t = map[string]any{}
 				c.tools[idx] = t
 			}
-			if err := mergeStable(t, d, map[string]bool{"index": true, "function": true}, true); err != nil {
+			identity := d
+			if c.emptyToolIdentity && (d["id"] == "" || d["type"] == "") {
+				// Some OpenAI-compatible endpoints send empty identity strings
+				// on continuation chunks. An explicit index identifies the call;
+				// empty strings contain no new identity and must not erase it.
+				// Non-empty conflicts still fail in mergeStable below.
+				identity = make(map[string]any, len(d))
+				for k, v := range d {
+					if (k == "id" || k == "type") && v == "" {
+						continue
+					}
+					identity[k] = v
+				}
+			}
+			if err := mergeStable(t, identity, map[string]bool{"index": true, "function": true}, true); err != nil {
 				return err
 			}
 			if raw, ok := d["function"]; ok {
@@ -306,7 +322,7 @@ func (s *completionState) add(obj map[string]any) error {
 		seen[i] = true
 		c := s.choices[i]
 		if c == nil {
-			c = &choiceState{fields: map[string]any{"index": i}, message: map[string]any{}, tools: map[int]map[string]any{}}
+			c = &choiceState{fields: map[string]any{"index": i}, message: map[string]any{}, tools: map[int]map[string]any{}, emptyToolIdentity: s.emptyToolIdentity}
 			s.choices[i] = c
 		}
 		if c.finish != "" {
@@ -501,12 +517,13 @@ func ErrorStatus(k ErrKind) int {
 
 type StreamOption func(*streamOptions)
 type streamOptions struct {
-	onErrorFrame    func(string)
-	onFrame         func(map[string]any)
-	expected        int
-	firstEvent      time.Duration
-	firstGeneration time.Duration
-	tail            time.Duration
+	onErrorFrame      func(string)
+	onFrame           func(map[string]any)
+	expected          int
+	firstEvent        time.Duration
+	firstGeneration   time.Duration
+	tail              time.Duration
+	emptyToolIdentity bool
 }
 
 func WithErrorFrameObserver(fn func(string)) StreamOption {
@@ -516,6 +533,13 @@ func WithFrameObserver(fn func(map[string]any)) StreamOption {
 	return func(o *streamOptions) { o.onFrame = fn }
 }
 func WithExpectedChoices(n int) StreamOption { return func(o *streamOptions) { o.expected = n } }
+
+// WithEmptyToolIdentityDeltas opts a translating consumer into treating empty
+// identity fields as absent. No identity is invented and conflicting non-empty
+// values or ambiguous deltas remain errors. Native Chat stays unchanged.
+func WithEmptyToolIdentityDeltas() StreamOption {
+	return func(o *streamOptions) { o.emptyToolIdentity = true }
+}
 
 // watchResponse closes a blocked upstream reader when semantic deadlines expire.
 // Heartbeats do not extend these deadlines. All timer ownership ends with consume.
@@ -711,16 +735,43 @@ func consume(r io.Reader, s *completionState, emit func(sseEvent, map[string]any
 			if err = emit(e, obj); err != nil {
 				return err
 			}
-			// Text is already delivered. Keep only bounded tool/terminal state.
-			for _, c := range s.choices {
-				for _, k := range []string{"content", "reasoning", "reasoning_content", "refusal", "annotations"} {
-					delete(c.message, k)
+			// Native Chat can discard delivered text; translating consumers retain
+			// bounded state for their terminal response object.
+			if !s.aggregate {
+				for _, c := range s.choices {
+					for _, k := range []string{"content", "reasoning", "reasoning_content", "refusal", "annotations"} {
+						delete(c.message, k)
+					}
+					delete(c.fields, "logprobs")
 				}
-				delete(c.fields, "logprobs")
 			}
 		}
 	}
 }
+
+// ConsumeCompletion shares the native decoder, limits, observers, deadlines and
+// success predicate with Aggregate/StreamHint. emit sees validated Chat chunks
+// (including JSON snapshots converted to a chunk). It must not mutate them or
+// acknowledge completion before this function returns successfully.
+func ConsumeCompletion(r io.Reader, emit func(map[string]any) error, opts ...StreamOption) (map[string]any, error) {
+	o := streamOptions{expected: 1}
+	for _, f := range opts {
+		f(&o)
+	}
+	s := newCompletion(o.expected, true)
+	s.emptyToolIdentity = o.emptyToolIdentity
+	err := consume(r, s, func(_ sseEvent, obj map[string]any) error {
+		if emit == nil {
+			return nil
+		}
+		return emit(obj)
+	}, o)
+	if err != nil {
+		return nil, err
+	}
+	return s.response(), nil
+}
+
 func Aggregate(r io.Reader, opts ...StreamOption) (map[string]any, error) {
 	o := streamOptions{expected: 1}
 	for _, f := range opts {

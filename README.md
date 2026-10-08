@@ -45,11 +45,11 @@
 
 ## 项目简介
 
-WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾讯 CodeBuddy / WorkBuddy（`www.workbuddy.cn` / `www.workbuddy.ai`）账号包装为统一的 `/v1/chat/completions` 服务。
+WorkBuddy2API 是一个自托管的 **OpenAI / Anthropic 协议桥接网关**，将腾讯 CodeBuddy / WorkBuddy（`www.workbuddy.cn` / `www.workbuddy.ai`）账号包装为统一的 API：原生 `/v1/chat/completions`，以及无状态文本 / 工具子集的 `/v1/responses`、`/v1/messages`。
 
 - 官方不提供 OpenAI 形态的开放 API，本项目通过 **OAuth 设备授权**（面板「添加账号」或 `login.sh`）获取账号凭证，在网关侧做 token 自动刷新、账号池调度与流量治理；
 - 面向 **个人多账号** 场景：多账号共享、单号故障自动换号、冷却 / 熔断防止雪崩、会话粘性保证多轮上下文不跳号；
-- 对客户端只暴露 OpenAI 兼容接口，现有 SDK / 前端 / 工具 **零改造接入**。
+- 客户端可使用 OpenAI / Anthropic SDK 接入；Responses / Messages 的支持范围与必要参数见 [协议兼容说明](#protocol-compatibility)，不承诺 Codex / Claude Code 全功能兼容。
 
 > ⚠️ 合规须知：本项目是**非官方**网关，使用 CodeBuddy / WorkBuddy 账号作为上游，**仅限本人授权账号、本机 / 私有环境测试**。
 
@@ -63,11 +63,12 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | 🧲 **会话粘性** | 同一会话尽量绑定同一账号，TTL 滚动续期，失败自动解绑，可镜像 Redis 防重启丢失 |
 | ⏰ **定时任务** | 签到（09/21）+ 活跃上报（10）+ 小猫旅行（09/21）+ token 保活（22）+ 余额后台刷新，各自独立开关 |
 | ⚡ **流式 + 非流式** | 出站强制 `stream:true`；SSE 帧按规范重建；非流式由本地聚合为单响应 |
+| 🔌 **Responses / Messages** | 复用同一上游执行与记账路径，支持无状态文本及普通 function/client tools；Responses 要求 `store:false`、工具 `strict:false`，详见 [兼容边界](#protocol-compatibility) |
 | 💬 **系统提示词体系** | `none`/`replace`/`after`/`append` 四种组合位置；五种内置预设；按账号域（CN/Global）分别配置；面板可预览生效正文 |
 | 🗑️ **指纹改写层** | 可选：改写 user/assistant/tool 消息里的上游黑名单指纹串；支持自定义词/句规则（热生效） |
 | 🧬 **分域客户端特征** | 按「账号域 × 请求用途」生成版本、Origin、语言与 UA，不随代理域名漂移 |
 | 🌐 **出站代理** | 普通正向代理 + Resin 粘性代理池；支持按账号开关 |
-| ✅ **严格转发契约** | 不改写请求内容（未知字段与大整数完整保留）；无法表达的输入明确返回 400 |
+| ✅ **严格转发契约** | 原生 Chat 未知字段与大整数完整保留；跨协议仅转换已声明的字段，无法表达的输入明确返回 400 |
 | 📊 **可观测** | 每请求一行表格日志（TTFB / token 速率 / uid）；`/healthz` 带 `service` 身份标识可接负载均衡探活 |
 | 💾 **状态持久化** | 池状态本地原子落盘 + Upstash Redis 异步镜像（可选） |
 | 🖥️ **Web 管理面板** | 内嵌单页应用（明暗主题）：账号运维 / 用量与积分分析 / 模型档位查询 / 在线改配置（热生效）/ 运行日志 / 任务中心 |
@@ -207,6 +208,55 @@ curl -s http://localhost:7863/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":false}'
 ```
+
+<a id="protocol-compatibility"></a>
+
+### Responses / Anthropic 接入
+
+| 入口 | 必要参数 / 鉴权 |
+|---|---|
+| `POST /v1/responses` | Bearer 鉴权；显式 `store:false`，每次发送完整 `input` 历史；function 工具必须显式 `strict:false` |
+| `POST /v1/messages` | `x-api-key` 或 Bearer 鉴权；两者同时提供时都必须匹配，重复凭证头拒绝；要求 `anthropic-version: 2023-06-01` 与正整数 `max_tokens` |
+
+```bash
+curl -sN http://localhost:7863/v1/responses \
+  -H 'Authorization: Bearer your-api-key' -H 'Content-Type: application/json' \
+  -d '{"model":"deepseek-v4-flash","store":false,"stream":true,"input":"你好"}'
+
+curl -sN http://localhost:7863/v1/messages \
+  -H 'x-api-key: your-api-key' -H 'anthropic-version: 2023-06-01' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"deepseek-v4-flash","max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"你好"}]}'
+```
+
+OpenAI SDK 的 `base_url` 为 `http://localhost:7863/v1`，使用 `client.responses.create(store=False, ...)`；
+Anthropic SDK 的 `base_url` 为 `http://localhost:7863`，使用 `client.messages.create(...)` 或 `client.messages.stream(...)`。
+模型需按当前 `/v1/models` 选择；`cn:` / `global:` 前缀与原 Chat 一致。
+
+**支持范围与工具回传**
+
+- 支持文本、普通 function/client tools、流式与非流式、基础采样和工具选择；工具 schema 原样保留，不自动改写 `$ref`。
+- Responses 支持 `instructions`、message / function_call / function_call_output；上一轮 `response.output` 加入完整历史，结果用 `{"type":"function_call_output","call_id":"...","output":"结果"}` 回传。关联键为 **call_id，不是 item id**。`metadata` 只在本次响应回显，不作为服务端会话。
+- Anthropic 支持顶层 system、text / tool_use / tool_result；回传上一轮 assistant content，再以 user 的 tool_result blocks 提供结果。`tool_use.input` 必须为对象。assistant 文本须在工具前，user 的工具结果须在普通文本前；不重排历史、不补缺失或重复的工具结果。
+- 不支持服务端存储 / `previous_response_id` / `conversation` / 后台生成、图片 / 音视频 / 文件、原生 thinking、严格 Schema、托管工具、beta / cache_control、`count_tokens`。非空 `stop_sequences`、`tool_result.is_error:true` 等无法等价表达的输入明确拒绝，不静默降级。原生 Chat 的扩展字段保留策略不变。
+
+**流式与用量边界**
+
+- 文本实时输出；工具按独立 index 聚合，支持名称晚到 / 分片和空 identity 续传，完整完成并验证 JSON 后才发送工具事件，避免客户端执行半截调用。非空身份冲突、畸形工具或无法无损表达的响应明确失败，不丢坏工具后报成功。
+- 空流、错误帧、缺失 finish 的 EOF 不伪装成功，不触发生成重放；开流前返回 HTTP 错误，开流后为 `response.failed` / Anthropic `error`。
+- 文本 `length` 对应 `response.incomplete` / `stop_reason:max_tokens`。OpenAI SDK `3.26.0` 的 `get_final_response()` 只处理 completed；截断须读取 incomplete 事件的 response，不能依赖该 helper。工具被截断则失败，不补 `{}`。
+- 内部按原始上游 usage 记账。缓存别名不相加，cache miss 不作 cache write；Anthropic 输入扣除已观测缓存读写，SSE 初始 0 为临时计数，最终 `message_delta.usage` 覆盖。旧客户端是否支持最终输入计数更新需单独验证。
+- Responses 缺失 usage 时返回 null；Anthropic 缺必要计数则失败，不估算 token。Responses 的 `usage.input_tokens_details.cache_write_tokens` 是保留已观测缓存写入的**网关扩展**，不是官方标准字段。
+
+已通过本地假上游及官方 Python SDK（OpenAI `3.26.0` / Anthropic `1.12.1`）的文本、工具、两轮回传、流式、用量和截断测试；**尚未完成真实 WorkBuddy / Codex / Claude Code 端到端验收**。
+可选 SDK 测试只访问测试创建的 loopback 网关，不消耗账号额度；普通 `go test` 默认跳过，不安装 Python 依赖：
+
+```bash
+uv run --no-project --with openai==3.26.0 --with anthropic==1.12.1 python -c \
+  'import os,sys,subprocess; os.environ["WB2A_SDK_PYTHON"]=sys.executable; sys.exit(subprocess.call(["go","test","./internal/server","-run","^TestProtocolSDKSmoke$","-v","-count=1"]))'
+```
+
+实现挂载点与开源模型补丁取舍见 [FORK_CHANGES.md](FORK_CHANGES.md)。
 
 ## 配置说明
 
