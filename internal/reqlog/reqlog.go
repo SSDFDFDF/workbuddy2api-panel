@@ -530,43 +530,134 @@ func (w *archiveWriter) read(limit int, filter Filter) ([]Event, error) {
 	// 顺序——同一秒内连续轮转写出的多个文件 mtime 经常完全相同（Linux 文件时间戳粒度粗），
 	// os.ReadDir 的字典序又会把装着最早事件的基准文件 requests-<day>.jsonl 排在
 	// requests-<day>.N.jsonl 之后；目录被整体拷贝 / 恢复备份后 mtime 更不可信。
-	var out []Event
+	//
+	// 内存有界：旧实现把每个文件的全部匹配事件 append 进 out 再全量排序，
+	// 只取 100 条也会把整个归档读进内存（实测 21.8MB 归档一次查询分配 208MB）。
+	// 现在用固定容量 top-K 堆：内存 O(limit)，扫描量不变。
+	top := newTopK(limit)
+	var firstErr error
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() || !strings.HasPrefix(name, "requests-") || !strings.HasSuffix(name, ".jsonl") {
 			continue
 		}
-		rows, err := readFile(filepath.Join(w.cfg.Dir, name), filter)
-		if err != nil {
-			return out, err
+		if err := readFile(filepath.Join(w.cfg.Dir, name), filter, top.push); err != nil && firstErr == nil {
+			// 单个文件损坏/被截断：返回已有的最近记录 + 错误（旧实现同样返回部分结果）。
+			firstErr = err
 		}
-		out = append(out, rows...)
 	}
-	// 契约：按事件时间倒序返回最近 limit 条（同一时刻用 Stable 保留落盘先后）。
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Time.After(out[j].Time) })
-	if len(out) > limit {
-		out = out[:limit]
-	}
-	return out, nil
+	return top.sorted(), firstErr
 }
 
-func readFile(path string, filter Filter) ([]Event, error) {
+// topK 固定容量地保留「按事件时间倒序」最前面的 K 条记录。
+//
+// 排序契约与旧实现（收集全部 + sort.SliceStable 按时间倒序 + 截断）一致：
+// 时间倒序；时间相同时保留**先扫描到**的记录（旧 stable sort 保留 append 顺序，
+// 即文件名字典序 + 文件内行序）。内部用小根堆，堆顶是“按该顺序最靠后”的一条，
+// 新记录优于堆顶时替换。
+//
+// 为什么不是遍历完再 sort：K 默认 200 / 上限 1000，而归档可以到几十万行；
+// 全量持有既放大内存又拉长 GC，且完全没必要。
+func newTopK(limit int) *topK {
+	return &topK{limit: limit, heap: make([]topKEntry, 0, limit+1)}
+}
+
+type topKEntry struct {
+	ev  Event
+	seq int
+}
+
+type topK struct {
+	limit int
+	seq   int
+	heap  []topKEntry
+}
+
+// worse 报告 a 是否应排在 b 之后（时间更早；同时刻扫描更晚）。
+func worse(a, b topKEntry) bool {
+	if !a.ev.Time.Equal(b.ev.Time) {
+		return a.ev.Time.Before(b.ev.Time)
+	}
+	return a.seq > b.seq
+}
+
+func (t *topK) push(e Event) {
+	entry := topKEntry{ev: e, seq: t.seq}
+	t.seq++
+	if len(t.heap) < t.limit {
+		t.heap = append(t.heap, entry)
+		t.up(len(t.heap) - 1)
+		return
+	}
+	if !worse(t.heap[0], entry) {
+		return // 堆顶不差于新记录（即新记录不比已有的更靠前）：丢弃，零分配
+	}
+	t.heap[0] = entry
+	t.down(0)
+}
+
+func (t *topK) up(i int) {
+	for i > 0 {
+		parent := (i - 1) / 2
+		if !worse(t.heap[i], t.heap[parent]) {
+			break
+		}
+		t.heap[i], t.heap[parent] = t.heap[parent], t.heap[i]
+		i = parent
+	}
+}
+
+func (t *topK) down(i int) {
+	n := len(t.heap)
+	for {
+		left, right := 2*i+1, 2*i+2
+		smallest := i
+		if left < n && worse(t.heap[left], t.heap[smallest]) {
+			smallest = left
+		}
+		if right < n && worse(t.heap[right], t.heap[smallest]) {
+			smallest = right
+		}
+		if smallest == i {
+			return
+		}
+		t.heap[i], t.heap[smallest] = t.heap[smallest], t.heap[i]
+		i = smallest
+	}
+}
+
+// sorted 按「时间倒序 + 同时刻扫描序升序」输出，与旧 stable sort 结果逐位一致。
+func (t *topK) sorted() []Event {
+	entries := t.heap
+	sort.Slice(entries, func(i, j int) bool {
+		if !entries[i].ev.Time.Equal(entries[j].ev.Time) {
+			return entries[i].ev.Time.After(entries[j].ev.Time)
+		}
+		return entries[i].seq < entries[j].seq
+	})
+	out := make([]Event, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, e.ev)
+	}
+	return out
+}
+
+func readFile(path string, filter Filter, sink func(Event)) error {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 64<<10), 1<<20)
-	var out []Event
 	for scanner.Scan() {
 		var e Event
 		if json.Unmarshal(scanner.Bytes(), &e) != nil || !filter.match(e) {
 			continue
 		}
-		out = append(out, e)
+		sink(e)
 	}
-	return out, scanner.Err()
+	return scanner.Err()
 }
 
 func (f Filter) match(e Event) bool {

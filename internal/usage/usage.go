@@ -32,8 +32,10 @@ const hourlyKeep = 90 * 24 * time.Hour
 // flushInterval 防抖落盘间隔。
 const flushInterval = 30 * time.Second
 
-// maxBuckets 桶数硬上限。超过时立即触发一次折叠，避免异常流量把内存/文件撑爆。
-const maxBuckets = 400_000
+// maxBuckets 桶数上限。超过时先折叠最老的小时桶降分辨率，仍超则告警
+// （不静默删历史：保留策略由产品侧决定，见 enforceRetention）。
+// var 而非 const：仅便于测试注入小上限，生产不修改。
+var maxBuckets = 400_000
 
 // hourLayout / dayLayout 分片键的时间格式（本地时区，与用户直觉一致）。
 const (
@@ -81,8 +83,22 @@ type file struct {
 type Recorder struct {
 	mu      sync.Mutex
 	path    string
-	buckets map[string]*bucket // key: scope|realm|uid|model|rate
-	dirty   bool
+	buckets map[string]*bucket
+
+	// rev 每次内存变更（Add/Rollup）自增；flushedRev 为已成功落盘的版本。
+	// 不用 bool 脏标记的原因：落盘在锁外做（快照拷贝），提前清脏会让写盘失败
+	// （磁盘满/权限/卷异常）永久丢掉重试机会——数据只存在于内存，直到下次
+	// 变更才再写。改为“成功后才推进已落盘版本”，失败自然在下一轮重试。
+	rev        uint64
+	flushedRev uint64
+
+	// writeMu 串行化落盘：后台防抖 flush 与面板手动 Save 会并发，二者共用
+	// 同一个 path+.tmp，无互斥时互相踩临时文件（rename 竞态）。
+	writeMu sync.Mutex
+
+	// lastCapWarn 上次「超容量上限」告警时刻（小时级节流，防刷屏）；持 mu 读写。
+	lastCapWarn time.Time
+
 	started time.Time
 
 	stopOnce sync.Once
@@ -107,23 +123,31 @@ func New(path string) *Recorder {
 	return r
 }
 
+// rollupEvery 例行的保留策略执行间隔：即使桶数未超上限，也按 hourlyKeep 定期把
+// 过期的小时桶折叠为日桶。
+//
+// 为什么不能只在「超上限」时折叠（旧行为）：hourlyKeep 是“小时桶只保留 90 天”的
+// 保留期承诺，而折叠只在 len(buckets) > maxBuckets 时才被触发——未触顶的实例里
+// 90 天前的小时桶会一直以小时粒度堆在内存与 JSON 里，保留策略实际未生效。
+const rollupEvery = time.Hour
+
 // Start 启动后台防抖落盘与折叠。Stop 前一直运行。
 func (r *Recorder) Start() {
 	go func() {
 		defer close(r.done)
 		t := time.NewTicker(flushInterval)
 		defer t.Stop()
+		lastRollup := time.Now()
 		for {
 			select {
 			case <-r.stop:
 				r.flush(true)
 				return
 			case <-t.C:
-				r.mu.Lock()
-				n := len(r.buckets)
-				r.mu.Unlock()
-				if n > maxBuckets {
-					r.Rollup(time.Now())
+				now := time.Now()
+				if now.Sub(lastRollup) >= rollupEvery {
+					r.enforceRetention(now)
+					lastRollup = now
 				}
 				r.flush(false)
 			}
@@ -222,7 +246,7 @@ func (r *Recorder) Add(now time.Time, realm, uid, model string, d Delta, ok bool
 		b.TPS += d.TokensPerSecond
 		b.TPSN++
 	}
-	r.dirty = true
+	r.rev++
 }
 
 // Rollup 把超出 hourlyKeep 的小时桶折叠为日桶（按本地日历日）。
@@ -231,11 +255,88 @@ func (r *Recorder) Rollup(now time.Time) {
 	if r == nil {
 		return
 	}
-	cutoff := now.Add(-hourlyKeep)
+	r.rollupOlderThan(now.Add(-hourlyKeep))
+}
+
+// enforceRetention 执行保留策略 + 容量兜底（后台每小时一次，与落盘解耦）：
+//  1. 先按 hourlyKeep 折叠过期小时桶（保留期语义）；
+//  2. 仍超 maxBuckets 时，从**最老的小时桶**额外折叠（牺牲旧数据的时级分辨率，
+//     总量/积分不丢——折叠是保总量的合并，不是删除）；
+//  3. 折叠无法再降（例如全部已是日桶）时告警，不静默删历史。
+//
+// 为什么不做“超上限就删最老桶”：日桶是文档承诺的永久历史，删哪些、留多久属于
+// 产品保留策略，不能由内存保护层偷偷决定；这里只保证“堆不下时先降分辨率”，
+// 并把真实占用暴露出来（/panel/api/usage 的 buckets 字段 + 本条 WARN）。
+func (r *Recorder) enforceRetention(now time.Time) {
+	if r == nil {
+		return
+	}
+	r.rollupOlderThan(now.Add(-hourlyKeep))
+
+	for pass := 0; pass < 4; pass++ {
+		r.mu.Lock()
+		n := len(r.buckets)
+		r.mu.Unlock()
+		if n <= maxBuckets {
+			return
+		}
+		if folded := r.foldOldestHours(n - maxBuckets); folded == 0 {
+			break // 已无小时桶可折：分辨率已到极限
+		}
+	}
 
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	n := len(r.buckets)
+	warn := n > maxBuckets && now.Sub(r.lastCapWarn) >= time.Hour
+	if warn {
+		r.lastCapWarn = now
+	}
+	r.mu.Unlock()
+	if warn {
+		log.Printf("[usage] WARN: 用量桶 %d 超过上限 %d（已折叠至日粒度）；"+
+			"历史日桶按设计长期保留，请检查账号/模型/倍率维度是否异常增长", n, maxBuckets)
+	}
+}
 
+// foldOldestHours 至少折叠 need 个最老的小时桶（返回实际折叠数，0 = 无小时桶）。
+// 折叠为日桶是保总量的合并：只降分辨率，不丢计数。
+func (r *Recorder) foldOldestHours(need int) int {
+	if need <= 0 {
+		return 0
+	}
+	r.mu.Lock()
+	hours := make([]string, 0, 64)
+	for _, b := range r.buckets {
+		if strings.HasPrefix(b.Scope, "h:") {
+			hours = append(hours, b.Scope)
+		}
+	}
+	r.mu.Unlock()
+	if len(hours) == 0 {
+		return 0
+	}
+	sort.Strings(hours) // "h:2006-01-02T15" 零填充 → 字典序即时间序
+	idx := need - 1
+	if idx >= len(hours) {
+		idx = len(hours) - 1
+	}
+	ts, err := time.ParseInLocation(hourLayout, strings.TrimPrefix(hours[idx], "h:"), time.Local)
+	if err != nil {
+		return 0
+	}
+	return r.rollupOlderThan(ts.Add(time.Hour))
+}
+
+// rollupOlderThan 折叠所有**起始时刻早于 cutoff** 的小时桶为日桶，返回折叠数。
+// 折叠是无损合并（累加后删源桶），幂等。
+func (r *Recorder) rollupOlderThan(cutoff time.Time) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.rollupOlderThanLocked(cutoff)
+}
+
+// rollupOlderThanLocked 同上，调用方必须已持 r.mu。
+func (r *Recorder) rollupOlderThanLocked(cutoff time.Time) int {
 	type move struct{ from, to string }
 	var moves []move
 	for k, b := range r.buckets {
@@ -279,9 +380,10 @@ func (r *Recorder) Rollup(now time.Time) {
 		delete(r.buckets, m.from)
 	}
 	if len(moves) > 0 {
-		r.dirty = true
-		log.Printf("[usage] 折叠 %d 个小时桶为日桶（保留 %v 细粒度）", len(moves), hourlyKeep)
+		r.rev++
+		log.Printf("[usage] 折叠 %d 个小时桶为日桶", len(moves))
 	}
+	return len(moves)
 }
 
 // ---------------------------------------------------------------- 持久化 ----
@@ -310,8 +412,12 @@ func (r *Recorder) flush(force bool) {
 	if r == nil || r.path == "" {
 		return
 	}
+	// 串行化：后台防抖 flush 与面板 Save 共用 path+.tmp，必须一次只写一个。
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
 	r.mu.Lock()
-	if !r.dirty && !force {
+	if !force && r.rev == r.flushedRev {
 		r.mu.Unlock()
 		return
 	}
@@ -319,7 +425,7 @@ func (r *Recorder) flush(force bool) {
 	for _, b := range r.buckets {
 		snap.Buckets = append(snap.Buckets, *b)
 	}
-	r.dirty = false
+	wrote := r.rev
 	r.mu.Unlock()
 
 	raw, err := json.Marshal(snap)
@@ -333,12 +439,19 @@ func (r *Recorder) flush(force bool) {
 	}
 	tmp := r.path + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		log.Printf("[usage] 写临时文件失败: %v", err)
+		log.Printf("[usage] 写临时文件失败: %v（本轮不推进已落盘版本，下一轮重试）", err)
 		return
 	}
 	if err := os.Rename(tmp, r.path); err != nil {
-		log.Printf("[usage] 原子替换失败: %v", err)
+		log.Printf("[usage] 原子替换失败: %v（本轮不推进已落盘版本，下一轮重试）", err)
+		return
 	}
+	// 仅在写盘成功后推进：期间新产生的变更（rev > wrote）仍保持待落盘。
+	r.mu.Lock()
+	if wrote > r.flushedRev {
+		r.flushedRev = wrote
+	}
+	r.mu.Unlock()
 }
 
 // Save 立即落盘（面板「刷新」或关闭前调用）。
@@ -558,9 +671,55 @@ func (r *Recorder) SnapshotWindow(w Window, nicks map[string]string, currentRate
 	explicit := !w.From.IsZero() || !w.To.IsZero()
 	windowed := !from.IsZero() || !to.IsZero()
 
+	// 窗口预过滤用**字符串边界**而不是逐桶 time.Parse：hour/day scope 都是零填充
+	// 定长格式，同前缀内字典序 == 时间序。有效时间格式的桶（即最终能通过
+	// bucketTime 的那些）不会被误判；无效/脏 scope 仍由下方 bucket 解析环节剔除。
+	// 这样窗口查询只复制窗口内的桶（此前无论如何都先全量拷贝——40 万桶实测
+	// 一次 24h 查询就多出 77MB 瞬时分配）。
+	var fromHour, toHour, fromDay, toDay string
+	if windowed {
+		if !from.IsZero() {
+			fromHour = "h:" + from.Format(hourLayout)
+			fromDay = "d:" + from.Format(dayLayout)
+		}
+		if !to.IsZero() {
+			toHour = "h:" + to.Format(hourLayout)
+			toDay = "d:" + to.Format(dayLayout)
+		}
+	}
+
 	r.mu.Lock()
-	bs := make([]bucket, 0, len(r.buckets))
+	// 预分配策略：窗口查询**不按全量桶数**预分配（192B×N，40 万桶≈ 76MB，
+	// 会让窗口优化形同虚设）；窗口内数量未知，靠 append 摊还增长即可。
+	// 全量历史（windowed=false）则一定全拷，按桶数预分配。
+	initCap := 64
+	if !windowed {
+		initCap = len(r.buckets)
+	}
+	bs := make([]bucket, 0, initCap)
+	// 数据起点（全库最早分片）：不受窗口影响，必须在**未过滤**的全量桶上求最小。
+	since := ""
 	for _, b := range r.buckets {
+		if since == "" || b.Scope < since {
+			since = b.Scope
+		}
+		if windowed {
+			if strings.HasPrefix(b.Scope, "h:") {
+				if fromHour != "" && b.Scope < fromHour {
+					continue
+				}
+				if toHour != "" && b.Scope > toHour {
+					continue
+				}
+			} else {
+				if fromDay != "" && b.Scope < fromDay {
+					continue
+				}
+				if toDay != "" && b.Scope > toDay {
+					continue
+				}
+			}
+		}
 		bs = append(bs, *b)
 	}
 	r.mu.Unlock()
@@ -576,15 +735,12 @@ func (r *Recorder) SnapshotWindow(w Window, nicks map[string]string, currentRate
 	creditModelAgg := map[string]*creditAcc{}
 	rateCache := map[string]string{}
 
-	// 数据起点（全库最早分片）：不受窗口影响，表示"记录自何时开始"。scope 字典序
-	// 即时间序（同前缀内同格式排序；"d:" 恒早于 "h:"——日桶只来自 90 天前的小时折叠）。
-	since := ""
+	// 数据起点（全库最早分片）：不受窗口影响，表示"记录自何时开始"；已在拷贝循环
+	// （未过滤的全量桶）上求出。scope 字典序即时间序（同前缀内同格式排序）；
+	// "d:" 恒早于 "h:"——日桶只来自 90 天前的小时折叠。
 	matched := 0
 	for i := range bs {
 		b := &bs[i]
-		if b.Scope < since || since == "" {
-			since = b.Scope
-		}
 		if windowed {
 			ts, ok := bucketTime(b.Scope)
 			// 解析失败的脏桶不进窗口聚合（也不该出现在任何口径里）。

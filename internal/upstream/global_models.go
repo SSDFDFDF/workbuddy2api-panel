@@ -120,7 +120,21 @@ func (c *Client) fetchGlobalModelsOnce(a *auth.Auth) (names []string, infos []Mo
 	}
 	c.globalModels.Unlock()
 
-	names, infos, efforts, defaults, err := c.probeGlobalModels(a)
+	// 并发合并：缓存/负缓存均未命中时，同一瞬间的多个调用只放一个去探测，
+	// 其余等待并共享结果（探测是 4 路并发请求，放大代价最高的一处）。
+	type globalProbeResult struct {
+		names    []string
+		infos    []ModelInfo
+		efforts  map[string][]string
+		defaults map[string]string
+		err      error
+	}
+	pv, _ := c.globalModelsProbe.do("global", func() (any, error) {
+		names, infos, efforts, defaults, err := c.probeGlobalModels(a)
+		return globalProbeResult{names: names, infos: infos, efforts: efforts, defaults: defaults, err: err}, nil
+	})
+	pr, _ := pv.(globalProbeResult)
+	names, infos, efforts, defaults, err := pr.names, pr.infos, pr.efforts, pr.defaults, pr.err
 	if err != nil || len(names) == 0 {
 		// 探测失败：负缓存 + 返回 nil（effort 桶不写，prepareBody 走 globalEffortMap 静态兜底）。
 		c.globalModels.Lock()

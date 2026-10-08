@@ -1109,6 +1109,10 @@ func TestStatusEndpoint(t *testing.T) {
 	if statusBody["redis_mode"] != "noop" {
 		t.Errorf("redis_mode=%v want noop", statusBody["redis_mode"])
 	}
+	// 有界写队列的丢弃计数必须显式透出（未注入时零值，不能缺字段）。
+	if v, ok := statusBody["redis_dropped_writes"]; !ok || v != float64(0) {
+		t.Errorf("redis_dropped_writes=%v (present=%v) want 0", v, ok)
+	}
 }
 
 // TestStatusInFlightFull /status 透出满载计数：healthy 且占满在途的账号数。

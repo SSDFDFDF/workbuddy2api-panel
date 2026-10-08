@@ -44,9 +44,14 @@ type Config struct {
 	// StickyCount 返回当前粘性会话绑定数（供 /status）；nil 时报告 0。
 	StickyCount func() int
 	// RedisMode 观测字段（"upstash" / "noop"），供 /status 透出。
-	RedisMode    string
-	SoftCooldown time.Duration // 429/限流文案软冷却基数，默认 600s（连续触发指数退避，封顶 soft_rate_max）
-	RefreshSkew  time.Duration // token 提前刷新窗口，默认 10m
+	RedisMode string
+	// RedisDroppedWrites 报告 Redis 异步镜像因**写队列已满**而丢弃的笔数
+	// （redisstore.Upstash 有界队列；Noop/未注入时恒 0）。
+	// 本地状态始终是权威来源，丢弃只影响重启恢复的镜像完整度；该计数是运维
+	// 发现“Redis 长期不可用/写跟不上”的唯一量化信号。
+	RedisDroppedWrites func() uint64
+	SoftCooldown       time.Duration // 429/限流文案软冷却基数，默认 600s（连续触发指数退避，封顶 soft_rate_max）
+	RefreshSkew        time.Duration // token 提前刷新窗口，默认 10m
 
 	// Panel 管理面板 handler（可选；nil = 不挂载）。挂载在 /panel/ 前缀下，
 	// 面板自带 Bearer 鉴权（同一 api_key）与内嵌静态资源，主路由只做转发。
@@ -268,6 +273,10 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	if redisMode == "" {
 		redisMode = "noop"
 	}
+	var droppedWrites uint64
+	if h.cfg.RedisDroppedWrites != nil {
+		droppedWrites = h.cfg.RedisDroppedWrites()
+	}
 	// cost_explore 探索台账（issue #136 §5 可观测性）：累计探索事件数 + 各
 	// (域, 模型) 的最近探索时刻（键 "realm|model"）。与 accounts[].model_costs
 	// 行对照即可读出「探索→毕业」全链路（单一事实来源，不做双表示）。零回归只增键。
@@ -287,6 +296,9 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		},
 		"sticky_sessions": sticky,
 		"redis_mode":      redisMode,
+		// redis_dropped_writes 异步镜像队列满导致丢弃的笔数（0 = 无丢弃）：
+		// 与 redis_mode 并列，回答“镜像到底有没有跟上”。零值也显式写出。
+		"redis_dropped_writes": droppedWrites,
 		// model_locks 当前有未过期模型级限流的 (域, 模型) 全清单：账号池视图回答
 		// 「哪些号不能用」，本键回答「哪些模型不能用、锁了几个号、还要锁多久」。
 		// 与 ModelBlocked（请求失败时的单模型判定）互补；无锁时为 null。零回归只增键。

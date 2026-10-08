@@ -8,7 +8,21 @@ $('logChips').addEventListener('click', ev => {
   document.querySelectorAll('#logChips .chip').forEach(c => c.classList.toggle('on', c === b));
   loadLogs();
 });
+let logsInFlight = false, logsPending = false;
 async function loadLogs() {
+  // 轮询与手动操作共用一个入口：归档查询是「全目录扫描 + 服务端 top-K」，
+  // 5s 轮询在慢磁盘/大归档下可能比间隔还长，重入会叠加多份并发扫描。
+  // 在途时只记一笔待办，结束后补跑一次（用户点筛选不会被静默丢掉）。
+  if (logsInFlight) { logsPending = true; return; }
+  logsInFlight = true;
+  try {
+    await loadLogsOnce();
+  } finally {
+    logsInFlight = false;
+    if (logsPending) { logsPending = false; loadLogs(); }
+  }
+}
+async function loadLogsOnce() {
   const box = $('logBox');
   const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 24;
   const limit = ($('reqLimit') && $('reqLimit').value) || 100;

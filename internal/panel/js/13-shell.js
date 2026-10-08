@@ -65,6 +65,9 @@ $('btnRefresh').onclick = async () => {
 
 /* ── 轮询 ─────────────────────────────────────────────────────────── */
 function refreshVisible() {
+  // 页面隐藏（切后台标签页/最小化）时暂停轮询：日志页会扫归档、账号页会拉全池状态，
+  // 没人看时继续 5s 一次纯属浪费；回到前台下一次 tick 自然恢复。
+  if (document.hidden) return;
   if (view === 'accounts') loadOverview(true);
   else if (view === 'logs') loadLogs();
   else if (view === 'taskscenter') reattachQueueView();

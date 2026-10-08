@@ -352,12 +352,19 @@ func main() {
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 
 	h := server.NewHandler(server.Config{
-		Pool:         p,
-		Upstream:     up,
-		APIKey:       cfg.APIKey,
-		Session:      sessRouter,
-		StickyCount:  sessCount,
-		RedisMode:    redisMode,
+		Pool:        p,
+		Upstream:    up,
+		APIKey:      cfg.APIKey,
+		Session:     sessRouter,
+		StickyCount: sessCount,
+		RedisMode:   redisMode,
+		// Redis 镜像队列丢弃计数：/status 透出，面板/脚本据此判断镜像是否跟上。
+		RedisDroppedWrites: func() uint64 {
+			if r, ok := store.(interface{ DroppedWrites() uint64 }); ok {
+				return r.DroppedWrites()
+			}
+			return 0
+		},
 		SoftCooldown: cfg.SoftRateDur,
 		Panel:        pn,
 		Live:         live,

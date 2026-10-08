@@ -636,6 +636,11 @@ type Client struct {
 	// 1h TTL + 5min 负缓存），见 global_models.go。按实例持有，测试新建 Client 即隔离。
 	globalModels fetchGlobalModelsCache
 
+	// cnModelsProbe / globalModelsProbe 并发合并（单飞）：缓存过期的同一瞬间
+	// 多个请求会同时打探测，此前各自发起一次完整上游调用（N 倍放大）。见 inflight.go。
+	cnModelsProbe     inflight
+	globalModelsProbe inflight
+
 	// Identity profiles are immutable after client construction.
 	Profiles    map[string]IdentityProfile
 	CacheSecret []byte
@@ -1262,6 +1267,19 @@ const codeBuddyCLIUA = "CLI/2.63.2 CodeBuddy/2.63.2"
 // /v3 失败（400/网络错/解析失败）不拖累企业端点结果——降级为仅企业端点，warn 日志；
 // 反之亦然（两路独立容错）。
 func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
+	// 并发合并：同一实例的 CN 目录探测在途时，其余调用等待并共享结果
+	// （模型目录与账号无关，多账号共享同一份）。
+	v, err := c.cnModelsProbe.do(realmKey(a.Realm()), func() (any, error) {
+		return c.fetchModelsOnce(a)
+	})
+	if err != nil {
+		return nil, err
+	}
+	infos, _ := v.([]ModelInfo)
+	return infos, nil
+}
+
+func (c *Client) fetchModelsOnce(a *auth.Auth) ([]ModelInfo, error) {
 	type probeResult struct {
 		infos []ModelInfo
 		err   error
