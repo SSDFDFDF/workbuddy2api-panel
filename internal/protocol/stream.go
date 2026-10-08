@@ -167,6 +167,9 @@ func Stream(w http.ResponseWriter, r io.Reader, req *Request, hint func(string) 
 			}
 		} else {
 			initial := map[string]any{"id": item["id"], "type": "function_call", "call_id": item["call_id"], "name": item["name"], "arguments": "", "status": "in_progress"}
+			if namespace, ok := item["namespace"]; ok {
+				initial["namespace"] = namespace
+			}
 			if err := emit("response.output_item.added", map[string]any{"output_index": i, "item": initial}); err != nil {
 				return err
 			}

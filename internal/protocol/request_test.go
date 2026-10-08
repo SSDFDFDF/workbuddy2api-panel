@@ -147,6 +147,8 @@ func FuzzRequestDecode(f *testing.F) {
 	f.Add(`{"model":"x","store":false,"input":"hi"}`)
 	f.Add(`{"model":"x","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`)
 	f.Add(`{"model":"x","store":false,"input":[{"role":"assistant","content":[{"type":"input_text","text":"hi"},{"type":"output_text","text":"there","annotations":[]}]}]}`)
+	f.Add(`{"model":"x","store":false,"input":"hi","tools":` + nsTools + `}`)
+	f.Add(`{"model":"x","store":false,"input":[{"type":"function_call","call_id":"a","name":"f","arguments":"{}"},{"type":"function_call_output","call_id":"a","output":[{"type":"input_text","text":"ok"}]}]}`)
 	f.Fuzz(func(t *testing.T, body string) {
 		if len(body) > 1<<16 {
 			t.Skip()

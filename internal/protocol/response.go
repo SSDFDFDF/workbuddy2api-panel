@@ -295,6 +295,9 @@ func (b *responseBuilder) formatCompletion(completion *Completion) (map[string]a
 	if finish == "tool_calls" && len(calls) == 0 {
 		return nil, fmt.Errorf("tool_calls finish without calls")
 	}
+	if err := validateToolSelection(b.req, calls, finish); err != nil {
+		return nil, err
+	}
 	if err := completion.validatePlan(text, len(calls)); err != nil {
 		return nil, err
 	}
@@ -358,7 +361,12 @@ func (b *responseBuilder) formatCompletion(completion *Completion) (map[string]a
 			return nil, fmt.Errorf("invalid upstream tool input: %w", err)
 		}
 		if b.req.Kind == Responses {
-			output = append(output, map[string]any{"type": "function_call", "id": newID("fc_"), "call_id": id, "name": name, "arguments": args, "status": status})
+			identity := b.req.responseToolIdentity(name)
+			item := map[string]any{"type": "function_call", "id": newID("fc_"), "call_id": id, "name": identity.name, "arguments": args, "status": status}
+			if identity.namespace != "" {
+				item["namespace"] = identity.namespace
+			}
+			output = append(output, item)
 		} else {
 			output = append(output, map[string]any{"type": "tool_use", "id": id, "name": name, "input": input})
 		}

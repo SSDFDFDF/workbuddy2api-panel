@@ -102,7 +102,7 @@ func TestProtocolPromptCompositionPreservesToolContract(t *testing.T) {
 						if err != nil {
 							return nil, err
 						}
-						return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}` + "\n\ndata: [DONE]\n\n"))}, nil
+						return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"next","type":"function","function":{"name":"lookup","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}` + "\n\ndata: [DONE]\n\n"))}, nil
 					})}}
 					up.Fingerprints.Store(scrub.NewLayer(fingerprint, nil))
 					h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "prompt", AccessToken: "fake", ExpiresAt: 9999999999}), Upstream: up, PromptRules: map[string]prompt.Rule{"": {Mode: mode, Text: "GATEWAY"}}})

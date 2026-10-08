@@ -103,6 +103,86 @@ for stream in (False, True):
         else:
             assert result.content[0].text == "你好", result
 
+# Tool-choice constraints are part of the translated contract, not hints that
+# a completed upstream response may silently violate.
+for params in (
+    dict(model="cn:text", tool_choice="required"),
+    dict(model="cn:tools", tool_choice="none"),
+    dict(model="cn:tools", parallel_tool_calls=False),
+):
+    p = dict(store=False, input=initial, tools=otools, **params)
+    try:
+        o.responses.create(**p)
+    except openai.APIStatusError as e:
+        assert e.status_code == 502
+    else:
+        raise AssertionError("Responses accepted a violated tool-choice constraint")
+    try:
+        with o.responses.stream(**p) as s:
+            events = list(s)
+        assert any(e.type == "response.failed" for e in events)
+        assert not any(e.type.startswith("response.function_call") for e in events)
+    except openai.APIStatusError as e:
+        assert e.status_code == 502  # tool-only failure before starting SSE
+
+for model, choice in (("text", {"type": "any"}), ("tools", {"type": "none"}),
+                      ("tools", {"type": "auto", "disable_parallel_tool_use": True})):
+    p = dict(model="cn:" + model, max_tokens=100, messages=initial, tools=atools, tool_choice=choice)
+    try:
+        a.messages.create(**p)
+    except anthropic.APIStatusError as e:
+        assert e.status_code == 502
+    else:
+        raise AssertionError("Messages accepted a violated tool-choice constraint")
+
+# Namespaces stay stateless: same local function in two groups, repeated wire
+# names, stable identity and text-block tool results across a fresh second turn.
+ntools = [
+    {"type": "namespace", "name": ns, "description": "", "tools": [
+        dict(otools[0], description="keep child description")
+    ]}
+    for ns in ("crm", "fs")
+]
+for stream in (False, True):
+    params = dict(model="cn:namespace", store=False, input=initial, tools=ntools)
+    if stream:
+        with o.responses.stream(**params) as s:
+            events = list(s)
+            result = s.get_final_response()
+        announced = [e.item for e in events if e.type == "response.output_item.added"]
+        assert [c.namespace for c in announced] == ["crm", "fs"]
+    else:
+        result = o.responses.create(**params)
+    assert result.tools[0].type == "namespace"
+    calls = result.output
+    assert [c.name for c in calls] == ["lookup", "lookup"]
+    assert [c.namespace for c in calls] == ["crm", "fs"]
+    assert [c.call_id for c in calls] == ["a", "b"]
+    check_usage(result)
+    history = initial + [c.model_dump(exclude_none=True) for c in calls]
+    history += [
+        {"type": "function_call_output", "call_id": c.call_id, "output": [
+            {"type": "input_text", "text": " A\n"}, {"type": "input_text", "text": "B "}
+        ]}
+        for c in calls
+    ]
+    if stream:
+        with o.responses.stream(**dict(params, input=history)) as s:
+            list(s)
+            result = s.get_final_response()
+    else:
+        result = o.responses.create(**dict(params, input=history))
+    assert result.output_text == "工具完成"
+
+with o.responses.stream(model="cn:namespace-cutoff", store=False, input=initial, tools=ntools) as s:
+    events = list(s)
+    result = next(e.response for e in events if e.type == "response.incomplete")
+    assert [c.namespace for c in result.output] == ["crm", "fs"]
+    assert all(c.status == "incomplete" for c in result.output)
+    assert result.output[0].arguments == '{"n":'
+    assert not any(e.type.startswith("response.function_call") for e in events)
+    assert not any(e.type == "response.output_item.added" for e in events)
+
 # EasyInputMessage assistant history and output replay are both text inputs.
 for typ in ("input_text", "output_text"):
     history = initial + [
@@ -177,4 +257,4 @@ for client, params in (
 
 o.close()
 a.close()
-print(f"SDK smoke passed: openai {openai.__version__}, anthropic {anthropic.__version__}; text/history/tools/name-dialects/two-turn/length/partial-tools/truncation/usage")
+print(f"SDK smoke passed: openai {openai.__version__}, anthropic {anthropic.__version__}; text/history/tools/name-dialects/namespaces/text-results/tool-choice/two-turn/length/partial-tools/truncation/usage")

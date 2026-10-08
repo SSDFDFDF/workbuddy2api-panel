@@ -2,7 +2,7 @@ package protocol
 
 import "fmt"
 
-func responsesRequest(src map[string]any) (map[string]any, error) {
+func responsesRequest(src map[string]any, tools *toolIndex) (map[string]any, error) {
 	if err := fields(src, "", "model input instructions stream store previous_response_id conversation background tools tool_choice parallel_tool_calls max_output_tokens temperature top_p metadata text reasoning include truncation"); err != nil {
 		return nil, err
 	}
@@ -89,33 +89,11 @@ func responsesRequest(src map[string]any) (map[string]any, error) {
 		// Client metadata is echoed only, not interpreted as WorkBuddy routing.
 	}
 	if v := src["tools"]; v != nil {
-		a, ok := v.([]any)
-		if !ok {
-			return nil, invalid("tools", "array required")
+		declared, err := tools.declarations(v)
+		if err != nil {
+			return nil, err
 		}
-		tools := make([]any, 0, len(a))
-		for i, v := range a {
-			p := fmt.Sprintf("tools[%d]", i)
-			m, err := object(v, p)
-			if err != nil {
-				return nil, err
-			}
-			if err = fields(m, p, "type name description parameters strict"); err != nil {
-				return nil, err
-			}
-			if m["type"] != "function" {
-				return nil, invalid(p+".type", "only client function tools are supported")
-			}
-			if m["strict"] != false {
-				return nil, invalid(p+".strict", "explicit strict:false required; schema-constrained generation is not verified")
-			}
-			t, err := function(m["name"], m["description"], m["parameters"], p)
-			if err != nil {
-				return nil, err
-			}
-			tools = append(tools, t)
-		}
-		dst["tools"] = tools
+		dst["tools"] = declared
 	}
 	if v := src["parallel_tool_calls"]; v != nil {
 		dst["parallel_tool_calls"] = v
@@ -137,7 +115,11 @@ func responsesRequest(src map[string]any) (map[string]any, error) {
 			if m["type"] != "function" {
 				return nil, invalid("tool_choice.type", "function required")
 			}
-			dst["tool_choice"] = map[string]any{"type": "function", "function": map[string]any{"name": m["name"]}}
+			name, err := tools.choice(m["name"])
+			if err != nil {
+				return nil, err
+			}
+			dst["tool_choice"] = map[string]any{"type": "function", "function": map[string]any{"name": name}}
 		}
 	}
 	messages := []any{}
@@ -195,7 +177,7 @@ func responsesRequest(src map[string]any) (map[string]any, error) {
 					assistant = msg
 				}
 			case "function_call":
-				if err = fields(m, p, "type id call_id name arguments status"); err != nil {
+				if err = fields(m, p, "type id call_id name namespace arguments status"); err != nil {
 					return nil, err
 				}
 				if v := m["id"]; v != nil {
@@ -206,7 +188,15 @@ func responsesRequest(src map[string]any) (map[string]any, error) {
 				if v := m["status"]; v != nil && v != "completed" {
 					return nil, invalid(p+".status", "only completed tool history is supported")
 				}
-				call, err := toolCall(m["call_id"], m["name"], m["arguments"], p)
+				name, err := nonempty(m["name"], p+".name")
+				if err != nil {
+					return nil, err
+				}
+				name, err = tools.history(name, m["namespace"], p)
+				if err != nil {
+					return nil, err
+				}
+				call, err := toolCall(m["call_id"], name, m["arguments"], p)
 				if err != nil {
 					return nil, err
 				}
@@ -232,7 +222,7 @@ func responsesRequest(src map[string]any) (map[string]any, error) {
 				if err != nil {
 					return nil, err
 				}
-				output, err := stringValue(m["output"], p+".output")
+				output, err := textParts(m["output"], p+".output", "input_text")
 				if err != nil {
 					return nil, err
 				}

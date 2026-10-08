@@ -18,6 +18,48 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
+func sdkNamespaceRequest(obj map[string]any, results int) error {
+	tools, _ := obj["tools"].([]any)
+	if len(tools) != 2 {
+		return fmt.Errorf("namespace tool declarations lost")
+	}
+	for i, name := range []string{"ns_3_crm_lookup", "ns_2_fs_lookup"} {
+		tool := tools[i].(map[string]any)
+		fn := tool["function"].(map[string]any)
+		if tool["type"] != "function" || fn["name"] != name || fn["description"] != "keep child description" {
+			return fmt.Errorf("incorrect namespace wire declaration")
+		}
+	}
+	if results > 0 {
+		seen := 0
+		for _, v := range obj["messages"].([]any) {
+			m := v.(map[string]any)
+			if calls, ok := m["tool_calls"].([]any); ok {
+				if len(calls) != 2 {
+					return fmt.Errorf("namespace tool history was split or lost")
+				}
+				for i, name := range []string{"ns_3_crm_lookup", "ns_2_fs_lookup"} {
+					fn := calls[i].(map[string]any)["function"].(map[string]any)
+					if fn["name"] != name {
+						return fmt.Errorf("namespace history identity changed")
+					}
+				}
+			}
+			if m["role"] == "tool" {
+				parts, ok := m["content"].([]any)
+				if !ok || len(parts) != 2 || parts[0].(map[string]any)["text"] != " A\n" || parts[1].(map[string]any)["text"] != "B " {
+					return fmt.Errorf("tool output text block order/whitespace lost")
+				}
+				seen++
+			}
+		}
+		if seen != 2 {
+			return fmt.Errorf("missing namespace tool results")
+		}
+	}
+	return nil
+}
+
 // Opt-in: WB2A_SDK_PYTHON must point to a Python with openai/anthropic installed.
 // All HTTP stays on loopback or the fake RoundTripper. No WorkBuddy credentials,
 // package installation, model call or network dependency is needed by go test.
@@ -61,6 +103,11 @@ func TestProtocolSDKSmoke(t *testing.T) {
 				}
 			}
 		}
+		if strings.HasPrefix(model, "namespace") {
+			if err := sdkNamespaceRequest(obj, results); err != nil {
+				return nil, err
+			}
+		}
 		if results > 0 {
 			if results != 2 {
 				return nil, fmt.Errorf("missing parallel tool result")
@@ -82,6 +129,15 @@ func TestProtocolSDKSmoke(t *testing.T) {
 			body = `data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"a","type":"function","function":{"name":"","arguments":"{"}},{"index":1,"id":"b","type":"function","function":{"name":"lookup","arguments":"{\"n\":2}"}}]}}]}` + "\n\n" +
 				`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"","type":"","function":{"name":"` + first + `","arguments":"\"n\":"}},{"index":1,"function":{"name":"lookup"}}]}}]}` + "\n\n" +
 				`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"` + second + `","arguments":"9007199254740993}"}}]},"finish_reason":"tool_calls"}]}` + "\n\n"
+		}
+		if strings.HasPrefix(model, "namespace") && results == 0 {
+			finish := "tool_calls"
+			args := `{"n":9007199254740993}`
+			if model == "namespace-cutoff" {
+				finish, args = "length", `{"n":`
+			}
+			body = `data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"a","type":"function","function":{"name":"ns_3_crm_lookup","arguments":""}},{"index":1,"id":"b","type":"function","function":{"name":"ns_2_fs_lookup","arguments":"{\"n\":2}"}}]}}]}` + "\n\n" +
+				fmt.Sprintf(`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"ns_3_crm_lookup","arguments":%q}}]},"finish_reason":%q}]}`, args, finish) + "\n\n"
 		}
 		body += usage
 		if model == "partial-tool" || model == "filtered-tool" || model == "bad-tool" {

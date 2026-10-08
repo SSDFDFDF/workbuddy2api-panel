@@ -27,6 +27,7 @@ type Request struct {
 	Kind   Kind
 	Chat   *forwarding.Request
 	Source map[string]any
+	tools  *toolIndex
 }
 
 func invalid(path, message string) error {
@@ -171,9 +172,11 @@ func Decode(kind Kind, raw []byte) (*Request, error) {
 		return nil, invalid("body", err.Error())
 	}
 	var dst map[string]any
+	var tools *toolIndex
 	switch kind {
 	case Responses:
-		dst, err = responsesRequest(src)
+		tools = newToolIndex()
+		dst, err = responsesRequest(src, tools)
 	case Anthropic:
 		dst, err = anthropicRequest(src)
 	default:
@@ -195,7 +198,7 @@ func Decode(kind Kind, raw []byte) (*Request, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Request{Kind: kind, Chat: chat, Source: src}, nil
+	return &Request{Kind: kind, Chat: chat, Source: src, tools: tools}, nil
 }
 
 func function(name, description, schema any, path string) (map[string]any, error) {
