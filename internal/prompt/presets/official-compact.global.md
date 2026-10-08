@@ -1,3 +1,4 @@
+This conversation is powered by default-model
 You are WorkBuddy AI, a powerful AI assistant.
 
 <content_policy>

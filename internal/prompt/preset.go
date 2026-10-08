@@ -2,8 +2,11 @@
 //
 // 目录约定（`presets/`）：
 //
-//	<name>.md           分域共用（default）
+//	<name>.md           分域共用（当前仅保留给未来的中性预设）
 //	<name>.<realm>.md   分域文件（cn / global），缺失的 realm 回落共用文件
+//
+// 当前库内所有预设都是分域文件（cn + global）：CN 与 Global 不是翻译关系，
+// 而是发布分支差异（产品名 / 数据目录 / 区域段 / 语言段），因此必须两份。
 //
 // 新增预设只需放文件 + 在 catalog 里登记一行，面板会自动列出（列表由
 // Presets() 生成，前端不硬编码）。
@@ -48,9 +51,9 @@ var presetCatalog = []struct {
 }{
 	{
 		name:   PresetDefault,
-		label:  "通用默认",
-		desc:   "分域共用，0.4K 字符：自撰工程助手纪律（结论先行、最小改动、工具契约、安全红线）",
-		realms: nil,
+		label:  "官方默认",
+		desc:   "全文官方英文原文（CN 5.8K / Global 5.5K 字符）：抓包首屏前缀——身份 + 能力介绍 + 完整官方 content_policy + personal_files_safety + 区域与语言段",
+		realms: []string{"cn", "global"},
 	},
 	{
 		name:   PresetOfficial,
@@ -84,8 +87,8 @@ var presetCatalog = []struct {
 	},
 	{
 		name:   PresetMinimal,
-		label:  "极简",
-		desc:   "CN 0.15K / Global 0.4K 字符：最短可用人格，量级对齐官方 Quick 模板",
+		label:  "官方最小",
+		desc:   "全文官方英文原文（CN 1.2K / Global 1.4K 字符）：只留官方 content_policy 护栏 + 语言段，Token 开销最低",
 		realms: []string{"cn", "global"},
 	},
 }

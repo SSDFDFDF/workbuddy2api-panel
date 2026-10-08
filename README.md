@@ -329,7 +329,7 @@ uv run --no-project --with openai==3.26.0 --with anthropic==1.12.1 python -c \
 | `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |
 | `upstream.profiles.<realm>` | 内置 | 按账号域覆盖客户端版本 / CLI 版本 / 产品名 / Origin / 语言 / 各用途 UA（`client_version`、`cli_version`、`product_name`、`application_name`、`origin`、`language`、`user_agents.<用途>`） |
 | `prompt.mode` | `none` | 系统提示词组合位置：`none` = 不改写；`replace` = 只留网关提示词（删客户端 system/developer）；`after` = 网关在前 + 客户端块紧随其后；`append` = 客户端块在前 + 网关在后。支持 `prompt.profiles.<realm>.mode` 按域覆盖 |
-| `prompt.preset` | `default` | 内置预设名（见下方「内置预设」表）；`minimal` / `official*` 均按域取中/英文正文；空 = `default` |
+| `prompt.preset` | `default` | 内置预设名（见下方「内置预设」表）；全部预设均为分域文件（`cn` / `global` 各一份官方口径正文）；空 = `default` |
 | `prompt.file` | 空 | 提示词文件路径（优先级低于内联正文、高于预设）；不可读 → 启动报错 |
 | `prompt.text` | 空 | 内联提示词正文，优先生效（无需额外落盘文件） |
 | `prompt.profiles.<realm>` | `{}` | 按账号域（`cn` / `global`）覆盖 `mode`/`preset`/`file`/`text` |
@@ -365,26 +365,30 @@ uv run --no-project --with openai==3.26.0 --with anthropic==1.12.1 python -c \
 
 ### 内置预设（`prompt.preset`）
 
-面板下拉的清单由后端 `prompt.Presets()` 生成（前端不硬编码）；每个预设按账号域（`cn` / `global`）选正文，未分域的文件（`default.md`）两份共用。
-正文与官方模板/抓包的逐标签差异见 `docs/PRESET_DIFF_ANALYSIS.md`（本地参考，`docs/` 不入版本库）。
+面板下拉的清单由后端 `prompt.Presets()` 生成（前端不硬编码）。**七个预设全部是分域文件**，正文取官方实机抓包/模板（官方逐字），
+两域差异只保留官方真实存在的域差异：首行模型名（`快速` / `default-model`）、身份行产品名（`WorkBuddy` / `WorkBuddy AI`）、
+数据目录（`.workbuddy` / `.workbuddy-ai`）、`<regional_conventions>` 有无（模板 `{% if not IsOversea %}`）、`<response_language>`。
+逐标签对照与证据见 `docs/PRESET_DIFF_ANALYSIS.md`（本地参考，`docs/` 不入版本库）。
 
-| 预设 | 分域 | 字符数（CN / Global） | 适用场景 |
+| 预设 | 面板标签 | 字符数（CN / Global） | 适用场景 |
 |---|---|---|---|
-| `default` | 共用 | 401 / 401 | 通用工程助手：结论先行、最小改动、工具契约、安全红线 |
-| `official` | cn / global | 9,355 / 9,040 | 官方英文原文（护栏段逐字）：26 模块形态，仅换域差异；通用 agent |
-| `official-compact` | cn / global | 1,581 / 1,584 | 官方英文原文：完整官方 `content_policy` + 身份 + 工具纪律，省略其余模块 |
-| `official-quick` | cn / global | 2,390 / 2,634 | 官方英文原文（Quick 模板）：无工具纯问答；适合聊天类客户端 |
-| `official-ask` | cn / global | 5,780 / 5,490 | 官方英文原文（Ask 片段）：只读分析，不落盘、不执行命令 |
-| `official-plan` | cn / global | 7,175 / 6,885 | 官方英文原文（Plan 片段）：计划先行、逐步验证 |
-| `minimal` | cn / global | 146 / 383 | 最短可用人格（自撰；CN 中文） |
+| `default` | 官方默认 | 5,789 / 5,510 | 抓包首屏前缀：身份 + 能力介绍 + 完整官方 `content_policy` + `personal_files_safety` + 区域/语言段 |
+| `official` | 官方骨架 | 9,348 / 9,041 | 26 模块形态：护栏段官方逐字，能力段精简且工具无关 |
+| `official-compact` | 官方精简 | 1,616 / 1,630 | 完整官方 `content_policy` + 身份 + 工具纪律，Token 开销低 |
+| `official-quick` | 官方快速 | 2,390 / 2,634 | 无工具纯问答（官方 Quick 模板）；适合聊天类客户端 |
+| `official-ask` | 官方只读 | 5,773 / 5,491 | 只读分析与问答：不落盘、不执行命令 |
+| `official-plan` | 官方计划 | 7,168 / 6,886 | 计划先行、逐步验证；适合复杂工程任务 |
+| `minimal` | 官方最小 | 1,160 / 1,407 | 只要官方 `content_policy` 护栏 + 语言段，Token 最低 |
 
 **CN 域不是中文翻译版**：官方自带没有中文系统提示词正文（CN 抓包 37,839 字符里含中文的只有 10 行，
-`interactionmode/*/fragments/*.md` 全英文，`workbuddy-prompt.tpl` 中文字符仅 65/31,476）。
-所以 `official*` 系列两域共用同一套官方英文正文，只换官方真实存在的域差异：
-产品名（`WorkBuddy` / `WorkBuddy AI`）、数据目录（`.workbuddy` / `.workbuddy-ai`）、
-`<regional_conventions>` 有无（模板 `{% if not IsOversea %}`）、`<response_language>`、
-`<agent_mail>` 有无（`{% if IsPersonalEdition %}`）。中文只出现在官方自己就是中文的两处。
-证据与逐标签对照见 `docs/PRESET_DIFF_ANALYSIS.md`。
+`interactionmode/*/fragments/*.md` 全英文，`workbuddy-prompt.tpl` 中文字符仅 65/31,476）。所以两域共用同一套官方英文正文，
+`.cn` 里的中文只剩官方原文（`中国香港/中国台湾/中国澳门` 地名、CN 版 `<response_language>` 整句、首行模型名 `快速`）。
+
+> ⚠️ 官方 AI 工具名会随官方正文一起出站（`default` 含 `ImageGen` / `VideoGen` / `WebFetch`）。这是“官方逐字优先”的取舍：
+> 上游审核是字面黑名单式，官方原文是最强免封信号；工具幻觉由请求的 `tools` 声明兼底（未声明的工具模型不会调用）。
+>
+> `official-quick` / `official-ask` 声明了「没有工具 / 不能写」，建议只在 `prompt.mode=replace` 下使用；
+> `after` / `append` 会与客户端自己的系统提示词叠加，可能出现能力声明冲突。
 
 > `official-quick` / `official-ask` 声明了「没有工具 / 不能写」，建议只在 `prompt.mode=replace` 下使用；
 > `after` / `append` 会与客户端自己的系统提示词叠加，可能出现能力声明冲突。

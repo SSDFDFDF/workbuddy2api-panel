@@ -197,7 +197,9 @@ func TestResolveDefaultPreset(t *testing.T) {
 		want  string
 	}{
 		{Spec{}, "cn", DefaultText()},
-		{Spec{Preset: "default"}, "global", DefaultText()},
+		// default 现在是分域预设（官方首屏前缀），global 取 .global 文件，不再与 cn 共用。
+		{Spec{Preset: "default"}, "global", Builtin("default", "global")},
+		{Spec{Preset: "default"}, "cn", DefaultText()},
 		{Spec{Preset: "minimal"}, "cn", Builtin("minimal", "cn")},
 		{Spec{Preset: "minimal"}, "global", Builtin("minimal", "global")},
 		{Spec{Preset: "minimal"}, "", Builtin("minimal", "cn")},
@@ -212,7 +214,9 @@ func TestResolveDefaultPreset(t *testing.T) {
 		}
 	}
 	cnMin, glMin := Builtin("minimal", "cn"), Builtin("minimal", "global")
-	if cnMin == glMin || len([]rune(cnMin)) > 400 || len([]rune(glMin)) > 400 {
+	// 两域必须不同（身份名与语言段不同）；上限放宽到 2K 字符：minimal 现为官方逐字 text
+	// （身份 + 完整官方 content_policy + 官方语言段），不再是自撰极简正文。
+	if cnMin == glMin || len([]rune(cnMin)) > 2000 || len([]rune(glMin)) > 2000 {
 		t.Errorf("minimal presets must differ per realm and stay small (cn=%d global=%d runes)",
 			len([]rune(cnMin)), len([]rune(glMin)))
 	}
@@ -317,23 +321,20 @@ func TestPresetCatalogComplete(t *testing.T) {
 	}
 }
 
-// TestPresetStaticAndToolAgnostic 预设正文是静态网关闭环文本：
-//   - 不得残留模板标记（模板原件在两阶段渲染后才成为正文，`{{ }}`/`{% %}` 会变成
-//     模型读不懂的字面噪声）；
-//   - 不得点名官方专有工具/能力（present_files、Skill、TaskCreate、agent mail、云端记忆等）——
-//     第三方客户端不具备这些能力，点名等于诱导工具幻觉与行为偏差。
+// TestPresetStaticNoTemplateMarkers 预设正文必须是静态成品文本：不得残留模板标记
+// （`{{ }}` / `{% %}` / `{# #}`）——模板原件要经 CLI include 组合 + 主进程 nunjucks
+// 两阶段渲染才成为正文，网关拿不到渲染器，带标记出站只会变成模型读不懂的字面噪声。
 //
-// 该约束来自 docs/PRESET_DIFF_ANALYSIS.md：标签名与顺序保留，标签内容必须工具无关
-// （可空或中性）。新增预设若需要引用"工具"，请用"本请求声明的工具"这类通用措辞。
-func TestPresetStaticAndToolAgnostic(t *testing.T) {
+// 策略变更说明（已与仓库拥有者确认）：
+//   - 早期版本还禁止预设点名官方专有工具（present_files / ImageGen / VideoGen 等），
+//     目的是避免第三方客户端产生工具幻觉。
+//   - 现策略为**官方逐字优先**：`default` 等预设直接取实机抓包正文，其中必然包含
+//     ImageGen / VideoGen / WebFetch 等官方工具名（见 docs/PRESET_DIFF_ANALYSIS.md §6）。
+//     理由：上游审核是字面黑名单式，官方原文是最强免封信号；而工具幻觉有请求的
+//     `tools` 声明兼底（未声明的工具模型不会调用），误召代价远低于 11128 拒请求。
+//   - 因此本测试只守“静态化 + 无第三方指纹”（指纹在 TestPresetCatalogComplete 守）。
+func TestPresetStaticNoTemplateMarkers(t *testing.T) {
 	markers := []string{"{{", "{%", "{#"}
-	proprietary := []string{
-		"present_files", "automation_update", "widget_guidelines", "show_widget",
-		"TaskCreate", "TaskGet", "TaskUpdate", "TaskList", "AskUserQuestion",
-		"search_and_install_skills", "conversation_search", "install_binary",
-		"mcp__agent-mail", "DeferExecuteTool", "ToolSearch", "ImageGen", "VideoGen",
-		"suggest_plugin_install", "search_plugins",
-	}
 	for _, in := range Presets() {
 		for _, realm := range []string{"cn", "global"} {
 			text, err := presetContent(in.Name, realm)
@@ -344,11 +345,6 @@ func TestPresetStaticAndToolAgnostic(t *testing.T) {
 			for _, m := range markers {
 				if strings.Contains(text, m) {
 					t.Errorf("preset %s/%s contains template marker %q", in.Name, realm, m)
-				}
-			}
-			for _, p := range proprietary {
-				if strings.Contains(text, p) {
-					t.Errorf("preset %s/%s names official-only capability %q", in.Name, realm, p)
 				}
 			}
 		}

@@ -34,9 +34,9 @@ const (
 // 内置预设名（config prompt.preset / prompt.profiles.<realm>.preset 取值）。
 // 完整清单与说明见 preset.go 的 presetCatalog（Presets() 对面板输出）。
 const (
-	// PresetDefault 通用工程助手（presets/default.md，约 0.4K 字符，分域共用）。
+	// PresetDefault 官方默认：抓包首屏前缀（presets/default.<realm>.md，官方逐字）。
 	PresetDefault = "default"
-	// PresetMinimal 极简（presets/minimal.<realm>.md，CN 约 0.15K / Global 约 0.4K 字符）。
+	// PresetMinimal 官方最小：仅官方 content_policy 护栏 + 语言段（presets/minimal.<realm>.md）。
 	PresetMinimal = "minimal"
 	// PresetOfficial 官方骨架：实机抓包 craft 模式 26 模块的全量形态（presets/official.<realm>.md）。
 	PresetOfficial = "official"
@@ -110,8 +110,8 @@ func Builtin(preset, realm string) string {
 	return s
 }
 
-// DefaultText 返回默认预设的正文（分域共用）——供测试与"未配置时用哪份"
-// 这类断言使用，避免测试硬编码正文长度。
+// DefaultText 返回默认预设的 CN 正文——供测试与“未配置时用哪份”
+// 这类断言使用，避免测试硬编码正文长度。default 已分域，global 侧请用 Builtin(PresetDefault, "global")。
 func DefaultText() string { return Builtin(PresetDefault, "cn") }
 
 // NormalizeRealm 归一化 realm 键：只认 cn / global，其余（含空）归 cn。

@@ -1,3 +1,4 @@
+This conversation is powered by 快速
 You are WorkBuddy, a powerful AI assistant.
 
 <content_policy>

@@ -1,4 +1,4 @@
-This conversation is powered by default-model
+This conversation is powered by 快速
 
 Your main goal is to follow the USER's instructions at each message, denoted by the <user_query> tag.
 

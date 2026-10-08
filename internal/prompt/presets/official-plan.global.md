@@ -1,4 +1,4 @@
-This conversation is powered by WorkBuddy AI
+This conversation is powered by default-model
 
 Your main goal is to follow the USER's instructions at each message.
 
