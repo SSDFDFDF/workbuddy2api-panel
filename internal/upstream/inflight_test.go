@@ -162,3 +162,45 @@ func TestFetchModelsCoalescesConcurrentProbes(t *testing.T) {
 		}
 	}
 }
+
+// TestInflightPanicPropagatesAsError 守护：leader 的 fn panic 时，跟随者必须拿到
+// 错误，而不是 (nil, nil) —— 后者与「成功但结果为空」无法区分（模型目录调用点会
+// 把空结果当探测失败写负缓存，语义上仍是静默错误值）。
+func TestInflightPanicPropagatesAsError(t *testing.T) {
+	var g inflight
+	entered := make(chan struct{})
+	release := make(chan struct{})
+
+	const n = 2
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	vals := make([]any, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			vals[i], errs[i] = g.do("boom", func() (any, error) {
+				if i == 0 {
+					close(entered)
+					<-release
+					panic("probe exploded")
+				}
+				return nil, nil
+			})
+		}(i)
+		<-entered
+	}
+	time.Sleep(50 * time.Millisecond) // 让第 2 个调用挂到单飞等待上
+	close(release)
+	wg.Wait()
+
+	for i := 0; i < n; i++ {
+		if errs[i] == nil {
+			t.Fatalf("第 %d 个调用未收到错误（val=%v）：panic 被静默成空结果", i, vals[i])
+		}
+	}
+	// 单飞执行完必须清键，后续同 key 调用能重新成为 leader。
+	if _, err := g.do("boom", func() (any, error) { return "ok", nil }); err != nil {
+		t.Fatalf("panic 后同 key 调用不应继承旧错误: %v", err)
+	}
+}

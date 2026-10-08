@@ -124,17 +124,17 @@ func (l *ingressLimiter) Acquire(ctx context.Context, declared int64) (func(), b
 	timeout := timer.C
 
 	// 首次尝试与后续等待分开计数：只有"确实需要排队"才计入 waited。
-	if l.tryAcquire(weight) {
-		return l.releaseFunc(weight), true
+	// 注意用 tryAcquireOrWait 而非 tryAcquire + 单独取通道：后者是两次加锁，
+	// 释放若恰好落在两次加锁之间，等待者会拿到释放后新建的通道而在空间已空闲时
+	// 干等到超时（实测 1/20000 轮可复现，默认等待 5s 时就是白等 5 秒再收 503）。
+	rel, ch, ok := l.tryAcquireOrWait(weight)
+	if ok {
+		return rel, true
 	}
 	l.waited.Add(1)
 	for {
-		// 取当前广播通道后在锁外等待：释放会关闭该通道并换新，全部等待者被唤醒
+		// 在锁外等待已取到的广播通道：释放会关闭它并换新，全部等待者被唤醒
 		// 重新竞争（同步释放多个名额时不会漏唤醒）。
-		l.mu.Lock()
-		ch := l.notify
-		l.mu.Unlock()
-
 		select {
 		case <-ch:
 		case <-ctx.Done():
@@ -144,10 +144,28 @@ func (l *ingressLimiter) Acquire(ctx context.Context, declared int64) (func(), b
 			l.rejected.Add(1)
 			return nil, false
 		}
-		if l.tryAcquire(weight) {
-			return l.releaseFunc(weight), true
+		if rel, ch, ok = l.tryAcquireOrWait(weight); ok {
+			return rel, true
 		}
 	}
+}
+
+// tryAcquireOrWait 原子地「尝试占位，失败则取走当前广播通道」。
+//
+// 占位判定与取通道**必须同一次加锁**：拆成两次加锁会留下漏唤醒窗口——释放恰好
+// 发生在「占位失败」之后、「取通道」之前时，等待者拿到的是释放后新建的通道，
+// 空间已经空闲却要一直等到超时（表现为空闲期里无谓的 503；已用压力用例复现）。
+func (l *ingressLimiter) tryAcquireOrWait(weight int64) (func(), <-chan struct{}, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.fitsLocked(weight) {
+		if l.notify == nil {
+			l.notify = make(chan struct{})
+		}
+		return nil, l.notify, false
+	}
+	l.acquireLocked(weight)
+	return l.releaseFunc(weight), nil, true
 }
 
 // tryAcquire 在锁内判定并占位。
@@ -227,15 +245,15 @@ func (l *ingressLimiter) rejectLog() {
 
 // ingressStats 一次读取的准入观测快照。
 type ingressStats struct {
-	MaxCount    int    `json:"max_requests"`
-	MaxBytes    int64  `json:"max_bytes"`
-	InFlight    int    `json:"in_flight"`
-	Bytes       int64  `json:"bytes"`
-	PeakCount   int64  `json:"peak_requests"`
-	PeakBytes   int64  `json:"peak_bytes"`
-	Waited      uint64 `json:"waited"`
-	Rejected    uint64 `json:"rejected"`
-	WaitSeconds int64  `json:"wait_ms"`
+	MaxCount   int    `json:"max_requests"`
+	MaxBytes   int64  `json:"max_bytes"`
+	InFlight   int    `json:"in_flight"`
+	Bytes      int64  `json:"bytes"`
+	PeakCount  int64  `json:"peak_requests"`
+	PeakBytes  int64  `json:"peak_bytes"`
+	Waited     uint64 `json:"waited"`
+	Rejected   uint64 `json:"rejected"`
+	WaitMillis int64  `json:"wait_ms"`
 }
 
 func (l *ingressLimiter) Stats() ingressStats {
@@ -245,15 +263,15 @@ func (l *ingressLimiter) Stats() ingressStats {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return ingressStats{
-		MaxCount:    l.maxCount,
-		MaxBytes:    l.maxBytes,
-		InFlight:    l.count,
-		Bytes:       l.bytes,
-		PeakCount:   l.peakCount.Load(),
-		PeakBytes:   l.peakBytes.Load(),
-		Waited:      l.waited.Load(),
-		Rejected:    l.rejected.Load(),
-		WaitSeconds: l.wait.Milliseconds(),
+		MaxCount:   l.maxCount,
+		MaxBytes:   l.maxBytes,
+		InFlight:   l.count,
+		Bytes:      l.bytes,
+		PeakCount:  l.peakCount.Load(),
+		PeakBytes:  l.peakBytes.Load(),
+		Waited:     l.waited.Load(),
+		Rejected:   l.rejected.Load(),
+		WaitMillis: l.wait.Milliseconds(),
 	}
 }
 
@@ -268,6 +286,9 @@ func (h *Handler) StartIngressLog(interval time.Duration) func() {
 func (l *ingressLimiter) startIngressLog(interval time.Duration) func() {
 	if !l.enabled() {
 		return func() {}
+	}
+	if interval <= 0 {
+		interval = 30 * time.Second // 防御 time.NewTicker 对非正周期 panic
 	}
 	stop := make(chan struct{})
 	go func() {

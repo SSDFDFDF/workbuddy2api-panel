@@ -1,6 +1,9 @@
 package upstream
 
-import "sync"
+import (
+	"fmt"
+	"sync"
+)
 
 // inflight 极简单飞（singleflight）：把同一 key 的并发调用合并为一次执行，
 // 其余调用等待并共享同一结果。
@@ -48,6 +51,16 @@ func (g *inflight) do(key string, fn func() (any, error)) (any, error) {
 		g.mu.Unlock()
 		close(c.done)
 	}()
-	c.val, c.err = fn()
+	// fn panic 必须转成错误：否则 deferred 里只关闭 done，跟随者会拿到 (nil, nil)——
+	// 与「成功但结果为空」无法区分（模型目录两处调用点都把空当探测失败 → 负缓存，
+	// 但语义上仍是静默错误值）。发起者同样收到 error，不再让 panic 逃出本包。
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				c.val, c.err = nil, fmt.Errorf("inflight %q: panic: %v", key, r)
+			}
+		}()
+		c.val, c.err = fn()
+	}()
 	return c.val, c.err
 }
