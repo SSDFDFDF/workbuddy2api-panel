@@ -1,6 +1,8 @@
 package protocol
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"strconv"
 )
@@ -14,18 +16,23 @@ type toolIdentity struct {
 }
 
 type toolIndex struct {
+	// Only current declarations participate in output validation and choice.
 	byChat     map[string]toolIdentity
 	byIdentity map[toolIdentity]string
 	byLocal    map[string][]string
+	// All observed identities reserve wire names, including retired history.
+	// Recording history here must never enable it as a callable tool.
+	wireOwners map[string]toolIdentity
 }
 
 func newToolIndex() *toolIndex {
-	return &toolIndex{byChat: map[string]toolIdentity{}, byIdentity: map[toolIdentity]string{}, byLocal: map[string][]string{}}
+	return &toolIndex{byChat: map[string]toolIdentity{}, byIdentity: map[toolIdentity]string{}, byLocal: map[string][]string{}, wireOwners: map[string]toolIdentity{}}
 }
 
-// Length-delimited namespace names are injective, readable, stable across
-// requests and independent of declaration order. Never truncate or guess a
-// reverse split. Flat-name collisions fail instead of first-wins deduplication.
+// Short names retain the original length-delimited encoding. Long qualified
+// names use a domain-separated full SHA-256 digest, base64url encoded to fit the
+// Chat limit. Reverse translation uses the identity index, never decodes a hash.
+// Both forms are stable across requests and independent of declaration order.
 func namespaceChatName(namespace, name, path string) (string, error) {
 	for _, s := range []string{namespace, name} {
 		if len(s) == 0 || len(s) > 64 {
@@ -39,8 +46,27 @@ func namespaceChatName(namespace, name, path string) (string, error) {
 	}
 	alias := "ns_" + strconv.Itoa(len(namespace)) + "_" + namespace + "_" + name
 	if len(alias) > 64 {
-		return "", invalid(path, "qualified namespace tool name exceeds Chat's 64-byte limit")
+		sum := sha256.Sum256([]byte("wb2a:namespace:v1:" + alias))
+		alias = "nsh_" + base64.RawURLEncoding.EncodeToString(sum[:])
 	}
+	return alias, nil
+}
+
+// claim checks collisions even between current and historical identities. Same
+// identity may recur in history; distinct identities may never share a wire name.
+func (idx *toolIndex) claim(id toolIdentity, path string) (string, error) {
+	alias := id.name
+	if id.namespace != "" {
+		var err error
+		alias, err = namespaceChatName(id.namespace, id.name, path)
+		if err != nil {
+			return "", err
+		}
+	}
+	if owner, exists := idx.wireOwners[alias]; exists && owner != id {
+		return "", invalid(path, "colliding Chat tool identities")
+	}
+	idx.wireOwners[alias] = id
 	return alias, nil
 }
 
@@ -60,15 +86,12 @@ func (idx *toolIndex) add(m map[string]any, namespace, path string) (map[string]
 	}
 	fn := t["function"].(map[string]any)
 	id := toolIdentity{name: fn["name"].(string), namespace: namespace}
-	alias := id.name
-	if namespace != "" {
-		alias, err = namespaceChatName(namespace, id.name, path+".name")
-		if err != nil {
-			return nil, err
-		}
+	if _, exists := idx.byIdentity[id]; exists {
+		return nil, invalid(path+".name", "duplicate tool declaration")
 	}
-	if _, exists := idx.byChat[alias]; exists {
-		return nil, invalid(path+".name", "duplicate or colliding Chat tool name")
+	alias, err := idx.claim(id, path+".name")
+	if err != nil {
+		return nil, err
 	}
 	idx.byChat[alias], idx.byIdentity[id] = id, alias
 	idx.byLocal[id.name] = append(idx.byLocal[id.name], alias)
@@ -147,24 +170,18 @@ func (idx *toolIndex) choice(v any) (string, error) {
 }
 
 func (idx *toolIndex) history(name string, namespace any, path string) (string, error) {
+	id := toolIdentity{name: name}
 	if namespace != nil {
 		ns, err := nonempty(namespace, path+".namespace")
 		if err != nil {
 			return "", err
 		}
-		alias, ok := idx.byIdentity[toolIdentity{name: name, namespace: ns}]
-		if !ok {
-			return "", invalid(path+".namespace", "namespaced history requires its function declaration in this request")
-		}
-		return alias, nil
+		id.namespace = ns
 	}
-	if id, ok := idx.byChat[name]; ok && id.namespace != "" {
-		return "", invalid(path+".name", "Chat namespace alias is not a client tool identity; supply namespace and local name")
-	}
-	if _, flat := idx.byIdentity[toolIdentity{name: name}]; !flat && len(idx.byLocal[name]) > 0 {
-		return "", invalid(path+".namespace", "explicit namespace required for namespaced tool history")
-	}
-	return name, nil // Existing flat historical tools need not be redeclared.
+	// Explicit namespace identifies namespaced history. Its absence identifies a
+	// flat tool, even if this request declares a namespaced tool of the same local
+	// name. No declaration is synthesized and no namespace is guessed.
+	return idx.claim(id, path+".name")
 }
 
 func (req *Request) responseToolIdentity(chatName string) toolIdentity {

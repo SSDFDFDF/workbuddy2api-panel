@@ -222,7 +222,7 @@ func responsesRequest(src map[string]any, tools *toolIndex) (map[string]any, err
 				if err != nil {
 					return nil, err
 				}
-				output, err := textParts(m["output"], p+".output", "input_text")
+				output, err := toolResultText(m["output"], p+".output", "input_text")
 				if err != nil {
 					return nil, err
 				}

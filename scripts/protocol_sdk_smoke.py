@@ -40,7 +40,7 @@ atools = [{"name": "lookup", "input_schema": schema}]
 initial = [{"role": "user", "content": "hi"}]
 
 for stream in (False, True):
-    for model in ("text", "tools", "tools-repeated", "tools-cumulative", "length"):
+    for model in ("text", "tools", "tools-empty", "tools-repeated", "tools-cumulative", "length"):
         is_tools = model.startswith("tools")
         params = dict(model="cn:" + model, store=False, input=initial, tools=otools)
         if stream:
@@ -63,7 +63,7 @@ for stream in (False, True):
             assert [v.name for v in calls] == ["lookup", "lookup"]
             assert json.loads(calls[0].arguments)["n"] == 9007199254740993
             history = initial + [v.model_dump(exclude_none=True) for v in calls]
-            history += [{"type": "function_call_output", "call_id": v.call_id, "output": "ok"} for v in calls]
+            history += [{"type": "function_call_output", "call_id": v.call_id, "output": [] if model == "tools-empty" else "ok"} for v in calls]
             follow = dict(params, input=history)
             if stream:
                 with o.responses.stream(**follow) as s:
@@ -91,7 +91,7 @@ for stream in (False, True):
             assert [v.id for v in calls] == ["a", "b"]
             assert calls[0].input["n"] == 9007199254740993
             history = initial + [{"role": "assistant", "content": [v.model_dump(exclude_none=True) for v in calls]}]
-            history += [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": v.id, "content": "ok"} for v in calls]}]
+            history += [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": v.id, "content": [] if model == "tools-empty" else "ok"} for v in calls]}]
             follow = dict(params, messages=history)
             if stream:
                 with a.messages.stream(**follow) as s:
@@ -143,20 +143,23 @@ ntools = [
     ]}
     for ns in ("crm", "fs")
 ]
-for stream in (False, True):
-    params = dict(model="cn:namespace", store=False, input=initial, tools=ntools)
+for stream, namespace_ids in ((stream, ids) for stream in (False, True)
+                              for ids in (("crm", "fs"), ("c" * 64, "d" * 64))):
+    tools = [dict(tool, name=ns) for tool, ns in zip(ntools, namespace_ids)]
+    model = "namespace-long" if len(namespace_ids[0]) == 64 else "namespace"
+    params = dict(model="cn:" + model, store=False, input=initial, tools=tools)
     if stream:
         with o.responses.stream(**params) as s:
             events = list(s)
             result = s.get_final_response()
         announced = [e.item for e in events if e.type == "response.output_item.added"]
-        assert [c.namespace for c in announced] == ["crm", "fs"]
+        assert [c.namespace for c in announced] == list(namespace_ids)
     else:
         result = o.responses.create(**params)
     assert result.tools[0].type == "namespace"
     calls = result.output
     assert [c.name for c in calls] == ["lookup", "lookup"]
-    assert [c.namespace for c in calls] == ["crm", "fs"]
+    assert [c.namespace for c in calls] == list(namespace_ids)
     assert [c.call_id for c in calls] == ["a", "b"]
     check_usage(result)
     history = initial + [c.model_dump(exclude_none=True) for c in calls]
@@ -173,6 +176,23 @@ for stream in (False, True):
     else:
         result = o.responses.create(**dict(params, input=history))
     assert result.output_text == "工具完成"
+    # Retire both tools in a fresh request. Explicit historical namespaces still
+    # map deterministically, while no declaration or permission is synthesized.
+    retired_history = initial + [c.model_dump(exclude_none=True) for c in calls]
+    retired_history += [
+        {"type": "function_call_output", "call_id": c.call_id, "output": []}
+        for c in calls
+    ]
+    retired = dict(model="cn:" + model + "-retired", store=False,
+                   input=retired_history, tool_choice="none")
+    if stream:
+        with o.responses.stream(**retired) as s:
+            list(s)
+            result = s.get_final_response()
+    else:
+        result = o.responses.create(**retired)
+    assert result.output_text == "工具完成"
+    check_usage(result)
 
 with o.responses.stream(model="cn:namespace-cutoff", store=False, input=initial, tools=ntools) as s:
     events = list(s)
@@ -257,4 +277,4 @@ for client, params in (
 
 o.close()
 a.close()
-print(f"SDK smoke passed: openai {openai.__version__}, anthropic {anthropic.__version__}; text/history/tools/name-dialects/namespaces/text-results/tool-choice/two-turn/length/partial-tools/truncation/usage")
+print(f"SDK smoke passed: openai {openai.__version__}, anthropic {anthropic.__version__}; text/history/tools/name-dialects/namespaces/compact-aliases/retired-history/empty-results/text-results/tool-choice/two-turn/length/partial-tools/truncation/usage")

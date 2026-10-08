@@ -60,7 +60,7 @@ func TestNamespaceRejectedSemantics(t *testing.T) {
 		strings.Replace(nsTools, `"description":""`, `"description":null`, 1),
 		strings.Replace(nsTools, `"name":"crm"`, `"name":"crm.x"`, 1),
 		strings.Replace(nsTools, `"name":"crm"`, `"name":"中文"`, 1),
-		strings.Replace(nsTools, `"name":"lookup"`, `"name":"`+strings.Repeat("x", 60)+`"`, 1),
+		strings.Replace(nsTools, `"name":"lookup"`, `"name":"`+strings.Repeat("x", 65)+`"`, 1),
 		strings.Replace(nsTools, `"strict":false`, `"strict":true`, 1),
 		strings.Replace(nsTools, `"strict":false`, `"defer_loading":true,"strict":false`, 1),
 		strings.Replace(nsTools, `"strict":false`, `"async":false,"strict":false`, 1),
@@ -76,8 +76,7 @@ func TestNamespaceRejectedSemantics(t *testing.T) {
 		}
 	}
 	for _, call := range []string{
-		`"name":"lookup"`,
-		`"name":"lookup","namespace":"unknown"`,
+		`"name":"lookup","namespace":"crm.x"`,
 		`"name":"lookup","namespace":""`,
 		`"name":"lookup","namespace":17`,
 		`"name":"ns_3_crm_lookup"`,
@@ -87,7 +86,7 @@ func TestNamespaceRejectedSemantics(t *testing.T) {
 			t.Fatal("guessed historical namespace", body)
 		}
 	}
-	for _, output := range []string{`[]`, `null`, `[{"type":"input_image","image_url":"https://example.test/x"}]`, `[{"type":"output_text","text":"x"}]`, `[{"type":"input_text","text":"x","prompt_cache_breakpoint":{}}]`, `[{"type":"input_text","text":1}]`} {
+	for _, output := range []string{`null`, `[{"type":"input_image","image_url":"https://example.test/x"}]`, `[{"type":"output_text","text":"x"}]`, `[{"type":"input_text","text":"x","prompt_cache_breakpoint":{}}]`, `[{"type":"input_text","text":1}]`} {
 		body := `{"model":"x","store":false,"input":[{"type":"function_call","call_id":"a","name":"old","arguments":"{}"},{"type":"function_call_output","call_id":"a","output":` + output + `}]}`
 		if _, err := Decode(Responses, []byte(body)); err == nil {
 			t.Fatal("lost tool result data", body)
@@ -122,8 +121,8 @@ func TestNamespaceAmbiguityAndStableAliases(t *testing.T) {
 	if err != nil || len(alias) != 64 {
 		t.Fatal("64-byte namespace alias rejected", alias, err)
 	}
-	if _, err := namespaceChatName("a", strings.Repeat("b", 58), "test"); err == nil {
-		t.Fatal("overlong namespace alias truncated")
+	if long, err := namespaceChatName("a", strings.Repeat("b", 58), "test"); err != nil || len(long) > 64 || !strings.HasPrefix(long, "nsh_") {
+		t.Fatal("overlong namespace alias not compacted", long, err)
 	}
 	// Delimiter-containing identities that naive namespace__name flattening
 	// conflates must have different aliases.
@@ -191,10 +190,12 @@ func TestNamespaceOutputAndStatelessReplay(t *testing.T) {
 	}
 }
 
-func TestNamespacedHistoryRequiresRedeclaration(t *testing.T) {
+func TestNamespacedHistoryWithoutRedeclaration(t *testing.T) {
 	body := `{"model":"x","store":false,"input":[{"type":"function_call","call_id":"a","name":"lookup","namespace":"crm","arguments":"{}"},{"type":"function_call_output","call_id":"a","output":"ok"}]}`
-	if _, err := Decode(Responses, []byte(body)); err == nil {
-		t.Fatal("namespace inferred without declaration")
+	r := mustDecode(t, Responses, body)
+	call := r.Chat.Object["messages"].([]any)[0].(map[string]any)["tool_calls"].([]any)[0].(map[string]any)
+	if call["function"].(map[string]any)["name"] != "ns_3_crm_lookup" || len(declaredToolNames(r)) != 0 || len(r.tools.byChat) != 0 {
+		t.Fatal("historical identity lost or granted current permission", r.Chat.Object)
 	}
 	// Native Chat extensions are neither remapped nor subjected to the
 	// Responses namespace allowlist.
@@ -230,14 +231,22 @@ func TestNamespaceForcedSelection(t *testing.T) {
 func FuzzNamespaceIdentity(f *testing.F) {
 	f.Add("crm", "lookup")
 	f.Add("a_b", "c")
+	f.Add(strings.Repeat("a", 64), strings.Repeat("b", 64))
 	f.Fuzz(func(t *testing.T, ns, name string) {
 		alias, err := namespaceChatName(ns, name, "test")
 		if err != nil {
 			return
 		}
-		// Check the injective length-delimited encoding, not an underscore split.
-		var n int
-		if _, err := fmt.Sscanf(alias, "ns_%d_", &n); err != nil || n != len(ns) || !strings.HasSuffix(alias, ns+"_"+name) || len(alias) > 64 {
+		if len(alias) > 64 {
+			t.Fatal(alias)
+		}
+		if strings.HasPrefix(alias, "ns_") {
+			// Short form is length-delimited, not an underscore split.
+			var n int
+			if _, err := fmt.Sscanf(alias, "ns_%d_", &n); err != nil || n != len(ns) || !strings.HasSuffix(alias, ns+"_"+name) {
+				t.Fatal(alias)
+			}
+		} else if !strings.HasPrefix(alias, "nsh_") || len(alias) != 47 {
 			t.Fatal(alias)
 		}
 		tool, _ := jsondoc.Object([]byte(nsFunction))
@@ -246,6 +255,11 @@ func FuzzNamespaceIdentity(f *testing.F) {
 		r, err := Decode(Responses, body)
 		if err != nil || r.tools.byChat[alias] != (toolIdentity{name: name, namespace: ns}) {
 			t.Fatal(alias, err)
+		}
+		historyOnly := newToolIndex()
+		got, err := historyOnly.history(name, ns, "history")
+		if err != nil || got != alias || len(historyOnly.byChat) != 0 {
+			t.Fatal("unstable or authorized history", got, err)
 		}
 	})
 }

@@ -100,10 +100,15 @@ Anthropic 不能表达半截 input 对象，继续拒绝截断工具。原生 Ch
 不改变工具声明、选择、历史参数、大整数和工具结果；replace 仍明确删除全部 system/developer。
 独立验证指纹开关开启后会改写历史参数及结果，不能把该行为误称为“提示词替换无损”。
 
-后续工具兼容：Responses 支持空分组说明的 namespace 函数工具子集，名称以长度前缀可逆编码、
-64 字节封顶，恢复输出 namespace/name；重复、平面别名冲突和局部选择歧义拒绝，历史显式携带
-namespace 并重新声明工具，不使用会话缓存。非空分组说明/custom/deferred 等不能等价表达的
-语义仍拒绝，不注入提示词。function_call_output 支持非空 input_text 数组，保留块顺序。
+后续工具兼容：Responses 支持空分组说明的 namespace 函数工具子集。短名称沿用长度前缀编码；
+长组合名使用带版本域的 SHA-256 / base64url 稳定别名（47 字节），通过请求级索引恢复输出
+namespace/name，保留子项描述、schema 与 call_id。重复、别名冲突和局部选择歧义仍拒绝。
+历史显式携带 namespace 即可重建身份，不再要求重新声明；历史身份碰撞索引与本轮工具声明
+分离，不使用会话缓存、不补造 schema、不给历史工具增加调用权限。缺省/null namespace 代表
+平面历史，不因本轮 namespace 局部同名而改写或拒绝。声明/历史或历史之间实际别名碰撞仍拒绝。
+非空分组说明/custom/deferred 等不能等价表达的语义仍拒绝，不注入提示词。
+function_call_output 支持 input_text 数组（包括 []），保留块顺序；Anthropic tool_result 也支持
+content:[]。空数组保持原形，不作为 null、缺失结果或虚构文本；普通消息内容校验不随之放宽。
 新协议在最终交付工具前校验 none/required/指定函数/禁止并行；违规上游结果不交付工具，
 不中途改请求也不重放生成。明确 length/content_filter 允许缺失尚未产生的必需调用，
 但不能绕过禁止调用或选择函数限制；原生 Chat 不加这些跨协议检查。
@@ -115,7 +120,7 @@ namespace 并重新声明工具，不使用会话缓存。非空分组说明/cus
 | cc-switch：空工具 identity、晚到名称、并行分片，DeepSeek 缓存别名 | 借鉴无损数据形态处理与回归场景；不按模型名启用，原生 Chat 不变 |
 | llm-rosetta：MiniMax `reasoning_split` / `<think>` 拆解，DeepSeek / Moonshot 删除参数及 system 前移 | 不采用：WorkBuddy 未验证，自动删参数或重排消息会改变请求意图 |
 | cc-switch：Moonshot `$ref` 兄弟字段改为 `allOf` | 不采用：原补丁限定直连 Moonshot 的 Responses→Chat，不能套用到 WorkBuddy |
-| CLIProxyAPI / cc-switch：namespace 展平与身份恢复 | 借鉴请求级双向身份索引；采用长度前缀编码并拒绝冲突，不采用 first-wins 去重、截短名称、猜测 namespace 或丢弃分组说明 |
+| CLIProxyAPI / cc-switch：namespace 展平与身份恢复 | 借鉴请求级双向身份索引；采用长度前缀 / 稳定摘要别名并检查声明与历史碰撞，历史身份不增加本轮权限；不采用 first-wins 去重、截短名称、猜测 namespace 或丢弃分组说明 |
 | CLIProxyAPI / cc-switch：块状态、工具项 incomplete | 借鉴状态与终止分类；不补工具名、不修复 JSON、不在 EOF 上猜测 length；截断工具只在 Responses 终帧提供诊断信息 |
 | CLIProxyAPI / cc-switch：budget→effort、档位钳位；Kimi / DeepSeek 工具历史 reasoning 补全 | 不采用：不自动升降档、不补造推理；新协议暂不支持 thinking，原 Chat 保留已有字段 |
 

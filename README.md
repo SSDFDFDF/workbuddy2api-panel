@@ -236,8 +236,8 @@ Anthropic SDK 的 `base_url` 为 `http://localhost:7863`，使用 `client.messag
 **支持范围与工具回传**
 
 - 支持文本、普通 function/client tools、流式与非流式、基础采样和工具选择；工具 schema 原样保留，不自动改写 `$ref`。
-- Responses 支持 `instructions`、message / function_call / function_call_output；assistant 文本历史可使用 `input_text` 或 `output_text`（非空 annotations 等信息仍拒绝）。上一轮 `response.output` 加入完整历史，结果用 `{"type":"function_call_output","call_id":"...","output":"结果"}` 回传；`output` 也支持非空 `input_text` 数组，保留分块、空文本和先后顺序，不拼接或改写。关联键为 **call_id，不是 item id**。`metadata` 只在本次响应回显，不作为服务端会话。
-- Anthropic 支持顶层 system、text / tool_use / tool_result；回传上一轮 assistant content，再以 user 的 tool_result blocks 提供结果。`tool_use.input` 必须为对象。assistant 文本须在工具前，user 的工具结果须在普通文本前；不重排历史、不补缺失或重复的工具结果。
+- Responses 支持 `instructions`、message / function_call / function_call_output；assistant 文本历史可使用 `input_text` 或 `output_text`（非空 annotations 等信息仍拒绝）。上一轮 `response.output` 加入完整历史，结果用 `{"type":"function_call_output","call_id":"...","output":"结果"}` 回传；`output` 也支持 `input_text` 数组，保留分块、空文本和先后顺序，不拼接或改写；显式 `output:[]` 表示空结果，保持为 Chat `content:[]`，不等同于缺失 output 或 null（后二者仍拒绝）。关联键为 **call_id，不是 item id**。`metadata` 只在本次响应回显，不作为服务端会话。
+- Anthropic 支持顶层 system、text / tool_use / tool_result；回传上一轮 assistant content，再以 user 的 tool_result blocks 提供结果。`tool_use.input` 必须为对象；`tool_result.content:[]` 保留为空数组，省略 content 仍按该协议的空结果处理，显式 null 拒绝。assistant 文本须在工具前，user 的工具结果须在普通文本前；不重排历史、不补缺失或重复的工具结果。
 - 不支持服务端存储 / `previous_response_id` / `conversation` / 后台生成、图片 / 音视频 / 文件、原生 thinking、严格 Schema、托管工具、beta / cache_control、`count_tokens`。非空 `stop_sequences`、`tool_result.is_error:true` 等无法等价表达的输入明确拒绝，不静默降级。原生 Chat 的扩展字段保留策略不变。
 
 **Responses namespace 函数工具子集**
@@ -251,9 +251,10 @@ Anthropic SDK 的 `base_url` 为 `http://localhost:7863`，使用 `client.messag
 ```
 
 - 网关将 `(namespace,name)` 编码成稳定的 Chat 函数名（例如 `ns_3_crm_lookup`），仅改变工具身份；返回的调用恢复 `namespace:"crm", name:"lookup"`，`call_id` 不变。流式 added/done、最终响应和 incomplete 诊断保持同一身份。
-- namespace/子函数名限 ASCII 字母、数字、`_`、`-`；编码后超过 64 字节、重复声明、与平面工具别名冲突均返回 400，不截短、去重或猜测命名空间。
+- namespace/子函数名分别为 1–64 个 ASCII 字母、数字、`_`、`-`。短组合名沿用原编码；组合后超过 64 字节时改用 `nsh_` + 完整 SHA-256 的 base64url 编码（47 字节），与声明顺序无关。通过请求内身份索引恢复输出，不截短原名称、不从哈希反猜身份；同一请求的声明及历史之间发现任何别名碰撞仍返回 400。重复声明仍拒绝。
 - `tool_choice:{"type":"function","name":"lookup"}` 仅在局部名对应**唯一声明**时接受；跨 namespace 或与平面函数同名时，使用 `auto` / `required` 或缩小工具声明集合。`tool_choice.namespace` 不是本子集支持的字段，不能传内部别名规避歧义。
-- 完整历史须保留返回的 namespace，并在每次请求重新声明对应工具；不依赖跨请求缓存。无 namespace 的旧平面调用通常不要求重新声明，但若其名称与本次 namespace 局部名或内部别名冲突，会明确拒绝而不是猜测归属；真正的平面同名历史可通过同时声明该平面工具消除身份歧义（强制选择时的局部名歧义仍须另外处理）。
+- 完整历史须保留返回的 namespace，但**不再要求重新声明历史工具**；根据显式 `(namespace,name)` 稳定重建别名，不依赖跨请求缓存，也不补造 schema。历史身份与本轮可调用声明分开：历史不会增加可调用工具或影响 `tool_choice` 的局部名选择，上游调用已移除的工具仍失败。
+- 历史省略 namespace（或为 null）时按平面工具处理，即使本次声明了局部同名的 namespace 工具也不猜测归属；平面历史不必额外声明。内部别名不是客户端身份，不应代替返回的 namespace/name；若平面工具与声明或其他历史的 namespace 编码发生碰撞则明确拒绝。
 - 非空 namespace description、嵌套 namespace、custom/托管工具、defer_loading、async、allowed_callers、output_schema 等继续拒绝；不把分组说明偷偷塞入提示词，也不宣称完整 Codex 工具协议兼容。
 
 **流式与用量边界**
@@ -267,7 +268,7 @@ Anthropic SDK 的 `base_url` 为 `http://localhost:7863`，使用 `client.messag
 - 内部按原始上游 usage 记账。缓存别名不相加，cache miss 不作 cache write；Anthropic 输入扣除已观测缓存读写，SSE 初始 0 为临时计数，最终 `message_delta.usage` 覆盖。旧客户端是否支持最终输入计数更新需单独验证。
 - Responses 缺失 usage 时返回 null；Anthropic 缺必要计数则失败，不估算 token。Responses 的 `usage.input_tokens_details.cache_write_tokens` 是保留已观测缓存写入的**网关扩展**，不是官方标准字段。
 
-已通过本地假上游及官方 Python SDK（OpenAI `3.26.0` / Anthropic `1.12.1`）的文本、工具、namespace / 文本数组结果、工具选择约束、两轮回传、流式、用量和截断测试；**尚未完成真实 WorkBuddy / Codex / Claude Code 端到端验收**。
+已通过本地假上游及官方 Python SDK（OpenAI `3.26.0` / Anthropic `1.12.1`）的文本、工具、namespace / 长别名 / 移除声明后的历史回传 / 空数组及文本数组结果、工具选择约束、两轮回传、流式、用量和截断测试；**尚未完成真实 WorkBuddy / Codex / Claude Code 端到端验收**。
 可选 SDK 测试只访问测试创建的 loopback 网关，不消耗账号额度；普通 `go test` 默认跳过，不安装 Python 依赖：
 
 ```bash

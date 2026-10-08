@@ -195,7 +195,7 @@ func anthropicRequest(src map[string]any) (map[string]any, error) {
 				}
 				content := any("")
 				if v, exists := b["content"]; exists {
-					content, err = textParts(v, bp+".content", "text")
+					content, err = toolResultText(v, bp+".content", "text")
 					if err != nil {
 						return nil, err
 					}

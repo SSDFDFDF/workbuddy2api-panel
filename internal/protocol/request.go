@@ -109,6 +109,15 @@ func sampling(src, dst map[string]any, maxTemperature float64) error {
 	return nil
 }
 
+// toolResultText allows an explicitly empty result array without weakening the
+// message-content contract. Keep [] distinct from a missing/null result and "".
+func toolResultText(v any, path, blockType string) (any, error) {
+	if a, ok := v.([]any); ok && len(a) == 0 {
+		return []any{}, nil
+	}
+	return textParts(v, path, blockType)
+}
+
 func textParts(v any, path string, allowedTypes ...string) (any, error) {
 	if s, ok := v.(string); ok {
 		return s, nil

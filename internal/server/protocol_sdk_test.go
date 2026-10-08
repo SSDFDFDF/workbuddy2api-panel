@@ -18,15 +18,29 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
+func sdkNamespaceNames(model string) []string {
+	if strings.Contains(model, "long") {
+		return []string{"nsh_a5a9H0ShJNLfYwTpuH8hgP5pqmDgXwoD0LZ95bRz2Uw", "nsh_xEZT841iGZKhpanpwRrIyzy4VhHHFvd7GKvmYwJaDgg"}
+	}
+	return []string{"ns_3_crm_lookup", "ns_2_fs_lookup"}
+}
+
 func sdkNamespaceRequest(obj map[string]any, results int) error {
+	model := obj["model"].(string)
+	retired := strings.HasSuffix(model, "retired")
+	names := sdkNamespaceNames(model)
 	tools, _ := obj["tools"].([]any)
-	if len(tools) != 2 {
+	if retired {
+		if _, exists := obj["tools"]; exists || results != 2 || obj["tool_choice"] != "none" {
+			return fmt.Errorf("retired namespace unexpectedly authorized")
+		}
+	} else if len(tools) != 2 {
 		return fmt.Errorf("namespace tool declarations lost")
 	}
-	for i, name := range []string{"ns_3_crm_lookup", "ns_2_fs_lookup"} {
-		tool := tools[i].(map[string]any)
+	for i, v := range tools {
+		tool := v.(map[string]any)
 		fn := tool["function"].(map[string]any)
-		if tool["type"] != "function" || fn["name"] != name || fn["description"] != "keep child description" {
+		if tool["type"] != "function" || fn["name"] != names[i] || fn["description"] != "keep child description" {
 			return fmt.Errorf("incorrect namespace wire declaration")
 		}
 	}
@@ -38,7 +52,7 @@ func sdkNamespaceRequest(obj map[string]any, results int) error {
 				if len(calls) != 2 {
 					return fmt.Errorf("namespace tool history was split or lost")
 				}
-				for i, name := range []string{"ns_3_crm_lookup", "ns_2_fs_lookup"} {
+				for i, name := range names {
 					fn := calls[i].(map[string]any)["function"].(map[string]any)
 					if fn["name"] != name {
 						return fmt.Errorf("namespace history identity changed")
@@ -47,7 +61,11 @@ func sdkNamespaceRequest(obj map[string]any, results int) error {
 			}
 			if m["role"] == "tool" {
 				parts, ok := m["content"].([]any)
-				if !ok || len(parts) != 2 || parts[0].(map[string]any)["text"] != " A\n" || parts[1].(map[string]any)["text"] != "B " {
+				if retired {
+					if !ok || len(parts) != 0 {
+						return fmt.Errorf("empty tool result not retained as []")
+					}
+				} else if !ok || len(parts) != 2 || parts[0].(map[string]any)["text"] != " A\n" || parts[1].(map[string]any)["text"] != "B " {
 					return fmt.Errorf("tool output text block order/whitespace lost")
 				}
 				seen++
@@ -93,6 +111,12 @@ func TestProtocolSDKSmoke(t *testing.T) {
 			m := v.(map[string]any)
 			if m["role"] == "tool" {
 				results++
+				if model == "tools-empty" {
+					parts, ok := m["content"].([]any)
+					if !ok || len(parts) != 0 {
+						return nil, fmt.Errorf("SDK empty result changed on wire")
+					}
+				}
 			}
 			if m["role"] == "assistant" && m["tool_calls"] != nil {
 				calls := m["tool_calls"].([]any)
@@ -136,8 +160,9 @@ func TestProtocolSDKSmoke(t *testing.T) {
 			if model == "namespace-cutoff" {
 				finish, args = "length", `{"n":`
 			}
-			body = `data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"a","type":"function","function":{"name":"ns_3_crm_lookup","arguments":""}},{"index":1,"id":"b","type":"function","function":{"name":"ns_2_fs_lookup","arguments":"{\"n\":2}"}}]}}]}` + "\n\n" +
-				fmt.Sprintf(`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"ns_3_crm_lookup","arguments":%q}}]},"finish_reason":%q}]}`, args, finish) + "\n\n"
+			names := sdkNamespaceNames(model)
+			body = fmt.Sprintf(`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"a","type":"function","function":{"name":%q,"arguments":""}},{"index":1,"id":"b","type":"function","function":{"name":%q,"arguments":"{\"n\":2}"}}]}}]}`, names[0], names[1]) + "\n\n" +
+				fmt.Sprintf(`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":%q,"arguments":%q}}]},"finish_reason":%q}]}`, names[0], args, finish) + "\n\n"
 		}
 		body += usage
 		if model == "partial-tool" || model == "filtered-tool" || model == "bad-tool" {
