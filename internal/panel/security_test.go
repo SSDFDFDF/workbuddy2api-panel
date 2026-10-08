@@ -18,6 +18,7 @@ func TestSecurityHeadersOnAllPanelResponses(t *testing.T) {
 	paths := []struct{ method, path string }{
 		{"GET", "/panel/"},
 		{"GET", "/panel/app.js"},
+		{"GET", "/panel/app.css"},
 		{"GET", "/panel/api/overview"}, // 401（未提供 key）
 		{"POST", "/panel/api/config"},  // 401
 		{"GET", "/panel/api/nonexistent"},
@@ -73,6 +74,9 @@ func TestIndexReferencesExternalScript(t *testing.T) {
 	if !strings.Contains(body, `<script src="app.js"></script>`) {
 		t.Error("index.html must load app.js externally (inline script is blocked by CSP)")
 	}
+	if !strings.Contains(body, `<link rel="stylesheet" href="app.css">`) {
+		t.Error("index.html must load app.css externally (styles live in app.css, not an inline <style>)")
+	}
 	// 反例保护：出现内联 <script>...</script> 内容块即为回归
 	if strings.Contains(body, "<script>\n") || strings.Contains(body, "<script> ") {
 		t.Error("index.html still contains an inline <script> block; CSP would block it")
@@ -90,8 +94,32 @@ func TestAppScriptServed(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "javascript") {
 		t.Errorf("Content-Type=%q want javascript", ct)
 	}
-	if !strings.Contains(rec.Body.String(), "'use strict'") {
+	body := rec.Body.String()
+	if body != string(panelJS) {
+		t.Error("app.js 响应与 init 时拼接的 bundle 不一致（js/ 分片未正确下发）")
+	}
+	if !strings.Contains(body, "'use strict'") {
 		t.Error("app.js body looks wrong")
+	}
+}
+
+// app.css 必须能作为同源样式表取到且类型正确（否则页面无样式）。
+func TestAppStylesServed(t *testing.T) {
+	p := newTestPanel()
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/app.css", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "css") {
+		t.Errorf("Content-Type=%q want css", ct)
+	}
+	body := rec.Body.String()
+	if body != string(appCSS) {
+		t.Error("app.css 响应与 embed 的样式表不一致")
+	}
+	if !strings.Contains(body, ":root") || !strings.Contains(body, "--bg:") {
+		t.Error("app.css body looks wrong")
 	}
 }
 

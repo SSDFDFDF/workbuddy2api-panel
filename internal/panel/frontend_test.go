@@ -3,35 +3,131 @@ package panel
 import (
 	"bytes"
 	"encoding/json"
+	"io/fs"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
-// TestAppJSSyntax app.js 必须能通过 JS 解析器语法校验。
+// panelJSCharts 按分片横幅取出图表分片（js/14-chart.js）源码。
 //
-// 为什么需要：app.js 是 go:embed 进二进制的静态资源，Go 编译器不检查其内容——
+// 图表基元收敛后，凡是要调 renderUsageChart / renderUsage / renderExpiry 的切片用例
+// 都必须把图表分片一并求值（segBar 与 stackedBarsSVG 在这里定义）。按横幅切比记
+// 函数名稳：分片改名时只要横幅同步，多条用例不用各自改切片标记。
+const panelJSCharts = `const csStart = src.indexOf('/* ==== js/14-chart.js ==== */');
+const csEnd = src.indexOf('/* ==== js/20-accounts.js ==== */');
+if (csStart < 0 || csEnd < 0) throw new Error('chart shard not found');
+const CHART = src.slice(csStart, csEnd);
+`
+
+// panelJSFile 把服务端 init 时拼接好的 app.js 落到临时文件并返回路径。
+//
+// 前端源码在 js/ 分片里，node 用例统一对“实际下发的那份脚本”求值——分片布局对
+// 用例透明，以后调整分片不需要动任何断言。
+func panelJSFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "app.js")
+	if err := os.WriteFile(path, panelJS, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestPanelJSPartsLayout 守护前端分片清单（js/*.js → app.js）：
+//
+//   - 分片名必须形如 <两位数字>-<名字>.js：数字前缀既是排序键也是执行顺序；
+//   - js/ 下不允许子目录 / 非 .js 文件：go:embed js/*.js 会静默漏掉它们，
+//     Go 编译器不报错，面板直接白屏；
+//   - 嵌入式清单必须与磁盘目录一致（embed 模式漂移时在这里失败）；
+//   - 拼接产物必须严格等于“分片之间夹横幅”的结构，防止漏拼 / 重拼 / 错序。
+func TestPanelJSPartsLayout(t *testing.T) {
+	nameRe := regexp.MustCompile(`^\d\d-[a-z0-9-]+\.js$`)
+	entries, err := os.ReadDir("js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || !nameRe.MatchString(e.Name()) {
+			t.Fatalf("js/ 下出现不合规条目 %q（约定：<两位数字>-<名字>.js，且不允许子目录）", e.Name())
+		}
+		names = append(names, e.Name())
+	}
+	if len(names) < 2 {
+		t.Fatalf("只有 %d 个分片，分片目录疑似被清空", len(names))
+	}
+	sort.Strings(names)
+
+	embedded, err := fs.Glob(panelJSParts, "js/*.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	embedNames := make([]string, 0, len(embedded))
+	for _, n := range embedded {
+		embedNames = append(embedNames, strings.TrimPrefix(n, "js/")) // go:embed 名字带 js/ 前缀
+	}
+	if strings.Join(embedNames, "\n") != strings.Join(names, "\n") {
+		t.Fatalf("嵌入式分片清单与磁盘不一致：\nembed=%v\ndisk =%v", embedNames, names)
+	}
+
+	bundle, off := string(panelJS), 0
+	for i, name := range names {
+		src, err := os.ReadFile(filepath.Join("js", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i > 0 {
+			banner := "/* ==== js/" + name + " ==== */\n"
+			if !strings.HasPrefix(bundle[off:], banner) {
+				head := bundle[off:]
+				if len(head) > 40 {
+					head = head[:40]
+				}
+				t.Fatalf("分片 %s 之前缺少预期横幅，实际开头 %q", name, head)
+			}
+			off += len(banner)
+		}
+		if !strings.HasPrefix(bundle[off:], string(src)) {
+			t.Fatalf("拼接结果在 %s 处与磁盘分片不一致（顺序不符或内容被改动）", name)
+		}
+		off += len(src)
+	}
+	if off != len(bundle) {
+		t.Fatalf("拼接结果 %d 字节，已归属 %d 字节：有未归属内容（漏拼 / 重拼）", len(bundle), off)
+	}
+}
+
+// TestAppJSSyntax 服务端拼接产物与每个 js/ 分片都必须通过 JS 解析器语法校验。
+//
+// 为什么需要：分片是 go:embed 进二进制的静态资源，Go 编译器不检查其内容——
 // 一次对象字面量键名未加引号（Model_chat_GLM5.2 被解析成属性访问 + 数字字面量）
-// 就让整个面板白屏，而所有 Go 测试依然全绿。此测试把语法校验前移到 CI。
+// 就让整个面板白屏，而所有 Go 测试依然全绿。逐分片校验把错误定位到具体文件；
+// 整体校验再兜住“分片各自合法、拼起来不合法”（缺分号 / 粘行）的情况。
 // 无 node 环境时跳过（不阻塞无 Node 的构建机）。
 func TestAppJSSyntax(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("node not available; skipping JS syntax check")
 	}
-	path, err := filepath.Abs("app.js")
+	entries, err := os.ReadDir("js")
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := exec.Command(node, "--check", path).CombinedOutput()
-	if err != nil {
-		t.Fatalf("app.js syntax error:\n%s", out)
+	for _, e := range entries {
+		path := filepath.Join("js", e.Name())
+		if out, err := exec.Command(node, "--check", path).CombinedOutput(); err != nil {
+			t.Fatalf("%s syntax error:\n%s", path, out)
+		}
+	}
+	if out, err := exec.Command(node, "--check", panelJSFile(t)).CombinedOutput(); err != nil {
+		t.Fatalf("拼接后的 app.js syntax error:\n%s", out)
 	}
 }
 
@@ -63,9 +159,10 @@ func TestIndexHTMLNoInlineScript(t *testing.T) {
 	}
 }
 
-// TestAppJSTopLevelSmoke app.js 顶层求值冒烟（v1.11.3/1.11.4 两连炸后补的运行时闸门）：
-// node + DOM 桩执行 app.js（含按 hash 落到各视图的 go() 顶层调用），抓 TDZ/
-// ReferenceError 类运行时错误——Go 侧 frontend_test 不执行 JS，语法层检查对此全盲。
+// TestAppJSTopLevelSmoke 顶层求值冒烟（v1.11.3/1.11.4 两连炸后补的运行时闸门）：
+// node + DOM 桩执行**服务端拼接后的 app.js**（含按 hash 落到各视图的 go() 顶层
+// 调用），抓 TDZ/ReferenceError 类运行时错误——Go 侧 frontend_test 不执行 JS，
+// 语法层检查对此全盲；分片顺序 / 词法环境顺序错了也在这里炸。
 // 无 node 的环境跳过（CI/精简机不受影响）；harness 与 app.js 同判（app.js 顶层
 // start() 的 setInterval 会让 node 事件循环不退出，故成功路径显式 exit(0)）。
 func TestAppJSTopLevelSmoke(t *testing.T) {
@@ -114,9 +211,9 @@ try {
 		t.Fatal(err)
 	}
 	hf.Close()
+	bundle := panelJSFile(t)
 	for _, hash := range []string{"#taskscenter", "#accounts", "#usage", "#models", "#config", "#logs", "#packages"} {
-		cmd := exec.Command(node, hf.Name(), "app.js")
-		cmd.Dir = "." // 测试工作目录 = internal/panel
+		cmd := exec.Command(node, hf.Name(), bundle) // 绝对路径，无需 cmd.Dir
 		cmd.Env = append(os.Environ(), "SMOKE_HASH="+hash)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -138,7 +235,7 @@ func TestAppJSCreditDimensionFormatting(t *testing.T) {
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
 	const start = src.indexOf('function trimFixed');
-const end = src.indexOf('function usStat');
+const end = src.indexOf('function usKpi');
 if (start < 0 || end < 0) throw new Error('credit helpers not found');
 const ctx = { Number, String, RegExp };
 vm.createContext(ctx);
@@ -165,7 +262,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), panelJSFile(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("credit formatting node test failed: %v\n%s", err, out)
 	}
@@ -209,7 +306,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), panelJSFile(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("rate-limit formatting node test failed: %v\n%s", err, out)
 	}
@@ -231,7 +328,7 @@ const src = fs.readFileSync(process.argv[2], 'utf8');
 const escStart = src.indexOf('function esc(');
 const escEnd = src.indexOf('function ago(');
 const fmtStart = src.indexOf('function fmtTok(');
-const fmtEnd = src.indexOf('function usStat(');
+const fmtEnd = src.indexOf('function usKpi(');
 const reqStart = src.indexOf('function requestLogText');
 const reqEnd = src.indexOf('function fmtBytes');
 if ([escStart, escEnd, fmtStart, fmtEnd, reqStart, reqEnd].some(v => v < 0)) throw new Error('request log helpers not found');
@@ -259,7 +356,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), panelJSFile(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("request log formatting node test failed: %v\n%s", err, out)
 	}
@@ -309,7 +406,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), panelJSFile(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("request filter node test failed: %v\n%s", err, out)
 	}
@@ -372,7 +469,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), panelJSFile(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("model filter node test failed: %v\n%s", err, out)
 	}
@@ -399,7 +496,184 @@ process.stdout.write(JSON.stringify({
 	}
 }
 
-// 用量时序图的柱体类名不得叫 bar：账号池的积分条是 .bar{height:3px}，而 SVG2 里
+// 用量明细表的列数必须与 US_DIMS 的 span 一致：空数据行用 colspan=span 撑满整行，
+// 表头与 span 一旦不同步，空表就会错位（或撑不满）。此前列数是手写的 10/7/7，
+// 且 prompt / completion / 合计三列共存；简化成单列「Token」（明细在构成条 title）后
+// 必须同步 span，否则这个回归只会等人肉点开空表才能看到。
+func TestAppJSUsageDimColumnsMatchSpan(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; usage dim columns test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('const US_DIMS');
+const end = src.indexOf('function renderUsageDim');
+if (start < 0 || end < 0 || end < start) throw new Error('usage dim region not found');
+const ctx = { esc: s => String(s == null ? '' : s) };
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.US_DIMS = US_DIMS; this.usDimHead = usDimHead;', ctx);
+const out = {};
+for (const dim of ['account', 'model', 'realm']) {
+  out[dim] = {
+    cols: (ctx.usDimHead(dim).match(/<th/g) || []).length,
+    span: ctx.US_DIMS[dim].span,
+  };
+}
+process.stdout.write(JSON.stringify(out));`
+	f, err := os.CreateTemp(t.TempDir(), "dim-cols-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), panelJSFile(t)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("usage dim columns node test failed: %v\n%s", err, out)
+	}
+	const want = `{"account":{"cols":8,"span":8},"model":{"cols":5,"span":5},"realm":{"cols":5,"span":5}}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("usage dim columns=%s\nwant %s", strings.TrimSpace(string(out)), want)
+	}
+}
+
+// 用量统计的「简化」不得丢信息：卡片只留结论级指标（主统计 3 张 / 积分 4 张），
+// 但 prompt、completion 的绝对量与占比必须仍能看到（副标题 + 构成条 title）。
+// 这个用例钉住的是“合并重复展示”与“删掉信息”的区别。
+func TestAppJSUsageStatsCarrySplitDetail(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; usage stats test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const fmtStart = src.indexOf('function fmtTok(');
+const fmtEnd = src.indexOf('/* ==== js/13-shell.js');
+const csStart = src.indexOf('/* ==== js/14-chart.js ==== */');
+const csEnd = src.indexOf('/* ==== js/20-accounts.js ==== */');
+if (csStart < 0 || csEnd < 0) throw new Error('chart shard not found');
+const CHART = src.slice(csStart, csEnd);
+const usageStart = src.indexOf('function renderUsage(');
+const usageEnd = src.indexOf('function parsePointTime');
+if ([fmtStart, fmtEnd, usageStart, usageEnd].some(v => v < 0)) throw new Error('usage stats region not found');
+const sinks = {};
+// 桩元素带 addEventListener：切片会带上本分片尾部的顶层事件绑定（维度切换等），
+// 它们只需能挂监听即可。
+const sink = id => (sinks[id] = sinks[id] || {
+  innerHTML: '', textContent: '', title: '', addEventListener() {},
+});
+const ctx = {
+  Date, Number, String, Math, RegExp, isNaN,
+  $: sink,
+  esc: s => String(s == null ? '' : s),
+  trangeLabel: () => '今天',
+  cacheRateText: () => '98.1%',
+  renderUsageDim() {}, renderCreditDim() {}, renderUsageChart() {},
+};
+vm.createContext(ctx);
+vm.runInContext(CHART + src.slice(fmtStart, fmtEnd) + src.slice(usageStart, usageEnd) +
+  '\nthis.renderUsage = renderUsage;', ctx);
+ctx.renderUsage({
+  totals: { requests: 200, errors: 2, total_tokens: 3000000, prompt_tokens: 2000000,
+            completion_tokens: 1000000, avg_latency_ms: 900, avg_tokens_per_second: 12.5,
+            credits: 1.5, credit_tokens: 1000000, credit_samples: 3, credits_per_1m_tokens: 1.5,
+            cache_hit_tokens: 90, cache_miss_tokens: 10 },
+  series: [], by_account: [], by_model: [], by_realm: [], credit_by_account: [], credit_by_model: [],
+});
+const stats = sinks.usStats.innerHTML;
+const credit = sinks.usCreditStats.innerHTML;
+process.stdout.write(JSON.stringify({
+  mainCards: (stats.match(/class="kpi /g) || []).length,
+  creditCards: (credit.match(/class="kpi /g) || []).length,
+  hasPromptAbs: stats.includes('prompt 2M'),
+  hasCompletionAbs: stats.includes('completion 1M'),
+  hasPctTip: /title="prompt 66\.7%"/.test(stats) && /title="completion 33\.3%"/.test(stats),
+  hasSuccessAndErrs: stats.includes('成功率 99.0% · 失败 2 次'),
+  hasSampleCount: credit.includes('3 个有效样本'),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "usage-stats-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), panelJSFile(t)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("usage stats node test failed: %v\n%s", err, out)
+	}
+	const want = `{"mainCards":3,"creditCards":4,"hasPromptAbs":true,"hasCompletionAbs":true,` +
+		`"hasPctTip":true,"hasSuccessAndErrs":true,"hasSampleCount":true}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("usage stats=%s\nwant %s", strings.TrimSpace(string(out)), want)
+	}
+}
+
+// TestAppJSSegBarIsTheOnlyBar 柱/条只有一套实现：segBar（js/14-chart.js）。
+//
+// 为什么需要：全站曾有六处各自手写条形（账号池积分条 .bar、KPI .kbar、用量表 .us-mix、
+// 积分构成 .mixbar、账号到期条 .expirybar、到期分布图 .pk-expiry-*），同一件事六个实现，
+// 改一处样式要翻六个地方，宽度算法也会慢慢跑偏。这里钉住两件事：
+//  1. 前端源码里不再出现手写的条形标记；
+//  2. segBar 自身行为稳定：按 total 算宽度、空/全零数据返回空串、title 转义。
+func TestAppJSSegBarIsTheOnlyBar(t *testing.T) {
+	for _, legacy := range []string{`class="bar"`, `class="kbar"`, `class="mixbar"`,
+		`class="expirybar"`, `class="us-mix"`, `pk-expiry-seg`} {
+		if strings.Contains(string(panelJS), legacy) {
+			t.Errorf("前端仍存在手写条形 %s；条形一律走 segBar（js/14-chart.js）", legacy)
+		}
+	}
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; segBar test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function segBar(');
+const end = src.indexOf('/* stackedBarsSVG');
+if (start < 0 || end < 0) throw new Error('segBar not found');
+// esc 桩与真实实现同形（5 个字符都转）：断言 segBar 的 title 确实过转义，
+// 而不是把它原样拼进属性。
+const ctx = { esc: s => String(s == null ? '' : s).replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;') };
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.segBar = segBar;', ctx);
+const two = ctx.segBar([{ value: 1, color: 'red', title: 'a<b' }, { value: 3, color: 'blue' }]);
+const capped = ctx.segBar([{ value: 1 }, { value: 1 }], { total: 10, cls: 'xx' });
+process.stdout.write(JSON.stringify({
+  widths: (two.match(/width:([0-9.]+)%/g) || []),
+  escaped: two.includes('&lt;b'),
+  cls: capped.includes('class="segbar xx"'),
+  cappedSum: (capped.match(/width:([0-9.]+)%/g) || []).join(),
+  empty: ctx.segBar([], {}),
+  zero: ctx.segBar([{ value: 0 }], {}),
+  aria: ctx.segBar([{ value: 1 }], { aria: '紧迫度' }).includes('aria-label="紧迫度"'),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "segbar-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), panelJSFile(t)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("segBar node test failed: %v\n%s", err, out)
+	}
+	const want = `{"widths":["width:25.000%","width:75.000%"],"escaped":true,"cls":true,"cappedSum":"width:10.000%,width:10.000%","empty":"","zero":"","aria":true}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("segBar=%s\nwant %s", strings.TrimSpace(string(out)), want)
+	}
+}
+
+// 用量时序图的柱体类名不得叫 bar：账号池的积分条曾叫 .bar{height:3px}，而 SVG2 里
 // height 是 rect 的 CSS 几何属性——同名类会把每根柱子压成 3px 高，图看起来"没数据"。
 // 这个坑只能在浏览器里看出来，所以在这里钉住类名。
 func TestAppJSUsageChartBarClass(t *testing.T) {
@@ -411,11 +685,15 @@ func TestAppJSUsageChartBarClass(t *testing.T) {
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
 const start = src.indexOf('function parsePointTime');
-const end = src.indexOf('function fmtTokTip');
+const end = src.indexOf('async function warmUsageModelRates');
+const csStart = src.indexOf('/* ==== js/14-chart.js ==== */');
+const csEnd = src.indexOf('/* ==== js/20-accounts.js ==== */');
+if (csStart < 0 || csEnd < 0) throw new Error('chart shard not found');
+const CHART = src.slice(csStart, csEnd);
 const escStart = src.indexOf('function esc(');
 const escEnd = src.indexOf('function ago(');
 const fmtStart = src.indexOf('function fmtTok(');
-const fmtEnd = src.indexOf('function usStat(');
+const fmtEnd = src.indexOf('function usKpi(');
 if ([start, end, escStart, escEnd, fmtStart, fmtEnd].some(v => v < 0)) throw new Error('usage chart helpers not found');
 const host = { innerHTML: '', textContent: '' };
 const ctx = {
@@ -424,7 +702,7 @@ const ctx = {
   $: () => host,
 };
 vm.createContext(ctx);
-vm.runInContext(src.slice(escStart, escEnd) + src.slice(fmtStart, fmtEnd) + src.slice(start, end) +
+vm.runInContext(CHART + src.slice(escStart, escEnd) + src.slice(fmtStart, fmtEnd) + src.slice(start, end) +
   '\nthis.renderUsageChart=renderUsageChart;', ctx);
 const series = [
   { t: '2026-09-30T09', scope: 'hour', prompt_tokens: 35, completion_tokens: 16, total_tokens: 51, requests: 1 },
@@ -450,7 +728,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), panelJSFile(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("usage chart node test failed: %v\n%s", err, out)
 	}
@@ -524,7 +802,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), panelJSFile(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("time range node test failed: %v\n%s", err, out)
 	}
@@ -553,16 +831,9 @@ process.stdout.write(JSON.stringify({
 // 少了一个开关而 Go 测试全绿，只有人肉点开配置页才会发现。这里把"表单字段 ↔
 // CFG_MAP"与"关键热改键必须在表单里"两条都钉住。
 func TestConfigFormMatchesCFGMap(t *testing.T) {
-	src, err := os.ReadFile("app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	js := string(src)
-	htmlBytes, err := os.ReadFile("index.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	html := string(htmlBytes)
+	// 校验对象就是实际下发的那两份资源：分片拼出的 app.js 与 embed 的页面。
+	js := string(panelJS)
+	html := string(indexHTML)
 
 	// CFG_MAP 块（下面两条检查共用）。
 	mapBlock := js[strings.Index(js, "const CFG_MAP = {"):]
@@ -651,7 +922,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), panelJSFile(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("detail groups node test failed: %v\n%s", err, out)
 	}
@@ -661,7 +932,7 @@ process.stdout.write(JSON.stringify({
 	}
 }
 
-// 精确剩余天数聚合、账号内按总余额钳制、无到期批次不进入图表。
+// 精确剩余天数聚合、账号内按总余额钳制、无到期批次不计入（首页紧迫度分桶只用有效到期批次）。
 func TestAppJSExpirySummary(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -670,12 +941,12 @@ func TestAppJSExpirySummary(t *testing.T) {
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
-const start = src.indexOf('const PK_ACCOUNT_COLORS');
-const end = src.indexOf('function renderExpiryDistribution');
+const start = src.indexOf('const PK_DEFAULT_DETAIL_LIMIT');
+const end = src.indexOf('function renderPackages');
 if (start < 0 || end < 0) throw new Error('expiry summary functions not found');
 const ctx = { Date, Math, Number, String, Map, Array, Object, isFinite };
 vm.createContext(ctx);
-vm.runInContext(src.slice(start, end) + '\nthis.summarizeCreditDays = summarizeCreditDays; this.pkAccountColorMap = pkAccountColorMap;', ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.summarizeCreditDays = summarizeCreditDays;', ctx);
 const day = 86400000, now = 100000;
 const out = ctx.summarizeCreditDays([
   { uid: 'a', remain: 100, packages: [
@@ -692,8 +963,6 @@ process.stdout.write(JSON.stringify({
   rows: out.rows.map(row => ({ days: row.days, credits: row.credits })),
   accountCount: out.accountCount,
   unavailable: out.unavailable,
-  colorA: ctx.pkAccountColorMap([{ uid: 'b' }, { uid: 'a' }]).get('a'),
-  colorB: ctx.pkAccountColorMap([{ uid: 'a' }, { uid: 'b' }]).get('b'),
 }));`
 	f, err := os.CreateTemp(t.TempDir(), "expiry-*.cjs")
 	if err != nil {
@@ -703,11 +972,13 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), panelJSFile(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("expiry summary node test failed: %v\n%s", err, out)
 	}
-	const want = `{"rows":[{"days":1,"credits":50},{"days":7,"credits":70}],"accountCount":3,"unavailable":1,"colorA":"#4f8cff","colorB":"#25b08b"}`
+	// 账号配色不再断言：per-account 配色随「积分到期分布」图一起下线，
+	// 到期视图现在只有首页的紧迫度分桶条（按 3/7 天档位上色，与账号无关）。
+	const want = `{"rows":[{"days":1,"credits":50},{"days":7,"credits":70}],"accountCount":3,"unavailable":1}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("expiry summary=%s want %s", out, want)
 	}
@@ -775,7 +1046,7 @@ process.stdout.write(JSON.stringify([
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), panelJSFile(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("collectConfig node test failed: %v\n%s", err, out)
 	}
@@ -837,7 +1108,7 @@ process.stdout.write(JSON.stringify([
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), panelJSFile(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("version fill node test failed: %v\n%s", err, out)
 	}
@@ -898,7 +1169,7 @@ process.stdout.write(JSON.stringify(out));`
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), panelJSFile(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("rules codec node test failed: %v\n%s", err, out)
 	}
@@ -968,6 +1239,13 @@ func TestAppJSExpirySortedByExpiry(t *testing.T) {
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
 const start = src.indexOf('function expBatches');
+const pkStart = src.indexOf('const PK_DEFAULT_DETAIL_LIMIT');
+const pkEnd = src.indexOf('function renderPackages');
+if (pkStart < 0 || pkEnd < 0) throw new Error('packages region not found');
+const csStart = src.indexOf('/* ==== js/14-chart.js ==== */');
+const csEnd = src.indexOf('/* ==== js/20-accounts.js ==== */');
+if (csStart < 0 || csEnd < 0) throw new Error('chart shard not found');
+const CHART = src.slice(csStart, csEnd);
 const end = src.indexOf('async function loadExpiry');
 if (start < 0 || end < 0 || end < start) throw new Error('expiry region not found');
 const sink = { innerHTML: '', textContent: '', hidden: true };
@@ -979,7 +1257,7 @@ const ctx = {
   lastPackages: null, lastPackagesAt: 0,
 };
 vm.createContext(ctx);
-vm.runInContext(src.slice(start, end) + '\nthis.renderExpiry = renderExpiry;', ctx);
+vm.runInContext(src.slice(pkStart, pkEnd) + CHART + src.slice(start, end) + '\nthis.renderExpiry = renderExpiry;', ctx);
 const iso = n => {
   const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + n);
   const p = x => String(x).padStart(2, '0');
@@ -1005,7 +1283,7 @@ process.stdout.write(JSON.stringify(names));`
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), panelJSFile(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("expiry sort node test failed: %v\n%s", err, out)
 	}
@@ -1034,9 +1312,18 @@ const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
 const start = src.indexOf('function parsePointTime');
 const chartStart = src.indexOf('function renderUsageChart');
+const csStart = src.indexOf('/* ==== js/14-chart.js ==== */');
+const csEnd = src.indexOf('/* ==== js/20-accounts.js ==== */');
+if (csStart < 0 || csEnd < 0) throw new Error('chart shard not found');
+const CHART = src.slice(csStart, csEnd);
 if (start < 0 || chartStart < 0) throw new Error('chart functions not found');
-let end = src.indexOf('\nfunction ', chartStart + 10);
-if (end < 0) end = src.length;
+// 切片止于本分片最后一个顶层函数之前：用正则匹配「行首 function / async function」，
+// 避免 "\nfunction " 这种写法漏掉 async 声明（漏掉会把后面的顶层事件绑定一起求值）。
+let end = src.length;
+const nextTop = /\n(?:async )?function /g;
+nextTop.lastIndex = chartStart + 10;
+const mTop = nextTop.exec(src);
+if (mTop) end = mTop.index;
 const sinks = {};
 const mk = id => (sinks[id] = { innerHTML: '', textContent: '' });
 const ctx = {
@@ -1046,7 +1333,7 @@ const ctx = {
   Date, Math, Number, String, Map, Array, Object, isNaN, Infinity, isFinite, Set,
 };
 vm.createContext(ctx);
-vm.runInContext(src.slice(start, end) + '\nthis.renderUsageChart = renderUsageChart;', ctx);
+vm.runInContext(CHART + src.slice(start, end) + '\nthis.renderUsageChart = renderUsageChart;', ctx);
 const series = [];
 for (let h = 0; h < 5; h++) {
   const d = new Date(); d.setHours(d.getHours() - (4 - h), 0, 0, 0);
@@ -1072,7 +1359,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), panelJSFile(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("chart tooltip node test failed: %v\n%s", err, out)
 	}

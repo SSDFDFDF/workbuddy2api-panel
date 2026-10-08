@@ -105,7 +105,7 @@ git log --oneline <已同步基线>..upstream/main     # 列出待判定提交�
 | 缓存键 / 配置容错 | `internal/upstream/cache_key.go`、`cmd/server/{config,config_warnings,main}.go` |
 | 出站代理 | `internal/proxy/`、`internal/auth/auth.go`、`internal/upstream/proxy.go` |
 | 裸模型名默认域 | `internal/server/resolve_model.go` |
-| 面板 | `internal/panel/{index.html,app.js,config.go,panel.go}` |
+| 面板 | `internal/panel/{index.html,app.css,js/*.js,config.go,panel.go}` |
 
 ## 6. 未验证项（静态检查不能替代真实上游验收）
 
