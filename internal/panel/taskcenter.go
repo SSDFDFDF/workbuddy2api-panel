@@ -54,6 +54,42 @@ func growthPending(t upstream.Task) bool {
 	return autoActionFor(t.TaskCode) != nil
 }
 
+// pendingGrowthTasks 拉取该账号「未完成且可自动化」的成长任务待办
+// （默认口径 ∪ 小程序口径，按 task_code 去重）。
+//
+// 为什么要收成一个函数：任务中心的两个入口（只读扫描 tasksScanAll 与执行队列
+// startGrowthQueue）此前各写一份「拉列表 + 过滤 + 合并 mp」逻辑，已经在 mp 列表
+// 失败时的行为上分叉——扫描显示 mp 待办，而队列报"无可执行待办"（实修过一次）。
+// 待办口径必须只有一份实现，否则下次改动会再次分叉。
+//
+// realm/企业版门控由调用方先行判定（调用方还有各自的日志/字段语义）。
+// mp 列表失败静默（无 mp 任务的部署/活动结束时零影响）；返回 error 仅指默认口径失败。
+func (p *Panel) pendingGrowthTasks(a *auth.Auth) ([]upstream.Task, error) {
+	tasks, err := p.cfg.Upstream.ListTasks(a)
+	if err != nil {
+		return nil, err
+	}
+	var pending []upstream.Task
+	seen := map[string]bool{}
+	for _, t := range tasks {
+		if growthPending(t) {
+			pending = append(pending, t)
+			seen[t.TaskCode] = true
+		}
+	}
+	// 小程序口径任务（school_season 校园日 / Sequential_Tasks_1 小程序首对话）
+	// 仅在 mp 头列表下发，与默认口径不重叠——合并进待办；失败静默。
+	if mpTasks, mpErr := p.cfg.Upstream.ListTasksMP(a); mpErr == nil {
+		for _, t := range mpTasks {
+			if growthPending(t) && !seen[t.TaskCode] {
+				pending = append(pending, t)
+				seen[t.TaskCode] = true
+			}
+		}
+	}
+	return pending, nil
+}
+
 // tasksScanAll 扫描全部账号：成长任务（未完成+可自动化，含 mp 口径合并）。
 // 只读操作，并发拉取（账号数个位数）。
 func (p *Panel) tasksScanAll(w http.ResponseWriter, r *http.Request) {
@@ -82,29 +118,12 @@ func (p *Panel) tasksScanAll(w http.ResponseWriter, r *http.Request) {
 			if a.IsEnterprise() {
 				return
 			}
-			if tasks, err := p.cfg.Upstream.ListTasks(a); err != nil {
+			pending, err := p.pendingGrowthTasks(a)
+			if err != nil {
 				it.GrowthErr = err.Error()
-			} else {
-				for _, t := range tasks {
-					if growthPending(t) {
-						it.Growth = append(it.Growth, t)
-					}
-				}
+				return
 			}
-			// 小程序口径任务（school_season 校园日 / Sequential_Tasks_1 小程序首对话）
-			// 仅在 mp 头列表下发，与默认口径不重叠——合并进待办列表；mp 列表失败
-			// 静默（无 mp 任务的部署/活动结束时零影响）。
-			if mpTasks, err := p.cfg.Upstream.ListTasksMP(a); err == nil {
-				seen := map[string]bool{}
-				for _, t := range it.Growth {
-					seen[t.TaskCode] = true
-				}
-				for _, t := range mpTasks {
-					if growthPending(t) && !seen[t.TaskCode] {
-						it.Growth = append(it.Growth, t)
-					}
-				}
-			}
+			it.Growth = pending
 		}(i, st.UID)
 	}
 	wg.Wait()
@@ -227,26 +246,8 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 				return
 			}
 			if growth {
-				if tasks, err := p.cfg.Upstream.ListTasks(a); err == nil {
-					for _, t := range tasks {
-						if growthPending(t) {
-							one.grow = append(one.grow, t)
-						}
-					}
-					// 合并小程序口径待办（与 tasksScanAll 同口径：mp 列表是默认口径
-					// 超集，按 code 去重；失败静默）。此前此处漏合并——扫描显示
-					// mp 待办而队列报"无可执行待办"。
-					if mpTasks, mpErr := p.cfg.Upstream.ListTasksMP(a); mpErr == nil {
-						seen := map[string]bool{}
-						for _, t := range one.grow {
-							seen[t.TaskCode] = true
-						}
-						for _, t := range mpTasks {
-							if growthPending(t) && !seen[t.TaskCode] {
-								one.grow = append(one.grow, t)
-							}
-						}
-					}
+				if pending, err := p.pendingGrowthTasks(a); err == nil {
+					one.grow = pending
 					sort.Slice(one.grow, func(i, j int) bool { // 按 autoActions 顺序（依赖前置）
 						return autoActionIndex(one.grow[i].TaskCode) < autoActionIndex(one.grow[j].TaskCode)
 					})

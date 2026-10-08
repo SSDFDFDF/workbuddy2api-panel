@@ -167,9 +167,6 @@ const ServiceName = "workbuddy2api"
 type Handler struct {
 	cfg Config
 	mux *http.ServeMux
-	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
-	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
-	wafIP wafIPGate
 }
 
 // NewHandler 构建 handler。
@@ -1053,6 +1050,8 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 			h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 			fail(acct.UID)
 			// Only an explicit pre-generation model rejection is safe to replay.
+			// 其余分类错误（含 WAF 403）都是**终态**：同一 body 换号重试只会放大请求量，
+			// 直接透传上游原文回客户端。
 			if kind != upstream.ErrModelBlocked {
 				st.status = upstream.ErrorStatus(kind)
 				st.outcome = reqlog.OutcomeHTTPError
@@ -1062,13 +1061,8 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 				out.JSON(w, st.status, upstream.ErrorResponse(kind, string(respBody)))
 				return
 			}
-			// WAF IP 级 fail-fast（优先于 rotateBackoff 退避——IP 级拦截时退避无意义）：
-			// 该次 WAF 403 喂入 IP 级状态机，若激活（短窗多号命中，IP 被拦而非账号）
-			// 则立即终止轮转——继续换号只会把请求放大 MaxRotate 倍打同一出口 IP，
-			// 加重风控。账号级软冷却已在上方 applyErrorPolicy 照常记账。
-			if kind == upstream.ErrWafBlock && h.wafIP.noteWaf(acct.UID) {
-				break
-			}
+			// 仅 ErrModelBlocked（11102「该后端无此模型」）继续换号：它可能是账号维度的，
+			// 换号有意义。
 			if !rotateBackoff(i, r.Context()) {
 				break // ctx 取消：终止轮转（分类错误换号退避）
 			}
@@ -1262,13 +1256,10 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 			code = "rate_limit_exceeded"
 			msg = "rate limited: all accounts are cooling down, please wait a moment and try again"
 		case upstream.ErrWafBlock:
-			if h.wafIP.active() {
-				// IP 级拦截措辞（fail-fast 终止路径）：网关出口 IP 被 WAF 拦截、
-				// 轮转已止损、窗口过后自动解除。客户端提前重试无意义（换号不换 IP）；
-				// 有上游原文时原文优先（下方统一）。
-				code = "waf_ip_blocked"
-				msg = "waf ip-level block: upstream firewall is blocking the gateway IP, rotation stopped; retry after the block window expires"
-			}
+			// WAF 403 已在轮转循环内按终态直接透传（不轮转），此处仅为分类映射冗余分支；
+			// 保留文案以便未来若有路径汇入末端时仍有可读提示（不再宣扬 IP 级判定）。
+			code = "waf_blocked"
+			msg = "upstream firewall blocked the request; rotation stopped"
 		case upstream.ErrModelBlocked:
 			// 11102「该后端无此模型」：上游原文（下方统一透传）已经写清了原因，但
 			// code 此前停在默认的 no_healthy_account —— 那是"服务端过载"的语义，
