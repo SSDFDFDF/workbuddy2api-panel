@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -484,13 +485,21 @@ func panelListenPath(listen string) string {
 // 序列化校验后的配置，未知键在 json.Unmarshal 时已丢失，故先合并原始 map。
 // logConfigWarnings 把配置告警打到 stdout（面板日志页同源）：未知/退役键、
 // 旧取值迁移都只告警不阻断，但必须可见，否则用户会以为旧开关仍在生效。
-// 每次调用前清空已打印记录：saveConfig 后再次 Load 会重新产生同一批告警。
-var printedConfigWarnings = map[string]bool{}
+// printedConfigWarnings 记录已打印过的告警，避免每次 Load 重复刷屏。
+// 读侧不止启动路径：面板 GET /panel/api/config 走 LoadConfig 闭包，POST 走
+// saveConfig，两者可能并发调用 logConfigWarnings——普通 map 无锁读写既是数据
+// 竞争，也可能直接触发 fatal error: concurrent map writes。
+var (
+	printedConfigWarningsMu sync.Mutex
+	printedConfigWarnings   = map[string]bool{}
+)
 
 func logConfigWarnings(c *Config) {
 	if c == nil {
 		return
 	}
+	printedConfigWarningsMu.Lock()
+	defer printedConfigWarningsMu.Unlock()
 	for _, w := range c.Warnings {
 		if printedConfigWarnings[w] {
 			continue
@@ -500,7 +509,17 @@ func logConfigWarnings(c *Config) {
 	}
 }
 
+// configSaveMu 串行化「读旧配置 → 合并 → 校验 → 落盘 → 热应用」全流程。
+//
+// 为什么必须是事务级互斥：多个保存请求（多标签页、脚本重试）共用同一份
+// config.json 与同一个 config.json.tmp。并发进入时已实测出现 rename ENOENT
+// （一个请求的 rename 与另一个的 WriteFile 交错），即使不报错也存在后写覆盖
+// 先写、磁盘最终版本与热生效顺序错位。只给临时文件换随机名解决不了丢更新。
+var configSaveMu sync.Mutex
+
 func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) ([]string, error) {
+	configSaveMu.Lock()
+	defer configSaveMu.Unlock()
 	// 1) 解析原始 JSON 为 map（保留用户手写的未知键），再叠加面板提交的键。
 	oldRaw, err := os.ReadFile(path)
 	if err != nil {

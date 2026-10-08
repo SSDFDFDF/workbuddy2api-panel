@@ -76,7 +76,7 @@ func (c *Client) desktopFingerprint(a *auth.Auth) map[string]any {
 	nickname := ""
 	if a != nil {
 		uid = a.UID
-		nickname = a.Nickname
+		nickname = a.NicknameValue()
 	}
 	osVer, cores, mem := deriveHardwareProfile(uid)
 	return map[string]any{
@@ -293,7 +293,7 @@ func (c *Client) ReportWebEvent(a *auth.Auth, eventCode, pageURL, elementID, ele
 		"pageURL": pageURL, "elementId": elementID, "elementName": elementName,
 		"os": "Win32", "arch": "", "osVersion": "10.0", "userAgent": ua,
 		"machineId": deriveAccountStableID(a.UID, "webmachine"), "userId": a.UID,
-		"userNickname": a.Nickname, "enterpriseId": a.EnterpriseID,
+		"userNickname": a.NicknameValue(), "enterpriseId": a.EnterpriseID,
 	}
 	raw, err := json.Marshal([]map[string]any{ev})
 	if err != nil {

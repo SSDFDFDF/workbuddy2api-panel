@@ -97,6 +97,22 @@ func (a *Auth) RefreshTokenValue() string {
 	return a.RefreshToken
 }
 
+// NicknameValue 加锁读取 Nickname（展示、日志、出站请求体一律经此取值）。
+//
+// 为什么必须加锁：Pool.SetNickname（面板昵称同步）在 a.mu 内改写 Nickname，
+// 而 pool.Status 构造、请求流水日志、成长任务上报等几十处读点在锁外直读字段。
+// 两者在生产真会并发：面板手动「刷新」触发 syncNicknames（逐号写昵称）时，
+// 定时任务/在途请求正在读同一对象（go test -race 实证）。与 AccessTokenValue
+// 同款纪律：可变字段勿直读。
+func (a *Auth) NicknameValue() string {
+	if a == nil {
+		return ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.Nickname
+}
+
 // UseProxy 报告该账号是否使用出站代理。缺省（未设置）为 true——与历史行为一致：
 // 只要配置了 proxy_url / resin_url，所有账号默认走代理；显式关闭才直连。
 func (a *Auth) UseProxy() bool {
@@ -423,15 +439,15 @@ func LoadDir(dir string) ([]*Auth, error) {
 		a.FilePath = f
 		if prev, ok := seenUID[a.UID]; ok {
 			log.Printf("WARN: uid %s duplicated across %s and %s — 后者覆盖（不同 realm 同名 UID？）",
-				logfmt.Label(a.UID, a.Nickname), prev, f)
+				logfmt.Label(a.UID, a.NicknameValue()), prev, f)
 		}
 		seenUID[a.UID] = f
 		if a.RealmStored() == "" {
 			if changed, r := a.BackfillRealm(); changed {
 				if err := a.SaveAtomic(); err != nil {
-					log.Printf("WARN: auth %s realm backfill save: %v", logfmt.Label(a.UID, a.Nickname), err)
+					log.Printf("WARN: auth %s realm backfill save: %v", logfmt.Label(a.UID, a.NicknameValue()), err)
 				} else if r == "global" {
-					log.Printf("auth %s 存量迁移: 补 realm=global（domain=%s）", logfmt.Label(a.UID, a.Nickname), a.Domain)
+					log.Printf("auth %s 存量迁移: 补 realm=global（domain=%s）", logfmt.Label(a.UID, a.NicknameValue()), a.Domain)
 				}
 			}
 		}
