@@ -133,21 +133,24 @@ function mdSortList(list, f) {
   return out;
 }
 
+let mdPage = 1, mdPageSize = 25;
+
 // mdRowHtml 单个模型行（纯渲染，便于独立测试）。
 function mdRowHtml(m, pr) {
   const eff = (m.supported_efforts || []).slice();
   if (m.can_disable_thinking && eff.length && !eff.includes('off')) eff.push('off（可关）');
   const effs = eff.length ? eff.map(e => '<span class="tag warn">' + esc(e) + '</span>').join(' ')
     : '<span style="color:var(--ink-3);font-size:12.5px">' + (m.supports_reasoning ? '固定档 · 默认 ' + esc(m.default_effort || '?') : '不支持思考') + '</span>';
-  // 能力徽标：默认模型 / 工具调用 / 视觉 / 纯推理（上游目录全字段透出，缺失不显示）
+  // 能力徽标：默认模型 / 工具调用 / 视觉 / 纯推理，独立成列展示
   const caps = [];
   if (m.is_default) caps.push('<span class="tag ok">默认</span>');
   if (m.supports_tool_call) caps.push('<span class="tag warn">工具</span>');
   if (m.supports_images) caps.push('<span class="tag warn">视觉</span>');
   if (m.supports_reasoning && !m.can_disable_thinking) caps.push('<span class="tag warn">思考常开</span>');
-  const capHtml = caps.length ? '<div class="id" style="margin-top:2px">' + caps.join(' ') + '</div>' : '';
+  const capCell = '<td>' + (caps.length ? caps.join(' ') : '<span style="color:var(--ink-3)">—</span>') + '</td>';
   const tip = m.description ? ' title="' + esc(m.description) + '"' : '';
-  return '<tr><td class="mark" aria-hidden="true"><i></i></td><td class="who"' + tip + '><div class="nm">' + esc(m.id) + '</div><div class="id">' + esc(m.name || '') + '</div>' + capHtml + '</td>' +
+  return '<tr><td class="mark" aria-hidden="true"><i></i></td><td class="who"' + tip + '><div class="nm">' + esc(m.id) + '</div><div class="id">' + esc(m.name || '') + '</div></td>' +
+    capCell +
     '<td class="num">' + rateCell(m) + '</td>' +
     '<td>' + (m.default_effort ? '<span class="tag ok">' + esc(m.default_effort) + '</span>' : '<span style="color:var(--ink-3)">—</span>') + '</td>' +
     '<td class="efs" style="white-space:normal">' + effs + '</td>' +
@@ -159,9 +162,14 @@ function renderModels() {
   const tb = $('mdBody');
   const list = mdSortList(mdAll.filter(m => mdMatch(m)));
   if (!list.length) {
-    tb.innerHTML = '<tr><td colspan="7"><div class="empty">没有符合当前筛选条件的模型</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="8"><div class="empty">没有符合当前筛选条件的模型</div></td></tr>';
+    renderPagination($('mdPager'), 1, 1, 0, () => {});
   } else {
-    tb.innerHTML = list.map(m => mdRowHtml(m, mdProbeOf(m.id))).join('');
+    const totalPages = Math.max(1, Math.ceil(list.length / mdPageSize));
+    if (mdPage > totalPages) mdPage = totalPages;
+    const paged = list.slice((mdPage - 1) * mdPageSize, mdPage * mdPageSize);
+    tb.innerHTML = paged.map(m => mdRowHtml(m, mdProbeOf(m.id))).join('');
+    renderPagination($('mdPager'), mdPage, totalPages, list.length, p => { mdPage = p; renderModels(); });
   }
   const filtered = list.length !== mdAll.length;
   $('mdCount').textContent = !mdAll.length ? ''
@@ -172,6 +180,7 @@ function renderModels() {
 
 function resetModelFilter() {
   mdFilter = { q: '', realm: '', cap: '', effort: '', promo: '', sort: 'default' };
+  mdPage = 1;
   $('mdQ').value = ''; $('mdRealm').value = ''; $('mdCap').value = '';
   $('mdEffort').value = ''; $('mdPromo').value = ''; $('mdSort').value = 'default';
   renderModels();
@@ -181,12 +190,12 @@ function resetModelFilter() {
 let mdQTimer = null;
 $('mdQ').oninput = () => {
   clearTimeout(mdQTimer);
-  mdQTimer = setTimeout(() => { mdFilter.q = $('mdQ').value.trim(); renderModels(); }, 120);
+  mdQTimer = setTimeout(() => { mdFilter.q = $('mdQ').value.trim(); mdPage = 1; renderModels(); }, 120);
 };
 for (const [id, key] of [['mdRealm', 'realm'], ['mdCap', 'cap'], ['mdEffort', 'effort'], ['mdPromo', 'promo'], ['mdSort', 'sort']]) {
   const el = $(id);
   if (!el) continue;
-  el.onchange = () => { mdFilter[key] = el.value; renderModels(); };
+  el.onchange = () => { mdFilter[key] = el.value; mdPage = 1; renderModels(); };
 }
 $('mdReset').onclick = resetModelFilter;
 $('btnModels').onclick = loadModels;

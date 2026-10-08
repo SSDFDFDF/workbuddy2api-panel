@@ -165,113 +165,67 @@ function summarizeCreditDays(list, now) {
 }
 
 
+let pkPage = 1, pkPageSize = 20;
+
 function renderPackages(d, detailLimit) {
   const list = (d.accounts || []);
-  const now = Date.now();
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+
+  if ($('pkSummary')) $('pkSummary').innerHTML = '';
+  if ($('pkDetail')) $('pkDetail').innerHTML = '';
+
+  const tb = $('pkTableBody');
+  if (!tb) return;
+
   if (!list.length) {
-    $('pkSummary').innerHTML = '<div class="empty">没有账号</div>';
+    tb.innerHTML = '<tr><td colspan="8"><div class="empty">没有账号数据</div></td></tr>';
+    renderPagination($('pkPager'), 1, 1, 0, () => {});
+    $('pkNote').textContent = '0 个账号';
     return;
   }
 
-  // 包名 → 稳定色号（跨账号一致，方便肉眼对齐）
   const names = [];
   for (const a of list) for (const s of pkBySource(a.packages || [])) {
     if (!names.includes(s.key)) names.push(s.key);
   }
-  names.sort((x, y) => {
-    const sz = n => Math.max(...list.map(a => {
-      const f = pkBySource(a.packages || []).find(s => s.key === n);
-      return f ? f.size : 0;
-    }));
-    return sz(y) - sz(x);
-  });
   const colorOf = n => pkColor(names.indexOf(n));
-  // 键 → 展示名，供卡片与明细表共用（同一来源必然同色同名）。
-  const labelOf = {};
-  for (const a of list) for (const s of pkBySource(a.packages || [])) labelOf[s.key] = s;
-
-  const maxRemain = Math.max(1, ...list.map(a => Number(a.remain || 0)));
-
-  $('pkSummary').innerHTML = list.map(a => {
-    if (a.error) {
-      return '<div class="pk-card"><div class="who"><span class="nm">' +
-        esc((a.nickname || a.uid.slice(0, 8))) + '</span>' +
-        '<span class="realm">' + esc(a.realm || '') + '</span></div>' +
-        '<div class="err">查询失败：' + esc(a.error) + '</div></div>';
-    }
-    const srcs = pkBySource(a.packages || []);
-    const total = Math.max(1, Number(a.size || 0));
-    const legend = srcs.map(s =>
-      '<span><i style="background:' + colorOf(s.key) + '"></i>' +
-      esc(s.name.replace(/^CodeBuddy/, '')) + ' x' + s.n + ' · ' + fmtTok(s.size) +
-      (s.minCreated ? ' · 首发 ' + esc(s.minCreated.slice(5)) : '') + '</span>'
-    ).join('');
-    // 到期信息不在这里画（同一件事曾有三处展示：本卡到期条、到期分布图、首页提醒卡）。
-    // 现在只在首页「积分到期提醒」一处，本页只讲构成。
-    return '<div class="pk-card">' +
-      '<div class="who"><span class="nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span>' +
-      '<span class="realm">' + esc(a.realm || '') + '</span></div>' +
-      '<div class="big">' + fmtTok(a.remain) + '</div>' +
-      '<div class="sub">共 ' + fmtTok(a.size) + ' · ' + (a.packages || []).length +
-      ' 个包 · 占最高 ' + (Number(a.remain || 0) / maxRemain * 100).toFixed(0) + '%</div>' +
-      segBar(srcs.map(x => ({ value: x.size, color: colorOf(x.key),
-        title: x.name + ' ' + fmtTok(x.size) })), { cls: 'mixbar' }) +
-      '<div class="pk-legend">' + legend + '</div>' +
-      '</div>';
-  }).join('');
 
   $('pkNote').textContent = list.length + ' 个账号 · 实时查询上游';
 
-  // 逐包明细：每个账号一个表，排序规则由视图顶部的选择器决定（默认到期近的在前）
-  $('pkDetail').innerHTML = list.map(a => {
-    if (a.error) return '';
-    const groups = pkDetailGroups(a.packages || [], detailLimit);
-    const rowOf = (p, rowGroup) => {
-      const k = (p.package_code || '') + '|' + (p.name || '(未命名)');
-      const sub = (p.sub_product_code || '').replace(/^sp_tcaca_codebuddyide_?/, '') ||
-                  (p.package_code || '').replace(/^TCACA_/, '');
-      return '<tr' + (rowGroup ? ' class="pk-hidden-row pk-' + rowGroup +
-        '-row" data-pk-row="' + rowGroup + '" hidden' : '') +
-        '><td class="mark" aria-hidden="true"><i style="background:' +
-        colorOf(k) + '"></i></td>' +
-      '<td>' + esc(p.name || '(未命名)') +
-        (sub ? '<div class="note">' + esc(sub) + '</div>' : '') + '</td>' +
-      '<td class="num">' + fmtTok(p.size) + '</td>' +
-      '<td class="num">' + fmtTok(p.remain) + '</td>' +
-      '<td class="num">' + fmtTok(p.used) + '</td>' +
-      '<td class="num">' + esc((p.created_at || '').slice(0, 16).replace('T', ' ') || '—') + '</td>' +
-      '<td class="num">' + esc((p.end_time || '').slice(0, 10) || '—') + '</td>' +
-      '</tr>';
-    };
-    const groupSummary = (group, label, count, size, remain) =>
-      '<tr class="pk-group-summary"><td colspan="7"><button type="button" class="pk-group-toggle"' +
-      ' data-pk-group="' + group + '" data-count="' + count + '" data-size="' + size +
-      '" data-remain="' + remain + '" aria-expanded="false">' + label + '，展开</button></td></tr>';
-    const rows = groups.visible.map(p => rowOf(p, '')).join('');
-    const restSummary = groups.rest.length
-      ? groupSummary('rest', '其余未用完 ' + groups.rest.length + ' 个包（面额合计 ' +
-          fmtTok(groups.restSize) + ' · 剩余 ' + fmtTok(groups.restRemain) + '）',
-          groups.rest.length, groups.restSize, groups.restRemain) +
-        groups.rest.map(p => rowOf(p, 'rest')).join('')
-      : '';
-    const usedSummary = groups.used.length
-      ? groupSummary('used', '已用完 ' + groups.used.length + ' 个包（面额合计 ' +
-          fmtTok(groups.usedSize) + '）', groups.used.length, groups.usedSize, 0) +
-        groups.used.map(p => rowOf(p, 'used')).join('')
-      : '';
-    return '<div class="box"><header><h3>' +
-      esc(a.nickname || a.uid.slice(0, 8)) + ' · ' + esc(a.realm || '') +
-      '</h3><span class="grow"></span><span class="note">余额 ' + fmtTok(a.remain) +
-      ' / 总额 ' + fmtTok(a.size) + ' · 可用 ' + (groups.visible.length + groups.rest.length) + ' 个包' +
-      (groups.used.length ? ' / 已用完 ' + groups.used.length + ' 个' : '') +
-      ' · 默认展示最早到期 ' + pkDetailLimitValue(detailLimit) + ' 条（' +
-      esc(PK_SORT_LABELS[pkSortMode] || '') + '）</span>' +
-      '</header><div class="tbl-wrap"><table class="acc"><thead><tr>' +
-      '<th class="mark" aria-hidden="true"></th><th>包名 / 来源</th>' +
-      '<th class="num">面额</th><th class="num">剩余</th><th class="num">已用</th>' +
-      '<th class="num">发放</th><th class="num">到期</th>' +
-      '</tr></thead><tbody>' + rows + restSummary + usedSummary + '</tbody></table></div></div>';
+  const totalPages = Math.max(1, Math.ceil(list.length / pkPageSize));
+  if (pkPage > totalPages) pkPage = totalPages;
+  const paged = list.slice((pkPage - 1) * pkPageSize, pkPage * pkPageSize);
+
+  tb.innerHTML = paged.map(a => {
+    if (a.error) {
+      return '<tr><td class="mark" aria-hidden="true"><i style="background:var(--bad)"></i></td>' +
+        '<td class="who"><div class="nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</div><div class="id">' + esc(a.uid.slice(0, 8)) + '</div></td>' +
+        '<td><span class="realm-tag">' + esc(a.realm || '') + '</span></td>' +
+        '<td colspan="5" style="color:var(--bad)">查询失败：' + esc(a.error) + '</td></tr>';
+    }
+    const bs = expBatches(a.packages || []).filter(b => expDaysLeft(b.date, today) >= 0);
+    const earliest = bs.length ? bs[0].date : '—';
+    const srcs = pkBySource(a.packages || []);
+    const availablePks = (a.packages || []).filter(p => Number(p.remain) > 0).length;
+    const bar = segBar(srcs.map(x => ({
+      value: x.size, color: colorOf(x.key),
+      title: x.name + ' ' + fmtTok(x.size),
+    })));
+
+    return '<tr><td class="mark" aria-hidden="true"><i style="background:var(--ok)"></i></td>' +
+      '<td class="who"><div class="nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</div><div class="id">' + esc(a.uid.slice(0, 8)) + '</div></td>' +
+      '<td><span class="realm-tag">' + esc(a.realm || '') + '</span></td>' +
+      '<td class="num"><b>' + fmtTok(a.remain) + '</b></td>' +
+      '<td class="num">' + fmtTok(a.size) + '</td>' +
+      '<td class="num">' + availablePks + ' / ' + (a.packages || []).length + '</td>' +
+      '<td class="num">' + esc(earliest) + '</td>' +
+      '<td>' + bar + '</td></tr>';
   }).join('');
+
+  renderPagination($('pkPager'), pkPage, totalPages, list.length, p => {
+    pkPage = p;
+    renderPackages(lastPackages, detailLimit);
+  });
 }
 
 if ($('pkDetail')) $('pkDetail').addEventListener('click', ev => {
@@ -397,38 +351,25 @@ function renderExpiry(d) {
     return x.key < y.key ? -1 : 1;
   });
   const rows = keyed.map(({ a }) => {
+    const name = esc(a.nickname || a.uid.slice(0, 8));
     if (a.error) {
-      return '<div class="exp-row"><span class="exp-dot" style="background:var(--ink-3)"></span>' +
-        '<span class="exp-nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span>' +
+      return '<div class="exp-row"><span class="exp-dot" style="background:var(--bad)"></span>' +
+        '<span class="exp-nm">' + name + '</span>' +
         '<span class="exp-main err">查询失败：' + esc(a.error) + '</span></div>';
     }
     const bs = expBatches(a.packages).filter(b => expDaysLeft(b.date, today) >= 0);
     if (!bs.length) {
-      return '<div class="exp-row"><span class="exp-dot" style="background:var(--ok)"></span>' +
-        '<span class="exp-nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span>' +
-        '<span class="exp-main">7 天内无到期积分</span></div>';
+      return '<div class="exp-row"><span class="exp-dot" style="background:var(--line)"></span>' +
+        '<span class="exp-nm">' + name + '</span>' +
+        '<span class="exp-main" style="color:var(--ink-3)">近期无到期包</span></div>';
     }
     const first = bs[0];
     const days = expDaysLeft(first.date, today);
-    const daily = Math.ceil(first.remain / Math.max(1, days));
-    const week = bs.filter(b => expDaysLeft(b.date, today) <= 7)
-      .reduce((s, b) => s + b.remain, 0);
-    // 危险度：≤3 天红（不抓紧就真没了）、≤7 天琥珀、更远绿。
-    // 上游扣包是 FEFO（按失效时刻升序，实测两号口径一致）：这些快过期批次正是
-    // 被消耗得最快的，日均需耗给的是「哪怕单靠这个账号的自然流量也能对齐」的参照。
     const cls = days <= 3 ? 'var(--bad)' : days <= 7 ? 'var(--warn)' : 'var(--ok)';
-    const dayWord = days === 0 ? '今天到期' : days === 1 ? '明天到期' : days + ' 天后到期';
-    const more = bs.length > 4 ? '　等 ' + bs.length + ' 批' : '';
-    const rest = bs.slice(1, 4).map(b =>
-      '随后 ' + esc(b.date.slice(5)) + ' · ' + fmtTok(b.remain)).join('　') + more;
+    const dayWord = days === 0 ? '今天到期' : days === 1 ? '明天到期' : days + ' 天后';
     return '<div class="exp-row"><span class="exp-dot" style="background:' + cls + '"></span>' +
-      '<span class="exp-nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span>' +
-      '<span class="exp-main">最近到期 <b>' + esc(first.date) + '</b>（' + dayWord +
-      '）· 该批 <b>' + fmtTok(first.remain) + '</b> 积分 · 到期前日均需耗 ≥<b>' +
-      fmtTok(daily) + '</b>' +
-      (week > first.remain ? ' · 7 天内合计 ' + fmtTok(week) : '') +
-      (rest ? '<div class="note">' + rest + '</div>' : '') +
-      '</span></div>';
+      '<span class="exp-nm">' + name + '</span>' +
+      '<span class="exp-main">最近 <b>' + esc(first.date) + '</b>（' + dayWord + '）· <b>' + fmtTok(first.remain) + '</b> 积分</span></div>';
   }).join('');
   // 归集条：全账号按紧迫度分桶（≤3 天 / 4-7 天 / 更远 / 无到期），一眼看出"要抓紧的有多少"。
   // 这是到期信息唯一的图表视图（原「积分到期分布」图与账号卡上的到期条均已并到这里）。
@@ -453,7 +394,7 @@ function renderExpiry(d) {
   const segs = buckets.filter(b => b.value > 0)
     .map(b => ({ value: b.value, color: b.color, title: b.title + ' · ' + fmtTok(b.value) + ' 积分' }));
   $('expList').innerHTML = segBar(segs, { cls: 'exp-sum', aria: '全部账号的积分到期紧迫度' }) +
-    (rows || '<div class="empty">没有账号</div>');
+    '<div class="exp-rows">' + (rows || '<div class="empty">没有账号</div>') + '</div>';
   // 数据新鲜度透明化：走缓存时标注年龄，免得把旧数据误当实时。
   const ageMin = lastPackages ? Math.floor((Date.now() - lastPackagesAt) / 60000) : 0;
   $('expNote').textContent = (lastPackagesAt && ageMin > 0)

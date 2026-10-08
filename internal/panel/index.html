@@ -243,70 +243,91 @@
         </div>
         <div class="tbl-wrap">
         <table class="acc md">
-          <thead><tr><th class="mark" aria-hidden="true"></th><th>模型</th><th>积分倍率</th><th>默认档</th><th>支持的思考档位</th><th>上下文长度</th><th>最大输出</th></tr></thead>
+          <thead><tr><th class="mark" aria-hidden="true"></th><th>模型</th><th>能力</th><th>积分倍率</th><th>默认档</th><th>支持的思考档位</th><th>上下文长度</th><th>最大输出</th></tr></thead>
           <tbody id="mdBody"></tbody>
         </table>
         </div>
+        <div class="pg-bar" id="mdPager"></div>
       </div>
     </section>
 
     <!-- 积分构成 -->
     <section class="view" id="view-packages" hidden>
-      <!-- 到期信息只在首页（账号池的「积分到期提醒」卡）展示，本页只讲「构成」。 -->
       <div class="box">
         <header>
-          <h3>账号对比</h3>
+          <h3>积分构成与明细</h3>
           <span class="grow"></span>
           <span class="note" id="pkNote">—</span>
-          <select id="pkSort" class="xs" title="逐包明细的排序规则">
+          <select id="pkSort" class="xs" title="排序规则">
             <option value="end_asc" selected>按到期时间</option>
             <option value="size_desc">按面额大小</option>
           </select>
           <button class="xs" id="btnPk">刷新</button>
         </header>
-        <div class="pad"><div class="pk-grid" id="pkSummary"></div></div>
+        <div class="tbl-wrap">
+          <table class="acc zebra">
+            <thead><tr>
+              <th class="mark" aria-hidden="true"></th>
+              <th>账号</th><th>域</th>
+              <th class="num">剩余积分</th><th class="num">总额度</th>
+              <th class="num">可用包数</th><th>最近到期</th><th>主要构成来源</th>
+            </tr></thead>
+            <tbody id="pkTableBody"></tbody>
+          </table>
+        </div>
+        <div class="pg-bar" id="pkPager"></div>
       </div>
-      <div id="pkDetail"></div>
+      <div id="pkSummary" hidden></div>
+      <div id="pkDetail" hidden></div>
     </section>
 
     <!-- 用量 -->
     <section class="view" id="view-usage" hidden>
       <div class="box">
         <header>
-          <h3>用量总览</h3>
+          <h3>用量与积分总览</h3>
           <span class="grow"></span>
           <span class="note" id="usNote">—</span>
+          <span class="note" id="usCreditNote">—</span>
           <span class="trange" id="usRange"></span>
           <button class="xs" id="btnUsage">刷新</button>
         </header>
         <div class="kpis" id="usStats"></div>
-        <div class="pad">
-          <div class="uschart">
-            <div class="uschart-hd">
-              <span class="lb">Token 时序</span>
-              <span class="note" id="usChartNote">—</span>
-              <span class="grow"></span>
-              <span class="legend">
-                <i class="sw sw-p"></i>prompt<i class="sw sw-c"></i>completion
-                <span class="sep"></span><i class="sw sw-t"></i>均值
-              </span>
-            </div>
-            <div id="usChart" class="uschart-body"></div>
+        <div class="kpis" id="usCreditStats" style="padding-top:0;"></div>
+        <div class="uschart">
+          <div class="uschart-hd">
+            <span class="lb">Token 时序</span>
+            <span class="note" id="usChartNote">—</span>
+            <span class="grow"></span>
+            <span class="legend">
+              <span class="legend-item"><i class="sw sw-p"></i>prompt</span>
+              <span class="legend-item"><i class="sw sw-c"></i>completion</span>
+              <span class="legend-item"><i class="sw sw-t"></i>均值</span>
+            </span>
           </div>
+          <div id="usChart" class="uschart-body"></div>
         </div>
       </div>
 
       <div class="box">
         <header>
           <h3>用量明细</h3>
+          <span class="vtabs" id="usTableSwitch">
+            <button type="button" class="on" id="btnShowDimTable">Token 明细</button>
+            <button type="button" id="btnShowCreditTable">积分扣除</button>
+          </span>
+          <span class="grow"></span>
           <span class="vtabs" id="usDimTabs">
             <button data-dim="account" class="on">按账号</button>
             <button data-dim="model">按模型</button>
             <button data-dim="realm">按域</button>
           </span>
-          <span class="grow"></span>
+          <span class="vtabs" id="usCreditTabs" hidden>
+            <button data-dim="account" class="on">按账号</button>
+            <button data-dim="model">按模型</button>
+          </span>
           <span class="note" id="usDimNote">—</span>
-          <label class="sel-note">排序
+          <label class="sel-note" id="usSortWrap">排序
             <select id="usSort">
               <option value="total">合计 Token</option>
               <option value="requests">请求数</option>
@@ -315,26 +336,13 @@
             </select>
           </label>
         </header>
-        <div class="tbl-wrap">
+        <div class="tbl-wrap" id="wrapUsDim">
           <table class="acc zebra">
             <thead id="usDimHead"></thead>
             <tbody id="usDimBody"></tbody>
           </table>
         </div>
-      </div>
-
-      <div class="box">
-        <header>
-          <h3>积分扣除历史</h3>
-          <span class="vtabs" id="usCreditTabs">
-            <button data-dim="account" class="on">按账号</button>
-            <button data-dim="model">按模型</button>
-          </span>
-          <span class="grow"></span>
-          <span class="note" id="usCreditNote">—</span>
-        </header>
-        <div class="kpis" id="usCreditStats"></div>
-        <div class="tbl-wrap">
+        <div class="tbl-wrap" id="wrapUsCredit" hidden>
           <table class="acc zebra">
             <thead id="usCreditHead"></thead>
             <tbody id="usCreditBody"></tbody>

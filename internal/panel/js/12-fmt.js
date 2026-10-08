@@ -139,3 +139,22 @@ function usRow(name, sub, a, mid, withPerf) {
       : '') +
     '</tr>';
 }
+
+/* renderPagination 通用轻量翻页条。 */
+function renderPagination(el, page, totalPages, totalCount, onPage) {
+  if (!el) return;
+  if (totalPages <= 1) { el.innerHTML = ''; el.hidden = true; return; }
+  el.hidden = false;
+  el.innerHTML =
+    '<div class="pg-info">共 ' + totalCount + ' 项 · 第 ' + page + ' / ' + totalPages + ' 页</div>' +
+    '<div class="pg-acts">' +
+    '<button type="button" class="xs" data-pg="prev"' + (page <= 1 ? ' disabled' : '') + '>上一页</button>' +
+    '<button type="button" class="xs" data-pg="next"' + (page >= totalPages ? ' disabled' : '') + '>下一页</button>' +
+    '</div>';
+  el.onclick = ev => {
+    const btn = ev.target.closest('button[data-pg]');
+    if (!btn || btn.disabled) return;
+    if (btn.dataset.pg === 'prev' && page > 1) onPage(page - 1);
+    else if (btn.dataset.pg === 'next' && page < totalPages) onPage(page + 1);
+  };
+}
