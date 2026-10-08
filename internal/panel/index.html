@@ -165,14 +165,76 @@ button.xs { padding: 3.5px 9px; font-size: 12.5px; border-radius: 6px; white-spa
    header 里若不收窄会把同行 note 挤到换行——收成内容宽并压小外观，与 button.xs 同款。 */
 select.xs { width: auto; padding: 3.5px 9px; font-size: 12.5px; border-radius: 6px; }
 button.icon { padding: 7px 9px; }
-input, select {
+input, select, textarea {
   font: inherit; color: var(--ink); background: var(--surface-2);
   border: 1px solid var(--line); border-radius: 7px; padding: 7px 11px; width: 100%;
 }
-input:focus, select:focus { outline: none; border-color: var(--accent); }
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
 input.invalid { border-color: var(--bad); background: var(--bad-soft); }
 input.invalid:focus { border-color: var(--bad); }
 input[type=checkbox] { width: auto; accent-color: var(--accent); }
+/* textarea 用于内联提示词正文：等宽 + 可调高度，长文能看清行结构。 */
+textarea { font-family: var(--mono); font-size: 12.5px; line-height: 1.55; resize: vertical; min-height: 90px; }
+/* .prev-out 预览结果：带边框的只读代码块，多行不撑破卡片。 */
+.prev-out {
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px;
+  padding: 10px 12px; font-family: var(--mono); font-size: 12px; line-height: 1.6;
+  color: var(--ink-2); white-space: pre-wrap; word-break: break-word;
+  max-height: 340px; overflow: auto; margin: 0 0 12px;
+}
+.prev-head { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; font-family: var(--sans); margin-bottom: 8px; }
+.prev-card { margin-bottom: 10px; }
+.prev-card > .t { font-family: var(--sans); font-size: 12.5px; color: var(--ink); margin-bottom: 6px; }
+
+/* ============ 提示词 / 指纹改写：分段式编辑区 ============
+   这两组字段共 12+ 个，平铺成"一墙输入框"很难读。用编号小节（.grp）
+   把"组合位置 / 素材 / 分域覆盖"分开，每节自带一句"这节在做什么"。 */
+.grp { border: 1px solid var(--line-soft); border-radius: 9px; padding: 13px 15px 3px; margin-bottom: 14px; }
+.grp > .gh { display: flex; align-items: center; gap: 9px; margin-bottom: 11px; }
+.grp > .gh .n {
+  flex: none; width: 19px; height: 19px; border-radius: 50%; background: var(--accent-soft);
+  color: var(--accent); font-size: 11.5px; font-weight: 600; line-height: 19px; text-align: center;
+  font-family: var(--mono);
+}
+.grp > .gh .t { font-size: 13px; font-weight: 600; }
+.grp > .gh .d { font-size: 11.5px; color: var(--ink-3); }
+.grp > .gh .grow { flex: 1; }
+
+/* .modemap：四种组合位置的实时示意图。
+   用等宽字体 + 色块把"网关提示词落在哪"画出来，比读选项文案快得多。 */
+.modemap {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  padding: 9px 11px; margin-bottom: 12px; border-radius: 7px;
+  background: var(--surface-2); border: 1px solid var(--line-soft);
+  font-family: var(--mono); font-size: 11.5px;
+}
+.modemap .seg { padding: 3px 8px; border-radius: 5px; white-space: nowrap; border: 1px solid transparent; }
+.modemap .seg.gw { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-soft); }
+.modemap .seg.cl { background: var(--raise); color: var(--ink-3); }
+.modemap .seg.usr { background: transparent; color: var(--ink-3); border-style: dashed; border-color: var(--line); }
+.modemap .seg.dropped { text-decoration: line-through; opacity: .55; }
+.modemap .arrow { color: var(--ink-3); }
+.modemap .cap { font-family: var(--sans); color: var(--ink-3); font-size: 11.5px; margin-left: auto; }
+
+/* .legend：规则写法小抄（色块 + 说明） */
+.legend { display: flex; flex-wrap: wrap; gap: 5px 14px; margin: 7px 0 4px; font-size: 11.5px; color: var(--ink-3); }
+.legend > span { display: inline-flex; align-items: center; gap: 5px; }
+.legend code { background: var(--surface-2); border: 1px solid var(--line-soft); border-radius: 4px; padding: 1px 5px; font-size: 11px; color: var(--ink-2); }
+
+/* .warnbox："会改用户内容"这类必须看到但不想搞成错误色的提示 */
+.warnbox {
+  display: flex; gap: 9px; align-items: flex-start; padding: 9px 11px; margin: 8px 0 12px;
+  border-radius: 7px; background: var(--warn-soft); border: 1px solid var(--warn-soft);
+  font-size: 11.5px; color: var(--ink-2); line-height: 1.55;
+}
+.warnbox .ic { flex: none; color: var(--warn); font-weight: 700; }
+
+/* .rulestat：规则行数统计（写在 textarea 右上） */
+.rules-head { display: flex; align-items: baseline; gap: 8px; }
+.rules-head .grow { flex: 1; }
+.rules-head .n { font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+/* 规则编辑区停用时只降不透明度，不禁用——允许"先写规则再开开关" */
+#fpRulesWrap.off { opacity: .5; }
 label.fld { display: block; margin-bottom: 14px; }
 label.fld > .lb { display: block; font-size: 12.5px; color: var(--ink-2); margin-bottom: 5px; }
 label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); margin-top: 4px; }
@@ -1104,20 +1166,115 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                 <span class="hint">仅正向代理使用；按部署实际值选择，不自动切换</span></label>
             </div>
             <div class="hr"></div>
-            <div class="grid2">
-              <label class="fld"><span class="lb">系统提示词模式</span>
-                <select name="prompt_mode">
-                  <option value="none">none — 原样保留客户端指令（默认）</option>
-                  <option value="append">append — 显式追加网关提示词</option>
-                  <option value="replace">replace — 显式替换 system/developer</option>
+            <div class="grp">
+              <div class="gh"><span class="n">1</span><span class="t">怎么组合</span>
+                <span class="d">决定网关提示词与客户端 system 谁在前、谁留</span></div>
+              <div class="modemap" id="modeMap" aria-live="polite"></div>
+              <label class="fld"><span class="lb">组合位置</span>
+                <select name="prompt_mode" id="promptMode">
+                  <option value="none">none — 不改写客户端指令（默认）</option>
+                  <option value="replace">replace — 只留网关提示词（指纹面最小）</option>
+                  <option value="after">after — 网关在前 + 客户端在后（后组合）</option>
+                  <option value="append">append — 客户端在前 + 网关在后</option>
                 </select>
-                <span class="hint">需重启</span></label>
-              <label class="fld"><span class="lb">提示词文件路径</span>
-                <input name="prompt_file" placeholder="留空 = 内置默认提示词">
-                <span class="hint">需重启</span></label>
+                <span class="hint">需重启；下方「分域覆盖」可给 CN / Global 各设一套</span></label>
+            </div>
+
+            <div class="grp">
+              <div class="gh"><span class="n">2</span><span class="t">用什么内容</span>
+                <span class="d">三者优先级：内联正文 &gt; 文件 &gt; 预设</span></div>
+              <div class="grid2">
+                <label class="fld"><span class="lb">内置预设</span>
+                  <select name="prompt_preset" id="promptPreset">
+                    <option value="">default — 内置默认</option>
+                  </select>
+                  <span class="hint" id="promptPresetHint">预设列表由后端提供</span></label>
+                <label class="fld"><span class="lb">提示词文件（可选）</span>
+                  <input name="prompt_file" placeholder="留空 = 用预设">
+                  <span class="hint">路径不可读会在启动时报错</span></label>
+              </div>
+              <label class="fld"><span class="lb">内联正文（可选，直接写进配置）</span>
+                <textarea name="prompt_text" id="promptText" rows="5" placeholder="留空 = 用文件/预设。填写后本项优先生效，无需额外落盘文件。"></textarea>
+                <span class="hint">填写即覆盖上方预设与文件</span></label>
+            </div>
+
+            <div class="grp">
+              <div class="gh"><span class="n">3</span><span class="t">按域覆盖（可选）</span>
+                <span class="d">只给某一类账号用不同提示词</span>
+                <span class="grow"></span>
+                <span class="d">留空 = 继承第 1 / 2 步</span></div>
+              <div class="grid2">
+                <label class="fld"><span class="lb">CN 账号 · 组合位置</span>
+                  <select name="prompt_cn_mode">
+                    <option value="">继承顶层</option>
+                    <option value="none">none</option>
+                    <option value="replace">replace</option>
+                    <option value="after">after</option>
+                    <option value="append">append</option>
+                  </select></label>
+                <label class="fld"><span class="lb">Global 账号 · 组合位置</span>
+                  <select name="prompt_global_mode">
+                    <option value="">继承顶层</option>
+                    <option value="none">none</option>
+                    <option value="replace">replace</option>
+                    <option value="after">after</option>
+                    <option value="append">append</option>
+                  </select></label>
+              </div>
+              <div class="grid2">
+                <label class="fld"><span class="lb">CN 账号 · 预设</span>
+                  <select name="prompt_cn_preset" id="promptCnPreset">
+                    <option value="">继承顶层</option>
+                  </select></label>
+                <label class="fld"><span class="lb">Global 账号 · 预设</span>
+                  <select name="prompt_global_preset" id="promptGlobalPreset">
+                    <option value="">继承顶层</option>
+                  </select></label>
+              </div>
+              <div class="grid2">
+                <label class="fld"><span class="lb">CN 账号 · 内联正文</span>
+                  <input name="prompt_cn_text" id="promptCnText" placeholder="留空 = 用顶层素材"></label>
+                <label class="fld"><span class="lb">Global 账号 · 内联正文</span>
+                  <input name="prompt_global_text" id="promptGlobalText" placeholder="留空 = 用顶层素材"></label>
+              </div>
+              <div class="hint" style="margin-bottom:12px">素材规则：任一域显式设了预设/文件/正文，该域素材就完全由自己的设置决定（不半继承）；组合位置则逐项回落顶层。</div>
+            </div>
+
+            <div class="grp">
+              <div class="gh"><span class="n">4</span><span class="t">预览生效正文</span>
+                <span class="grow"></span>
+                <button type="button" id="btnPromptPreview">立即预览</button></div>
+              <div class="hint" id="promptPreviewHint" style="margin-bottom:10px">保存前先看 CN / Global 实际会发出去的内容、来源与字数。</div>
+              <div class="hint" id="promptPreviewOut" hidden></div>
+            </div>
+
+            <div class="hr"></div>
+            <div class="grp">
+              <div class="gh"><span class="n">5</span><span class="t">指纹改写</span>
+                <span class="d">清掉藏在 user / tool / 推理消息里的已知指纹串</span></div>
+              <div class="switch"><span class="lb">启用指纹改写</span>
+                <input type="checkbox" name="fingerprint_rewrite" id="fpRewrite"></div>
+              <div class="hint">上游按<b>逐字</b>拒绝的已知串（Claude Code / Codex 身份句、<code>x-anthropic-billing-header</code> 键值、裸 <code>11128</code> 等）
+                只出现在 system/developer 时，第 1 步的组合就能处理；但它藏在 user/assistant/tool 消息里时只能靠本项逐字改写。</div>
+              <div class="warnbox"><span class="ic">!</span>
+                <span><b>会修改用户可见内容</b>（如对话里的 <code>11128</code> 变成 <code>11-128</code>、命中的词句被替换）。
+                只用于绕过上游字面拒绝，不是内容治理。默认关闭；开关与规则都<b>即时生效，无需重启</b>。</span></div>
+              <div id="fpRulesWrap">
+                <div class="rules-head"><span class="lb" style="font-size:12.5px;color:var(--ink-2)">自定义规则</span>
+                  <span class="grow"></span><span class="n" id="fpRuleCount"></span></div>
+                <div class="legend">
+                  <span><code>词 =&gt; 新词</code>逐字替换</span>
+                  <span><code>/词 =&gt; 新词</code>忽略大小写</span>
+                  <span><code>!词</code>整段删除</span>
+                  <span><code>/!词</code>忽略大小写 + 删除</span>
+                  <span><code># …</code>注释</span>
+                </div>
+                <textarea name="fingerprint_rules_text" id="fpRules" rows="5" spellcheck="false"
+                  placeholder="内部代号X => 项目A&#10;/SecretSauce => sauce&#10;!x-legacy-tag"></textarea>
+                <span class="hint">一行一条，在内置指纹之上叠加；每行格式见上方小抄。非法规则保存时会被拒并点名第几行。</span>
+              </div>
             </div>
             <div class="hr"></div>
-            <div class="hint">不清洗消息、工具参数或推理文本；内容拒绝不会触发自动提示词替换。</div>
             <div class="switch"><span class="lb">会话粘性路由</span>
               <input type="checkbox" name="session_sticky_enabled"></div>
             <div class="hint" style="margin-top:10px">Upstash Redis 镜像、凭证目录与状态文件路径需手工编辑配置文件（判为重启项）。</div>

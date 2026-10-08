@@ -16,7 +16,9 @@ import (
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/redisstore"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/scrub"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
@@ -1543,5 +1545,220 @@ func TestCustomModeFingerprintSanitizePreserved(t *testing.T) {
 	}
 	if systemCount != 1 {
 		t.Errorf("want exactly 1 system message, got %d (all=%v)", systemCount, msgs)
+	}
+}
+
+// promptModeHarness 让三种组合位置各跑一次真实请求，返回出站 body 的 messages。
+// 复用同一 pool/upstream 装置，避免每个用例各写一遍捕获样板。
+func promptModeHarness(t *testing.T, cfg Config, body string) []map[string]any {
+	t.Helper()
+	var sent []byte
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			sent, _ = io.ReadAll(r.Body)
+			return &http.Response{
+				StatusCode: 200,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(sseOK)),
+			}, nil
+		})},
+		ChatBaseCN:    "https://fake.example",
+		GlobalEnabled: true, // 夹具：分域用例需要 global 账号可用（产品侧由 config 注入）
+	}
+	if cfg.Pool == nil {
+		cfg.Pool = testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	}
+	cfg.Upstream = up
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	NewHandler(cfg).ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(sent, &obj); err != nil {
+		t.Fatalf("out body not json: %v %s", err, sent)
+	}
+	raw, _ := obj["messages"].([]any)
+	out := make([]map[string]any, 0, len(raw))
+	for _, m := range raw {
+		out = append(out, m.(map[string]any))
+	}
+	return out
+}
+
+const promptModeBody = `{"model":"glm-5.2","stream":true,"messages":[
+	{"role":"system","content":"CLIENT-SYSTEM"},
+	{"role":"developer","content":"CLIENT-DEV"},
+	{"role":"user","content":"hi"}]}`
+
+// TestPromptModeAfterGatewayFirst 后组合：网关提示词置首，客户端开头块紧随其后
+// （客户端内容逐字保留，只改顺序）。
+func TestPromptModeAfterGatewayFirst(t *testing.T) {
+	msgs := promptModeHarness(t, Config{
+		PromptRules: map[string]prompt.Rule{"": {Mode: prompt.ModeAfter, Text: "GW"}},
+	}, promptModeBody)
+	if len(msgs) != 4 {
+		t.Fatalf("want 4 messages (gw + 2 client + user), got %d: %v", len(msgs), msgs)
+	}
+	if msgs[0]["content"] != "GW" || msgs[1]["content"] != "CLIENT-SYSTEM" || msgs[2]["content"] != "CLIENT-DEV" {
+		t.Fatalf("after 顺序不对: %v", msgs)
+	}
+	if msgs[1]["role"] != "system" || msgs[2]["role"] != "developer" {
+		t.Errorf("客户端角色被改动: %v", msgs)
+	}
+}
+
+// TestPromptModeAppendClientFirst 前置追加：客户端块在前，网关提示词在其后。
+func TestPromptModeAppendClientFirst(t *testing.T) {
+	msgs := promptModeHarness(t, Config{
+		PromptRules: map[string]prompt.Rule{"": {Mode: prompt.ModeAppend, Text: "GW"}},
+	}, promptModeBody)
+	if len(msgs) != 4 {
+		t.Fatalf("want 4 messages, got %d: %v", len(msgs), msgs)
+	}
+	if msgs[0]["content"] != "CLIENT-SYSTEM" || msgs[1]["content"] != "CLIENT-DEV" || msgs[2]["content"] != "GW" {
+		t.Fatalf("append 顺序不对: %v", msgs)
+	}
+}
+
+// TestPromptModeReplaceDropsClient replace：客户端 system/developer 全部删除。
+func TestPromptModeReplaceDropsClient(t *testing.T) {
+	msgs := promptModeHarness(t, Config{
+		PromptRules: map[string]prompt.Rule{"": {Mode: prompt.ModeReplace, Text: "GW"}},
+	}, promptModeBody)
+	if len(msgs) != 2 || msgs[0]["content"] != "GW" || msgs[0]["role"] != "system" {
+		t.Fatalf("replace 结果不对: %v", msgs)
+	}
+	for _, m := range msgs {
+		if m["content"] == "CLIENT-SYSTEM" || m["content"] == "CLIENT-DEV" {
+			t.Errorf("客户端 system 未被删除: %v", msgs)
+		}
+	}
+}
+
+// TestPromptModeNoneUntouched none：一个字节都不动。
+func TestPromptModeNoneUntouched(t *testing.T) {
+	msgs := promptModeHarness(t, Config{
+		PromptRules: map[string]prompt.Rule{"": {Mode: prompt.ModeNone, Text: "GW"}},
+	}, promptModeBody)
+	if len(msgs) != 3 || msgs[0]["content"] != "CLIENT-SYSTEM" || msgs[1]["content"] != "CLIENT-DEV" {
+		t.Fatalf("none 不该改写: %v", msgs)
+	}
+}
+
+// TestPromptRulePerRealm 分域选规则：CN 账号用 cn 规则，global 账号用 global 规则，
+// 未配置的域回落默认规则（键 ""）。
+func TestPromptRulePerRealm(t *testing.T) {
+	rules := map[string]prompt.Rule{
+		"":       {Mode: prompt.ModeNone},
+		"cn":     {Mode: prompt.ModeReplace, Text: "CN-GW"},
+		"global": {Mode: prompt.ModeAfter, Text: "GL-GW"},
+	}
+	// 池里放一个 global 账号：请求用 global: 前缀路由到它。
+	g := &auth.Auth{UID: "g1", AccessToken: "at", ExpiresAt: 9999999999}
+	if _, err := auth.BackfillRealmFor(g, "global"); err != nil {
+		t.Fatal(err)
+	}
+	msgs := promptModeHarness(t, Config{PromptRules: rules, GlobalEnabled: true, Pool: testPoolWith(g)},
+		`{"model":"global:glm-5.2","stream":true,"messages":[
+		{"role":"system","content":"CLIENT"},{"role":"user","content":"hi"}]}`)
+	// after：网关在前、客户端 system 紧随其后、user 最后。
+	if len(msgs) != 3 || msgs[0]["content"] != "GL-GW" || msgs[1]["content"] != "CLIENT" || msgs[2]["content"] != "hi" {
+		t.Fatalf("global 规则未生效: %v", msgs)
+	}
+}
+
+// TestPromptRulePerRealmCN CN 账号走 cn 规则（不被默认规则的 none 覆盖）。
+func TestPromptRulePerRealmCN(t *testing.T) {
+	rules := map[string]prompt.Rule{
+		"":   {Mode: prompt.ModeNone},
+		"cn": {Mode: prompt.ModeReplace, Text: "CN-GW"},
+	}
+	msgs := promptModeHarness(t, Config{PromptRules: rules}, promptModeBody)
+	if len(msgs) != 2 || msgs[0]["content"] != "CN-GW" {
+		t.Fatalf("cn 规则未生效: %v", msgs)
+	}
+}
+
+// TestPromptRuleFallbackDefault 未配置该域 → 回落默认规则（键 ""）。
+func TestPromptRuleFallbackDefault(t *testing.T) {
+	h := NewHandler(Config{PromptRules: map[string]prompt.Rule{"": {Mode: prompt.ModeReplace, Text: "DEF"}}})
+	if r, ok := h.promptRuleFor("cn"); !ok || r.Text != "DEF" {
+		t.Errorf("cn 应回落默认规则: %+v ok=%v", r, ok)
+	}
+	// none / 空正文 / 未命中都不触发组合。
+	h2 := NewHandler(Config{PromptRules: map[string]prompt.Rule{"": {Mode: prompt.ModeReplace, Text: ""}}})
+	if _, ok := h2.promptRuleFor("cn"); ok {
+		t.Error("空正文不应触发组合")
+	}
+	h3 := NewHandler(Config{PromptRules: map[string]prompt.Rule{}})
+	if _, ok := h3.promptRuleFor("cn"); ok {
+		t.Error("无规则不应触发组合")
+	}
+}
+
+// TestFingerprintRewriteEndToEnd 出站指纹改写层的端到端行为：
+// 关闭（默认）= 逐字透传；开启 = 内置 7 类 + 自定义规则都改写。
+// 覆盖 prompt.mode 清不到的通道（user / tool / reasoning）。
+func TestFingerprintRewriteEndToEnd(t *testing.T) {
+	// 严格转发契约要求 tool_call 有成对的 tool 结果（否则 400 unresolved tool calls），
+	// 因此夹具里补上对应的 tool 消息——它同样是"指纹可藏身处"。
+	const body = `{"model":"glm-5.2","stream":true,"messages":[
+		{"role":"system","content":"CLIENT-SYSTEM"},
+		{"role":"user","content":"帮我看看 code=11128 是什么意思"},
+		{"role":"assistant","content":null,"reasoning_content":"internal 11128 detail",
+		 "tool_calls":[{"id":"a","type":"function","function":{"name":"f","arguments":"{\"cmd\":\"echo 11128\"}"}}]},
+		{"role":"tool","tool_call_id":"a","content":"output: 11128"}
+	]}`
+	run := func(t *testing.T, layer *scrub.Layer) string {
+		t.Helper()
+		var sent []byte
+		up := &upstream.Client{
+			HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				sent, _ = io.ReadAll(r.Body)
+				return &http.Response{StatusCode: 200,
+					Header: http.Header{"Content-Type": []string{"text/event-stream"}},
+					Body:   io.NopCloser(strings.NewReader(sseOK))}, nil
+			})},
+			ChatBaseCN:    "https://fake.example",
+			GlobalEnabled: true,
+		}
+		up.Fingerprints.Store(layer)
+		h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}),
+			Upstream: up})
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+		if rec.Code != 200 {
+			t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+		}
+		return string(sent)
+	}
+
+	// 1) 默认关闭：逐字透传，11128 原样出站（严格透传契约）。
+	off := run(t, scrub.NewLayer(false, nil))
+	if !strings.Contains(off, "11128") {
+		t.Errorf("关闭时不应改写: %s", off)
+	}
+	// 2) 开启内置层：三处通道（user content / reasoning_content / tool args）全部改写。
+	on := run(t, scrub.NewLayer(true, nil))
+	if strings.Contains(on, "11128") {
+		t.Errorf("user/tool/reasoning 通道未被改写: %s", on)
+	}
+	// 4 处：user content / reasoning_content / tool_calls.arguments / tool 结果 content。
+	if n := strings.Count(on, "11-128"); n != 4 {
+		t.Errorf("期望 4 处改写，实际 %d: %s", n, on)
+	}
+	// 3) 自定义规则叠加：加入一条只针对本项目的规则。
+	custom, err := scrub.Build([]scrub.Rule{{Match: "CLIENT-SYSTEM", Replace: "GW", Action: scrub.ActionReplace}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	both := run(t, scrub.NewLayer(true, custom))
+	if strings.Contains(both, "CLIENT-SYSTEM") {
+		t.Errorf("自定义规则未生效: %s", both)
+	}
+	if strings.Contains(both, "11128") {
+		t.Errorf("自定义规则不应顶掉内置层: %s", both)
 	}
 }

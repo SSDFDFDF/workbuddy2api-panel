@@ -54,9 +54,14 @@ type Config struct {
 	// nil 时回退静态字段（测试与裸用场景）。
 	Live *livecfg.Holder
 
-	// PromptMode "custom"（网关用自有提示词替换 system）/ "passthrough"（透传）。
+	// PromptRules 各域提示词规则（键："" 默认、cn、global），键不存在时回落 ""。
+	// 由 config.PromptRules 传入（装配期构建、不可热改）。nil 时回落到下方
+	// PromptMode/PromptText 两个历史字段（测试与裸用路径）。
+	PromptRules map[string]prompt.Rule
+
+	// PromptMode 历史字段：无 PromptRules 时的单一规则模式（none/replace/append/after）。
 	PromptMode string
-	// PromptText custom 模式下注入的系统提示词文本（来自 config.PromptText）。
+	// PromptText 历史字段：PromptMode 对应的正文。
 	PromptText string
 
 	// GlobalEnabled global realm 路由开关（config global.enabled，缺省 true）。
@@ -103,6 +108,32 @@ func (h *Handler) realmResolver() *RealmResolver {
 	return &RealmResolver{Default: RealmDefaultCN}
 }
 
+// promptRuleFor 返回本次请求（指定 realm）生效的提示词规则。
+//
+// 查找顺序：精确 realm（cn/global）→ "" 默认规则。两者都不存在或规则为
+// none/正文空时 ok=false（调用方直接跳过组合，与历史 passthrough 行为一致）。
+func (h *Handler) promptRuleFor(realm string) (prompt.Rule, bool) {
+	if len(h.cfg.PromptRules) == 0 {
+		return prompt.Rule{}, false
+	}
+	r, ok := h.cfg.PromptRules[realm]
+	if !ok {
+		r, ok = h.cfg.PromptRules[""]
+	}
+	if !ok {
+		return prompt.Rule{}, false
+	}
+	switch r.Mode {
+	case prompt.ModeReplace, prompt.ModeAppend, prompt.ModeAfter:
+	default:
+		return prompt.Rule{}, false // none / 空 / 未知：不改写
+	}
+	if r.Text == "" {
+		return prompt.Rule{}, false
+	}
+	return r, true
+}
+
 // softCooldown 返回当前生效的软冷却基数（热改优先，<=0 回退默认）。
 func (h *Handler) softCooldown() time.Duration {
 	if d := h.loadLive().SoftCooldown; d > 0 {
@@ -146,7 +177,14 @@ func NewHandler(cfg Config) *Handler {
 		cfg.RefreshSkew = 10 * time.Minute
 	}
 	if cfg.PromptMode == "" {
-		cfg.PromptMode = "none"
+		cfg.PromptMode = prompt.ModeNone
+	}
+	// 兼容：只给了历史字段（PromptMode/PromptText）时合成单规则映射，
+	// 让热路径只有一个查表分支（测试与裸用路径零改动）。
+	if len(cfg.PromptRules) == 0 {
+		cfg.PromptRules = map[string]prompt.Rule{
+			"": {Mode: cfg.PromptMode, Text: cfg.PromptText},
+		}
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
@@ -706,18 +744,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 系统提示词改写（出站前、轮转前；每个请求一次）。
-	//   - custom：用自有提示词替换客户端 system/developer（从源头消灭 system 指纹误报）。
-	//   - append：开头连续 system/developer 块后插自有提示词，既有消息逐字不动
-	//     （客户端项目规范/工具约定与网关提示词并用，issue #129）。
-	//   - passthrough + 降级期：换 Degraded 中性提示词直达，不再先撞 400。
-	//   - passthrough / append 非降级期：透传客户端原始 system（append 则再插一条网关 system）。
-	// 降级裁决：append 在降级期退化为 replace（Rewrite(Degraded)）——append 带
-	// 指纹原文重试是确定性再撞墙，replace 是一次性最小抢救（issue #129 设计 §4）。
-	if h.cfg.PromptMode == "replace" && h.cfg.PromptText != "" {
-		body = prompt.Rewrite(body, h.cfg.PromptText)
-	} else if h.cfg.PromptMode == "append" && h.cfg.PromptText != "" {
-		body = prompt.Append(body, h.cfg.PromptText)
+	// 系统提示词组合（出站前、轮转前；每个请求一次）。
+	//
+	// mode（由 config 装配期解析，见 cmd/server/prompt_config.go）：
+	//   - none    ：不改写（客户端 system 逐字出站）；
+	//   - replace ：删全部 system/developer，只留网关提示词（指纹面最小）；
+	//   - append  ：客户端开头块之后插网关提示词（客户端在前）；
+	//   - after   ：网关提示词置首，客户端开头块紧随其后（后组合）。
+	//
+	// 规则按请求 realm 选（cn/global 各自一份，未配则回落默认规则）——
+	// 同一网关可对 CN 与 Global 账号发不同提示词。
+	if rule, ok := h.promptRuleFor(realm); ok {
+		body = prompt.Compose(body, rule.Text, rule.Mode)
 	}
 
 	// outbound model 名重写为 bareModel（D6）：realm 前缀是网关侧路由协议，
@@ -875,12 +913,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				kind = upstream.Classify(status, string(respBody))
 				uerr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
 			}
-			// 内容拦截误报（passthrough/append 模式首遇）：判定为 system 指纹误报，
-			// 触发降级到次日 00:00 CST，换 Degraded 中性提示词同请求内重试（append
-			// 降级重试同样退化为 replace——原文在场只会确定性再撞 400）。
-			// 第二次仍被拦（用户内容本身触发审核）→ 回内容防火墙错误（见下分支）。
-			// 内容问题非账号问题：applyErrorPolicy 不罚账号（见 ErrContentBlocked 分支）。
-
+			// 内容拦截（11128 等）：这是**内容终态**，不轮转、不罚号、不自动改写提示词。
+			//   - 不轮转：同一 body 换任何账号都撞同一审核；
+			//   - 不罚号：账号余额/session 健康，问题在请求内容（见 applyErrorPolicy 分支）；
+			//   - 不自动重试：自救路径是配置侧把 prompt.mode 改为 replace/after
+			//     （system/developer 来源的指纹），而不是网关偷偷替换用户的系统提示词。
 			if kind == upstream.ErrContentBlocked {
 				// 内容命中网关内容防火墙：立即回客户端，**不轮转**——换任何账号都会撞同一
 				// 审核，轮转纯属浪费时间。不罚账号（ErrContentBlocked 分支无冷却/熔断/NoteError）。

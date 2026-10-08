@@ -2,6 +2,7 @@ package panel
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -736,6 +737,13 @@ const cfgForm = { elements: {
   api_key: mk('secret'),
   user_agent: mk(''),
   prompt_file: mk(''),
+  prompt_text: mk(''),
+  prompt_cn_mode: mk('replace'),
+  prompt_cn_preset: mk('minimal'),
+  prompt_cn_text: mk('CN 覆盖'),
+  prompt_global_mode: mk(''),
+  prompt_global_preset: mk(''),
+  prompt_global_text: mk(''),
   checkin_hours: mk(''),
 }};
 const ctx = {
@@ -747,12 +755,17 @@ vm.createContext(ctx);
 vm.runInContext(src.slice(start, end) + '\nthis.collectConfig = collectConfig;', ctx);
 const out = ctx.collectConfig();
 const has = (o, k) => Object.prototype.hasOwnProperty.call(o || {}, k);
+const prof = (out.prompt || {}).profiles || {};
 process.stdout.write(JSON.stringify([
   has(out.upstream, 'user_agent'), (out.upstream || {}).user_agent,
   has(out.prompt, 'file'), (out.prompt || {}).file,
   has(out, 'listen'),
   has(out.schedule, 'checkin_hours'),
-  out.api_key
+  out.api_key,
+  // 分域覆盖：cn 三个字段齐发；global 全空 → 整个 cn/global 键都不该下发
+  // （否则后端会以为该域有自己的空配置），顶层素材也一并被删除
+  !!prof.cn, has(prof.cn || {}, 'mode'), (prof.cn || {}).preset, (prof.cn || {}).text,
+  has(prof, 'global'), has(out.prompt || {}, 'preset'), has(out.prompt || {}, 'text')
 ]));`
 	f, err := os.CreateTemp(t.TempDir(), "cfgc-*.cjs")
 	if err != nil {
@@ -766,8 +779,10 @@ process.stdout.write(JSON.stringify([
 	if err != nil {
 		t.Fatalf("collectConfig node test failed: %v\n%s", err, out)
 	}
-	// [user_agent 已发, 其值, prompt.file 已发, 其值, listen 未发, checkin_hours 未发, api_key]
-	const want = `[false,null,true,"",false,false,"secret"]`
+	// [user_agent 已发, 其值, prompt.file 已发, 其值, listen 未发, checkin_hours 未发, api_key,
+	//  cn 覆盖齐发, cn.mode, cn.preset, cn.text, global 未发, 顶层 preset 未发,
+	//  顶层 text 已发（覆盖型字段：空串照发，见 CLEARABLE_CFG）]
+	const want = `[false,null,true,"",false,false,"secret",true,true,"minimal","CN 覆盖",false,false,true]`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("collectConfig=%s want %s", strings.TrimSpace(string(out)), want)
 	}
@@ -833,5 +848,106 @@ process.stdout.write(JSON.stringify([
 	norm := func(s string) string { return strings.Join(strings.Fields(s), "") }
 	if norm(got) != norm(w) {
 		t.Fatalf("fillFetchedVersions=%s want %s", got, w)
+	}
+}
+
+// TestAppJSRulesCodec 钉住自定义指纹规则的文本编解码：
+// 面板用"一行一条"编辑，后端要结构化数组——两边不一致会静默丢规则。
+func TestAppJSRulesCodec(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; rules codec test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('/* ---------- 自定义指纹规则');
+const end = src.indexOf('function dig(obj, path)');
+if (start < 0 || end < 0 || end < start) throw new Error('rules region not found');
+const ctx = { String, Array, RegExp, Object };
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.parseRules = parseRules; this.formatRules = formatRules;', ctx);
+
+const text = [
+  '# 注释行',
+  '',
+  '内部代号X => 项目A',
+  '  留白应被去掉   =>   B   ',
+  '/SecretSauce => sauce',
+  '!x-legacy-tag',
+  '/!FoldDrop',
+  'bareword',
+].join('\n');
+const parsed = ctx.parseRules(text);
+
+// 往返：文本 → 数组 → 文本 → 数组，必须稳定（幂等）。
+const round = ctx.parseRules(ctx.formatRules(parsed));
+const out = {
+  parsed: parsed,
+  stable: JSON.stringify(round) === JSON.stringify(parsed),
+  empty: ctx.parseRules(''),
+  comments: ctx.parseRules('# a\n# b'),
+  removeIgnoresReplace: ctx.parseRules('!gone => kept'),
+};
+process.stdout.write(JSON.stringify(out));`
+	f, err := os.CreateTemp(t.TempDir(), "rules-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("rules codec node test failed: %v\n%s", err, out)
+	}
+	var got struct {
+		Parsed []struct {
+			Match   string `json:"match"`
+			Replace string `json:"replace"`
+			Mode    string `json:"mode"`
+			Action  string `json:"action"`
+		} `json:"parsed"`
+		Stable               bool `json:"stable"`
+		Empty                []any
+		Comments             []any
+		RemoveIgnoresReplace []struct {
+			Match   string `json:"match"`
+			Replace string `json:"replace"`
+			Action  string `json:"action"`
+		} `json:"removeIgnoresReplace"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("decode %s: %v\n%s", out, err, out)
+	}
+	if !got.Stable {
+		t.Errorf("文本往返不幂等: %s", out)
+	}
+	if len(got.Parsed) != 6 {
+		t.Fatalf("解析出 %d 条，期望 6: %s", len(got.Parsed), out)
+	}
+	want := []struct{ match, replace, mode, action string }{
+		{"内部代号X", "项目A", "literal", "replace"},
+		{"留白应被去掉", "B", "literal", "replace"},
+		{"SecretSauce", "sauce", "fold", "replace"},
+		{"x-legacy-tag", "", "literal", "remove"},
+		{"FoldDrop", "", "fold", "remove"},
+		{"bareword", "", "literal", "replace"},
+	}
+	for i, w := range want {
+		g := got.Parsed[i]
+		if g.Match != w.match || g.Replace != w.replace || g.Mode != w.mode || g.Action != w.action {
+			t.Errorf("第 %d 条 = %+v，期望 %+v", i+1, g, w)
+		}
+	}
+	if len(got.Empty) != 0 || len(got.Comments) != 0 {
+		t.Errorf("空文本/纯注释应解析为空数组: %s", out)
+	}
+	if n := len(got.RemoveIgnoresReplace); n != 1 {
+		t.Fatalf("remove 行应解析为 1 条: %s", out)
+	}
+	if got.RemoveIgnoresReplace[0].Action != "remove" || got.RemoveIgnoresReplace[0].Replace != "" {
+		t.Errorf("remove 应忽略 replace: %s", out)
 	}
 }

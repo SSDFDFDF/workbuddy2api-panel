@@ -59,3 +59,26 @@ func (p *Panel) saveConfig(w http.ResponseWriter, r *http.Request) {
 		"restart_required": restartRequired,
 	})
 }
+
+// previewPrompt 解析草稿的 prompt 段并返回各域生效规则（不落盘）。
+//
+// 面板的"立即预览"按钮走这里：用户在表单里改了 mode/preset/file/text 之后，
+// 保存前就能看到 cn/global 两域实际会发出去的正文（含提交截断标记），
+// 避免"保存了但不知道发了什么"。
+func (p *Panel) previewPrompt(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.PreviewPrompt == nil {
+		writeErr(w, http.StatusNotImplemented, "prompt preview api not available")
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "read body: "+err.Error())
+		return
+	}
+	out, err := p.cfg.PreviewPrompt(raw)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}

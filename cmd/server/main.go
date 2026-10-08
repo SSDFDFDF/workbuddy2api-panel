@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/redisstore"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/scrub"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/server"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
@@ -171,6 +173,13 @@ func main() {
 		Tail:            time.Duration(cfg.Upstream.TailSeconds) * time.Second,
 	}
 	up.ClientName = cfg.Upstream.ClientName
+	// 出站指纹改写层（默认关闭 = 严格逐字透传）。自定义规则非法时
+	// normalize 已 fail fast，这里构建不会失败。
+	scrubLayer, err := buildScrubLayer(cfg.FingerprintRewrite, cfg.FingerprintRules)
+	if err != nil {
+		log.Fatalf("fingerprint rules: %v", err)
+	}
+	up.Fingerprints.Store(scrubLayer)
 	up.DeviceToken = cfg.Upstream.DeviceToken
 	up.DeviceTokenFile = cfg.Upstream.DeviceTokenFile
 	up.PassthroughIP = cfg.Upstream.PassthroughIP
@@ -316,6 +325,10 @@ func main() {
 		SaveConfig: func(raw []byte) ([]string, error) {
 			return saveConfig(raw, *cfgPath, live, p, up, sch)
 		},
+		// 配置页"立即预览"：解析草稿 prompt 段并返回各域生效正文，不落盘。
+		PreviewPrompt: func(raw []byte) (any, error) {
+			return previewPromptConfig(raw)
+		},
 	})
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
 	// 无需手动扫描；hook 返回即启动（异步执行），已在跑时内部跳过。
@@ -337,6 +350,8 @@ func main() {
 		RequestLog:   requestLog,
 		PromptMode:   cfg.Prompt.Mode,
 		PromptText:   cfg.PromptText,
+		// 分域提示词规则（cn/global 各一份，键 "" 为默认）。装配期构建、不可热改。
+		PromptRules: cfg.PromptRules,
 		// 来源记录开关经 livecfg 热生效；此处同时填静态字段，供 Live 为 nil 的
 		// 裸用/测试路径拿到同一缺省值。
 		RecordClientInfo: cfg.Logging.RequestClientInfo,
@@ -443,7 +458,7 @@ func panelListenPath(listen string) string {
 // saveConfig 面板保存配置：校验 → 落盘 → 热应用 → 返回需重启的字段列表。
 //
 // 热生效范围（设计取舍）：
-//   - api_key / cooldown.soft_rate / features.sanitize_blacklist_fingerprints → livecfg 快照
+//   - api_key / cooldown.soft_rate → livecfg 快照（prompt.* 需重启，见 restartRequiredFields）
 //   - pool.* → pool.SetBreaker/SetMaxInFlight/SetSoftRateMax/SetWeights/SetCostExploreInterval/SetPreferExpiring/SetCreditFloor
 //   - schedule.* → scheduler.Reconfigure/SetBalanceInterval/SetExpiringSoonWindow
 //
@@ -485,15 +500,20 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		return nil, fmt.Errorf("parse submitted config: %w", err)
 	}
 	merged := mergeConfigMaps(cur, incoming)
+	// 旧/未知键不保留：保存 = 用当前结构覆盖配置文件，改名前的旧键
+	//（如 prompt.mode=custom、features.* 段）就此被清掉，不再重复告警。
+	pruned := pruneUnknownKeys(merged)
 
 	// 2) 校验（与启动同一套 Default+normalize），失败直接返回、不落盘。
 	newCfg, err := ParseConfig(mergedJSON(merged))
 	if err != nil {
 		return nil, err
 	}
-	// 保存时也把告警打出：用户刚改完配置就能看到哪一项没生效；
-	// 未知键一律保留在 merged 里回写（不静默删用户数据）。
+	// 保存时也把告警打出：用户刚改完配置就能看到哪一项没生效。
 	logConfigWarnings(newCfg)
+	if len(pruned) > 0 {
+		log.Printf("config: 已丢弃 %d 个未知/旧配置键：%s", len(pruned), strings.Join(pruned, ", "))
+	}
 
 	// 3) 落盘（原子替换）。
 	out, err := json.MarshalIndent(merged, "", "  ")
@@ -548,6 +568,12 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetCreditFloor(newCfg.Pool.CreditFloor)               // 积分保底热生效（0 = 关闭）
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(newCfg.Pool.PreferExpiring)
+	// 指纹改写层热生效：开关与自定义规则都无需重启（整体替换不可变层）。
+	newScrub, err := buildScrubLayer(newCfg.FingerprintRewrite, newCfg.FingerprintRules)
+	if err != nil {
+		return nil, err
+	}
+	up.Fingerprints.Store(newScrub)
 	sch.SetExpiringSoonWindow(newCfg.ExpiringSoonDur)
 	sch.Reconfigure(
 		newCfg.Schedule.CheckinHours, newCfg.Schedule.TravelHours,
@@ -617,4 +643,20 @@ func mergedJSON(m map[string]any) []byte {
 		return []byte("{}")
 	}
 	return b
+}
+
+// buildScrubLayer 由配置构建出站指纹改写层。
+//
+// 开关关闭时自定义规则**也一并忽略**（不构建、不参与预检）：避免
+// "关着开关却仍要付一份哨兵扫描成本"这种反直觉行为。规则非法时返回错误
+// （normalize 已校验过，这里是二次防护，供不经 normalize 的调用路径使用）。
+func buildScrubLayer(enabled bool, rules []scrub.Rule) (*scrub.Layer, error) {
+	if !enabled {
+		return scrub.NewLayer(false, nil), nil
+	}
+	custom, err := scrub.Build(rules)
+	if err != nil {
+		return nil, err
+	}
+	return scrub.NewLayer(true, custom), nil
 }

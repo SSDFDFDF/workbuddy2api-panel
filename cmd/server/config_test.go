@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 )
 
 func TestDefault(t *testing.T) {
@@ -669,21 +671,24 @@ func TestBalanceRefreshDefaults(t *testing.T) {
 	}
 }
 
-// TestPromptDefaultPassthrough 默认 prompt.mode=passthrough（对齐上游：透传客户端
-// 原始 system 是更保守的缺省）；custom 由用户显式选择，此时 PromptText 为内置默认（非空）。
-func TestPromptDefaultPassthrough(t *testing.T) {
+// TestPromptDefaultNone 默认 prompt.mode=none：不改写客户端 system（零回归）。
+func TestPromptDefaultNone(t *testing.T) {
 	c, err := Load("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Prompt.Mode != "none" {
-		t.Errorf("prompt.mode=%q want passthrough", c.Prompt.Mode)
+	if c.Prompt.Mode != prompt.ModeNone {
+		t.Errorf("prompt.mode=%q want none", c.Prompt.Mode)
 	}
-	// passthrough 不加载提示词文本（透传客户端 system）；切 custom 时 normalize 会加载。
+	// none 不解析正文（热路径不需要）；但分域规则仍在（mode 已定），
+	// 切到 replace/append/after 后重启即生效。
+	if c.PromptRules[""].Mode != prompt.ModeNone {
+		t.Errorf("default rule mode=%q want none", c.PromptRules[""].Mode)
+	}
 }
 
-// TestPromptExplicitPassthrough passthrough 模式不加载文本（透传客户端原始 system）。
-func TestPromptExplicitPassthrough(t *testing.T) {
+// TestPromptExplicitNone none 模式不加载文本（透传客户端原始 system）。
+func TestPromptExplicitNone(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
 	os.WriteFile(fp, []byte(`{"prompt":{"mode":"none"}}`), 0o600)
@@ -691,11 +696,11 @@ func TestPromptExplicitPassthrough(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Prompt.Mode != "none" {
-		t.Errorf("mode=%q want passthrough", c.Prompt.Mode)
+	if c.Prompt.Mode != prompt.ModeNone {
+		t.Errorf("mode=%q want none", c.Prompt.Mode)
 	}
-	if c.PromptText != "" {
-		t.Errorf("passthrough should not load PromptText, got len=%d", len(c.PromptText))
+	if c.PromptText != "" || c.PromptRules[""].Text != "" {
+		t.Errorf("none should not load text: %d / %d", len(c.PromptText), len(c.PromptRules[""].Text))
 	}
 }
 
@@ -736,8 +741,8 @@ func TestPromptFileOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.PromptText != want {
-		t.Errorf("PromptText=%q want %q", c.PromptText, want)
+	if c.PromptRules["cn"].Text != want || c.PromptText != want {
+		t.Errorf("file text=%q want %q", c.PromptRules["cn"].Text, want)
 	}
 }
 
@@ -748,8 +753,8 @@ func TestPromptEnvOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Prompt.Mode != "none" {
-		t.Errorf("mode=%q want passthrough", c.Prompt.Mode)
+	if c.Prompt.Mode != prompt.ModeNone {
+		t.Errorf("mode=%q want none", c.Prompt.Mode)
 	}
 }
 
@@ -828,17 +833,80 @@ func TestUnknownConfigKeySurvivesSave(t *testing.T) {
 	}
 }
 
-// TestPromptLegacyModeMigrated 旧 mode 取值迁移到新名并告警。
-func TestPromptLegacyModeMigrated(t *testing.T) {
-	c, err := ParseConfig([]byte(`{"prompt":{"mode":"passthrough"}}`))
+// TestPromptLegacyModeRejected 旧 mode 取值不兼容、不迁移：直接报错。
+func TestPromptLegacyModeRejected(t *testing.T) {
+	for _, v := range []string{"passthrough", "custom", "client_after", "prepend"} {
+		raw := []byte(`{"prompt":{"mode":"` + v + `"}}`)
+		if _, err := ParseConfig(raw); err == nil {
+			t.Errorf("prompt.mode=%q must be rejected (no migration)", v)
+		}
+	}
+}
+
+// TestPromptRealmProfiles 分域配置：mode 逐项回落，素材整体覆盖。
+func TestPromptRealmProfiles(t *testing.T) {
+	c, err := ParseConfig([]byte(`{
+	  "prompt": {
+	    "mode": "after",
+	    "preset": "default",
+	    "profiles": {
+	      "cn": {"preset": "minimal", "text": "CN 内联"},
+	      "global": {"mode": "replace", "preset": "minimal"}
+	    }
+	  }
+	}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Prompt.Mode != "none" {
-		t.Errorf("mode=%q want none", c.Prompt.Mode)
+	// 默认域：顶层素材（default 预设）。
+	if r := c.PromptRules[""]; r.Mode != prompt.ModeAfter || r.Text != prompt.Builtin("default", "cn") {
+		t.Errorf("default rule=%+v", r)
 	}
-	if !hasWarning(c.Warnings, "prompt.mode") {
-		t.Errorf("legacy mode must be reported: %v", c.Warnings)
+	// CN：素材被 realm 整体覆盖（text 胜过 preset），mode 回落顶层。
+	if r := c.PromptRules["cn"]; r.Mode != prompt.ModeAfter || r.Text != "CN 内联" {
+		t.Errorf("cn rule=%+v", r)
+	}
+	// Global：mode 被覆盖，素材取 global 的 minimal（英文）。
+	if r := c.PromptRules["global"]; r.Mode != prompt.ModeReplace || r.Text != prompt.Builtin("minimal", "global") {
+		t.Errorf("global rule=%+v", r)
+	}
+	if c.PromptText != prompt.Builtin("default", "cn") {
+		t.Errorf("PromptText(legacy)=%d bytes", len(c.PromptText))
+	}
+}
+
+// TestPromptInlineText 内联正文：无需落盘文件即可直接配置内容。
+func TestPromptInlineText(t *testing.T) {
+	c, err := ParseConfig([]byte(`{"prompt":{"mode":"replace","text":"你是一个测试助手"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.PromptRules["cn"].Text != "你是一个测试助手" || c.PromptText != "你是一个测试助手" {
+		t.Errorf("inline text not applied: %+v", c.PromptRules)
+	}
+}
+
+// TestPromptUnknownRealmDropped 未知 realm 告警并忽略（不阻断启动）。
+func TestPromptUnknownRealmDropped(t *testing.T) {
+	c, err := ParseConfig([]byte(`{"prompt":{"mode":"replace","profiles":{"eu":{"preset":"minimal"}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.Prompt.Profiles["eu"]; ok {
+		t.Error("unknown realm must be dropped")
+	}
+	if !hasWarning(c.Warnings, "prompt.profiles.eu") {
+		t.Errorf("unknown realm must be reported: %v", c.Warnings)
+	}
+}
+
+// TestPromptUnknownModeRejected 非法 mode（顶层/分域）都报错。
+func TestPromptUnknownModeRejected(t *testing.T) {
+	if _, err := ParseConfig([]byte(`{"prompt":{"preset":"bogus"}}`)); err == nil {
+		t.Error("invalid preset must be rejected")
+	}
+	if _, err := ParseConfig([]byte(`{"prompt":{"mode":"replace","profiles":{"cn":{"mode":"bogus"}}}}`)); err == nil {
+		t.Error("invalid realm mode must be rejected")
 	}
 }
 
@@ -1035,5 +1103,60 @@ func TestPlainProxyEnv(t *testing.T) {
 	applyEnv(c)
 	if c.ProxyURL != "socks5://127.0.0.1:1080" {
 		t.Errorf("env override = %q", c.ProxyURL)
+	}
+}
+
+// TestPruneUnknownKeysNestedValid 未知键识别必须只认"真的不认识"的键：
+// 嵌套 map 值类型里的合法字段（prompt.profiles.cn.mode）不能被误删。
+// 回归：早期实现把零值 Config 序列化成已知树，nil map → null，导致这些
+// 子键全部被判未知并 prune 掉。
+func TestPruneUnknownKeysNestedValid(t *testing.T) {
+	raw := map[string]any{
+		"listen": ":1",
+		"prompt": map[string]any{
+			"mode":   "after",
+			"preset": "minimal",
+			"profiles": map[string]any{
+				"cn":     map[string]any{"mode": "replace", "preset": "coding", "text": "x"},
+				"global": map[string]any{"file": "/tmp/p.md"},
+			},
+		},
+		"upstream": map[string]any{
+			"profiles": map[string]any{
+				"cn": map[string]any{"client_version": "9.9.9", "client_verison": "typo"},
+			},
+		},
+		"features":  map[string]any{"sanitize_blacklist_fingerprints": true},
+		"bogus_top": 1,
+	}
+	pruned := pruneUnknownKeys(raw)
+
+	// 合法嵌套键必须全部保留。
+	cn := raw["prompt"].(map[string]any)["profiles"].(map[string]any)["cn"].(map[string]any)
+	if cn["mode"] != "replace" || cn["preset"] != "coding" || cn["text"] != "x" {
+		t.Fatalf("valid nested keys were pruned: %v", cn)
+	}
+	gl := raw["prompt"].(map[string]any)["profiles"].(map[string]any)["global"].(map[string]any)
+	if gl["file"] != "/tmp/p.md" {
+		t.Fatalf("global override pruned: %v", gl)
+	}
+	up := raw["upstream"].(map[string]any)["profiles"].(map[string]any)["cn"].(map[string]any)
+	if up["client_version"] != "9.9.9" {
+		t.Fatalf("upstream profile pruned: %v", up)
+	}
+
+	// 真正的未知键被删。
+	if _, ok := raw["features"]; ok {
+		t.Error("features (removed section) must be pruned")
+	}
+	if _, ok := raw["bogus_top"]; ok {
+		t.Error("bogus_top must be pruned")
+	}
+	if _, ok := up["client_verison"]; ok {
+		t.Error("typo key must be pruned")
+	}
+	want := []string{"bogus_top", "features", "upstream.profiles.cn.client_verison"}
+	if strings.Join(pruned, ",") != strings.Join(want, ",") {
+		t.Errorf("pruned=%v want %v", pruned, want)
 	}
 }

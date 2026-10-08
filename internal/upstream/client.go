@@ -23,6 +23,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/forwarding"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/proxy"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/scrub"
 )
 
 // ErrKind 错误分类，pool 据此决定冷却时长。
@@ -639,6 +640,17 @@ type Client struct {
 	Profiles    map[string]IdentityProfile
 	CacheSecret []byte
 
+	// Fingerprints 出站请求体指纹改写层（默认关闭 = 严格逐字透传）。
+	//
+	// 层内 = 内置 7 类实测指纹 + 自定义规则（config fingerprint_rules）。
+	// 用 atomic.Pointer 持有不可变规则集：面板热改规则 = 整体替换一层，
+	// chat 热路径读到的永远是一致视图，无锁。
+	//
+	// 默认关闭的理由：它**会改用户内容**（如 11128 → 11-128）。
+	// system 来源的指纹已由 prompt.mode=replace/after 从源头解决，
+	// 这一层只针对 user/assistant/tool 来源，应由使用者显式选择。
+	Fingerprints scrub.Holder
+
 	// StreamTimeouts SSE 语义阶段上限（零值 = 内置默认 120s/300s/10s）。
 	// 心跳只续网络读空闲，不续这些阶段。
 	StreamTimeouts StreamTimeoutConfig
@@ -789,11 +801,22 @@ func (c *Client) chatBase(a *auth.Auth) string {
 	return "https://www.workbuddy.cn"
 }
 
-// prepareBody validates and encodes one request without rewriting its content.
+// prepareBody validates and encodes one request.
+//
+// 指纹改写（可选层，默认关闭）挂在**同一次 Parse 之后**：不额外解析、不额外
+// 序列化，也不改变验证契约（未知字段照旧原样保留、不修复历史）。
+//
+// 两道闸控成本：
+//  1. 开关关闭（默认）→ 一个 atomic 读取，其余零开销；
+//  2. 开关打开但请求体无指纹哨兵 → scrub.Sentinel 在原始字节上扫 5 个必要
+//     子串（~13 GB/s），未命中即跳过整次遍历（实测干净路径 0 分配）。
 func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) ([]byte, error) {
 	r, err := forwarding.Parse(body)
 	if err != nil {
 		return nil, err
+	}
+	if l := c.Fingerprints.Load(); l.Dirty(body) {
+		l.Object(r.Object)
 	}
 	return r.Encode(r.Model)
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/jsondoc"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/proxy"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/scrub"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
@@ -25,6 +26,29 @@ type Config struct {
 	APIKey        string `json:"api_key"`    // 空 = 不鉴权
 	AuthDir       string `json:"auth_dir"`   // ./auths
 	StateFile     string `json:"state_file"` // ./data/state.json
+
+	// FingerprintRewrite 出站请求体指纹改写（默认 false = 严格逐字透传）。
+	//
+	// 开启后仅改写上游逐字黑名单里的 7 类已知串（internal/scrub）：
+	// Claude Code / Codex 身份句、billing-header 键值、尾随 cc_ 键值、
+	// 反馈整句、裸 11128。这些串出现在 user/assistant/tool 消息里时，
+	// prompt.mode（只作用于 system/developer）清不掉，只能逐字改写。
+	//
+	// 代价：**会改用户可见内容**（如对话里的 11128 变成 11-128），
+	// 因此默认关闭；面板可热改，无需重启。
+	FingerprintRewrite bool `json:"fingerprint_rewrite"`
+
+	// FingerprintRules 自定义改写规则（在内置 7 类指纹之上**叠加**）。
+	//
+	// 用于把“自己遇到的指纹词/句”加进来，例如某个客户端的特殊标记、
+	// 自己的项目名不能出现在请求里、某个内部术语要替换后再出站。
+	// 每条规则的 Match/Replace/Mode/Action 见 internal/scrub.Rule，
+	// 支持 literal（大小写敏感）/ fold（忽略 ASCII 大小写）两种匹配，
+	// replace（换成给定文本）/ remove（整段删除）两种动作。
+	//
+	// 上限与合法性在 normalize 阶段校验（超量/非法 → 启动或保存报错）。
+	// 改动**热生效**（与 FingerprintRewrite 同步），无需重启。
+	FingerprintRules []scrub.Rule `json:"fingerprint_rules"`
 
 	Panel struct {
 		// PackageDetailLimit 积分构成页单账号默认展示的最近到期包数；<=0 回落 5。
@@ -159,17 +183,38 @@ type Config struct {
 	} `json:"upstream"`
 
 	Prompt struct {
-		// Mode passthrough（默认）= 透传客户端原始 system（降级重试仍会切到 Degraded）；
-		// custom = 网关用自有系统提示词替换客户端 system/developer；
-		// append = 两者并用：开头连续 system/developer 块后插网关 system，既有消息逐字不动（issue #129）。
-		Mode string `json:"mode"` // "passthrough" / "custom" / "append"
-		// File 提示词文件路径；空 = 内置默认 defaultprompt.md；
-		// 路径非空但不可读 → 启动报错（fail fast，避免静默回落到内置默认）。
+		// Mode 组合位置（默认 none = 不改写，零回归）：
+		//
+		//	none    透传客户端原始 system/developer（不改一个字节）
+		//	replace 删除全部 system/developer，只留网关提示词（指纹面最小）
+		//	append  客户端开头 system/developer 块之后插网关提示词（客户端在前）
+		//	after   网关提示词置首，客户端开头块紧随其后（后组合，客户端内容不丢）
+		//
+		// 历史别名照收（custom→replace、passthrough→none）。
+		Mode string `json:"mode"`
+		// Preset 内置预设：default（defaultprompt.md，约 2 KB，分域共用）/
+		// minimal（按 realm 取 minimal_cn / minimal_global，约 10 行，量级对齐
+		// 官方 Quick 模式模板）。空 = default。
+		Preset string `json:"preset"`
+		// File 提示词文件路径；非空且不可读 → 启动/保存报错（fail fast）。
+		// 优先级低于 Text、高于 Preset。
 		File string `json:"file"`
+		// Text 内联提示词正文（面板可直编）。非空优先于 File/Preset——
+		// “直接把内容写进配置”的入口，无需额外落盘文件。
+		Text string `json:"text"`
+		// Profiles 按账号域覆盖上列四项（键：cn / global）。未设置的字段
+		// 逐项回落到顶层（含 mode 本身）；顶层未设 → 内置缺省。
+		// 用于“同一网关同时对 CN 与 Global 账号使用不同提示词”。
+		Profiles map[string]PromptProfile `json:"profiles"`
 	} `json:"prompt"`
 
-	// PromptText 解析后的系统提示词文本（custom/append 模式使用）。
+	// PromptText 默认域解析后的系统提示词文本（历史字段，保留兼容）。
+	// 等价于 PromptRules[""] 的 Text；新代码请读 PromptRules。
 	PromptText string `json:"-"`
+
+	// PromptRules 各域生效的提示词规则（键："" 默认、"cn"、"global"）。
+	// 装配期构建，不可热改（改 prompt 需重启）；handler 按请求 realm 选规则。
+	PromptRules map[string]prompt.Rule `json:"-"`
 
 	// Warnings 载入期的配置告警（未知/退役键、旧取值迁移）。运行期元数据，
 	// 不落盘（面板保存写的是深合并后的原始 map），供启动日志与面板 `_warnings` 展示。
@@ -374,12 +419,9 @@ func ParseConfigInto(raw []byte, c *Config) (*Config, error) {
 		return nil, fmt.Errorf("config_version: 不支持 %d（当前只支持 2；留空按 2 处理）", n)
 	}
 	c.ConfigVersion = 2
-	// 退役键（有替代项/语义已下线）与未知键分开报：退役项给出可执行说明，
-	// 未知键提示可能是笔误。两者都只告警，不阻断启动与保存。
-	for _, w := range retiredKeysIn(obj) {
-		c.addWarning(w)
-	}
-	for _, k := range unknownConfigKeys(obj, c) {
+	// 旧/未知键只告警不阻断启动（面板保存时直接丢弃，见 pruneUnknownKeys）。
+	// 不做“退役键 → 替掉项”的迁移提示：旧配置就是不认识，不兼容也不迁移。
+	for _, k := range unknownConfigKeys(obj) {
 		c.addWarning(k + " —— 未知配置项，已忽略（检查拼写或升级版本）")
 	}
 	for realm, p := range c.Upstream.Profiles {
@@ -516,6 +558,11 @@ func applyEnv(c *Config) {
 		}
 	}
 
+	if v := os.Getenv("WB2A_FINGERPRINT_REWRITE"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.FingerprintRewrite = b
+		}
+	}
 	if v := os.Getenv("WB2A_PROMPT_MODE"); v != "" {
 		c.Prompt.Mode = v
 	}
@@ -714,44 +761,16 @@ func (c *Config) normalize() error {
 		return err
 	}
 	c.ProxyClient = pc
+	if err := c.normalizeFingerprintRules(); err != nil {
+		return err
+	}
 	return c.normalizePrompt()
 }
 
-// normalizePrompt 校验 prompt.mode 并按 file 加载提示词文本（custom/append 模式）。
-//
-// mode 非法（非 passthrough/custom/append）启动报错，避免静默回落到某一分支；
-// custom/append 模式下 file 非空但不可读 → 报错（fail fast），file 空 → 用内置默认
-// （两模式共用同一加载路径，PromptText 均非空）。
-// passthrough 模式不加载文本（透传客户端原始 system，文本在降级时用 prompt.Degraded）。
-func (c *Config) normalizePrompt() error {
-	switch m := strings.ToLower(strings.TrimSpace(c.Prompt.Mode)); m {
-	case "", "none":
-		c.Prompt.Mode = "none"
-	case "passthrough":
-		// 旧取值迁移：passthrough 语义（不改写客户端 system）与 none 等价；
-		// 旧的「内容拦截后换降级提示词重试」已下线，不再是该模式的隐含行为。
-		c.Prompt.Mode = "none"
-		c.addWarning("prompt.mode: passthrough 已改名为 none（语义相同；内容拦截不再触发提示词改写）")
-	case "replace":
-		c.Prompt.Mode = "replace"
-	case "custom":
-		// 旧取值迁移：custom 语义就是用自有提示词替换 system。
-		c.Prompt.Mode = "replace"
-		c.addWarning("prompt.mode: custom 已改名为 replace")
-	case "append":
-		c.Prompt.Mode = "append"
-	default:
-		return fmt.Errorf("prompt.mode: %q 不是合法值（none / append / replace）", c.Prompt.Mode)
-	}
-	if c.Prompt.Mode == "replace" || c.Prompt.Mode == "append" {
-		text, err := prompt.Load(c.Prompt.Mode, c.Prompt.File)
-		if err != nil {
-			return err
-		}
-		c.PromptText = text
-	}
-	return nil
-}
+// normalizePrompt / buildPromptRule / normalizePromptMode 等见 prompt_config.go：
+// 校验 prompt.mode（none/replace/append/after，历史别名迁移并告警）、按域覆盖
+// 构建 c.PromptRules（键 "" / cn / global），并在需要正文时解析 preset/file/text
+// （素材优先级 text > file > preset，file 不可读 → fail fast）。
 
 // validateScheduleHours 校验排程小时落在 0-23。
 //
@@ -797,4 +816,23 @@ func normalizeModelDefaultRealm(v string) string {
 	default:
 		return "cn"
 	}
+}
+
+// normalizeFingerprintRules 校验自定义改写规则并把归一化结果写回配置。
+//
+// 为什么在 normalize 阶段就试编译（而不是等到装配 client）：
+// 非法规则要在**启动/保存时报错**——若推迟到运行期，用户会看到"配置已保存"
+// 但改写静默不生效（或整层失效），排查成本高得多。试编译同时完成
+// mode/action 的归一化（空 = 缺省），使面板回显的就是生效值。
+func (c *Config) normalizeFingerprintRules() error {
+	if len(c.FingerprintRules) == 0 {
+		c.FingerprintRules = nil
+		return nil
+	}
+	w, err := scrub.Build(c.FingerprintRules)
+	if err != nil {
+		return fmt.Errorf("fingerprint_rules: %w", err)
+	}
+	c.FingerprintRules = w.Rules()
+	return nil
 }

@@ -1,46 +1,169 @@
-// Package prompt 提供网关自有系统提示词：内置默认 + 文件覆盖 + 降级中性提示词。
+// Package prompt 提供网关自有系统提示词：内置预设库 + 文件/内联覆盖 + 多种组合位置。
 //
 // 背景：客户端（Claude Code/Codex 等 CLI）在 system prompt 注入固定模板句，
 // 上游内容审核按逐字精确匹配误杀合法流量（issue #36/PR39 的 11128）。
-// 方案：网关在出站前用自有系统提示词替换客户端 system/developer 消息，
-// 从源头消灭 system 来源的指纹误报（用户/assistant 消息里的指纹串仍由
-// internal/upstream/sanitize.go 清洗，两层叠加、互不替代）。
+// 方案：网关在出站前对 system/developer 消息做一次组合（替换 / 前置追加 / 后置组合），
+// 从源头消灭 system 来源的指纹误报。
+//
+// 素材优先级（见 Resolve）：内联 text > file > preset（按 realm 取正文）。
+// 预设库与分域文件命名见 preset.go（presets/<name>[.<realm>].md）。
 package prompt
 
 import (
-	_ "embed"
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/jsondoc"
 )
 
-//go:embed defaultprompt.md
-var defaultPrompt string
+// 组合位置（config prompt.mode / prompt.profiles.<realm>.mode 取值）。
+const (
+	// ModeNone 不改写请求体（透传客户端原始 system）。
+	ModeNone = "none"
+	// ModeReplace 删除全部 system/developer，只留网关提示词（指纹面最小）。
+	ModeReplace = "replace"
+	// ModeAppend 客户端开头连续 system/developer 块之后插网关提示词（客户端在前）。
+	ModeAppend = "append"
+	// ModeAfter 网关提示词置首，客户端开头连续 system/developer 块紧随其后（后组合）。
+	// 与 ModeAppend 互为镜像：两者都逐字保留客户端内容，只差先后顺序。
+	ModeAfter = "after"
+)
 
-// Degraded 降级提示词：误报处理用，刻意极简中性。
-//
-// 触发场景：passthrough 模式下请求被上游内容策略拦截（HTTP 400 + 审核文案），
-// 判定为指纹误报后换最小中性提示词重试一次。非对抗框架——只用于绕开
-// system 来源的误报，不改变用户指令的合法性语义。
-const Degraded = "You are a helpful assistant. Respond in the user's language, follow the user's instructions, and be direct and concise."
+// 内置预设名（config prompt.preset / prompt.profiles.<realm>.preset 取值）。
+// 完整清单与说明见 preset.go 的 presetCatalog（Presets() 对面板输出）。
+const (
+	// PresetDefault 通用工程助手（presets/default.md，约 2 KB，分域共用）。
+	PresetDefault = "default"
+	// PresetMinimal 极简（presets/minimal.<realm>.md，约 10 行）。
+	PresetMinimal = "minimal"
+)
 
-// Load 按 mode 与 file 加载系统提示词文本。
-//   - file 非空 → 读文件（不存在/读失败返回 error，调用方 fail fast）；
-//   - file 空 → 返回内置 defaultPrompt。
-//
-// mode 在此仅做透传记录（实际 custom/passthrough 路由由调用方决定），
-// Load 只负责"拿到一段提示词文本"，不关心路由语义。
-func Load(mode, file string) (string, error) {
-	if file == "" {
-		return defaultPrompt, nil
+// Spec 一段提示词的来源声明（未解析）。三个字段按优先级取用：Text > File > Preset。
+// 零值合法：全部为空时 Resolve 回落 PresetDefault。
+type Spec struct {
+	Preset string // "" | default | minimal
+	File   string // 文件路径（非空且不可读 → Resolve 报错，调用方 fail fast）
+	Text   string // 内联正文（非空优先，不再读盘）
+}
+
+// Rule 某 realm 生效的提示词规则（已解析文本）。
+type Rule struct {
+	Mode string `json:"mode"`
+	Text string `json:"text"`
+}
+
+// NormalizeMode 归一化组合位置：小写去空白。只认 none/replace/append/after；
+// 空串视为 none（零值即不缺省改写）。旧取值（custom/passthrough/...）刻意不兼容：
+// 它们会直接报错，由用户显式改成新名——避免“配了 custom 却没有生效”这类静默降级。
+func NormalizeMode(v string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", ModeNone:
+		return ModeNone, true
+	case ModeReplace:
+		return ModeReplace, true
+	case ModeAppend:
+		return ModeAppend, true
+	case ModeAfter:
+		return ModeAfter, true
+	default:
+		return "", false
 	}
-	raw, err := os.ReadFile(file)
+}
+
+// NormalizePreset 归一化预设名：空合法（= default），只认注册表里的名字。
+func NormalizePreset(v string) (string, bool) {
+	s := strings.ToLower(strings.TrimSpace(v))
+	if s == "" {
+		return PresetDefault, true
+	}
+	for _, name := range presetNames() {
+		if name == s {
+			return s, true
+		}
+	}
+	return "", false
+}
+
+// Builtin 返回内置预设正文（按 realm 选分域文件）。
+// 预设名非法或文件缺失 → 返回空串（调用方应先用 NormalizePreset 校验）。
+func Builtin(preset, realm string) string {
+	name, ok := NormalizePreset(preset)
+	if !ok {
+		return ""
+	}
+	s, err := presetContent(name, realm)
 	if err != nil {
-		return "", fmt.Errorf("prompt file %s: %w", file, err)
+		return ""
 	}
-	return string(raw), nil
+	return s
+}
+
+// DefaultText 返回默认预设的正文（分域共用）——供测试与"未配置时用哪份"
+// 这类断言使用，避免测试硬编码正文长度。
+func DefaultText() string { return Builtin(PresetDefault, "cn") }
+
+// NormalizeRealm 归一化 realm 键：只认 cn / global，其余（含空）归 cn。
+func NormalizeRealm(realm string) string {
+	if strings.EqualFold(strings.TrimSpace(realm), "global") {
+		return "global"
+	}
+	return "cn"
+}
+
+// Resolve 解析提示词正文。优先级：Text > File > 内置预设（默认 defaultpreset）。
+// realm 决定 minimal 预设的语言与自定义文件的默认语义（不参与路径拼接）。
+// File 非空但不可读 → 报错（调用方 fail fast，不静默回落）。
+func Resolve(s Spec, realm string) (string, error) {
+	if s.Text != "" {
+		return s.Text, nil
+	}
+	if s.File != "" {
+		raw, err := os.ReadFile(s.File)
+		if err != nil {
+			return "", fmt.Errorf("prompt file %s: %w", s.File, err)
+		}
+		return string(raw), nil
+	}
+	preset, ok := NormalizePreset(s.Preset)
+	if !ok {
+		return "", fmt.Errorf("prompt preset %q 不是合法值（%s）", s.Preset, PresetListHint())
+	}
+	return Builtin(preset, realm), nil
+}
+
+// Source 返回一位提示词素材的"来源标签"（面板预览用，不改语义）。
+func Source(s Spec) string {
+	switch {
+	case s.Text != "":
+		return "inline"
+	case s.File != "":
+		return "file"
+	default:
+		preset, _ := NormalizePreset(s.Preset)
+		return preset
+	}
+}
+
+// Compose 按 mode 组合请求体与网关提示词。
+//   - ModeReplace → Rewrite（删全部 system/developer，只留网关提示词）；
+//   - ModeAppend  → Append（客户端开头块在前，网关提示词其后）；
+//   - ModeAfter   → ComposeAfter（网关提示词在前，客户端开头块其后）；
+//   - 其它（含 none）或 systemPrompt 空 → 原样返回。
+//
+// 所有分支均为"绝不失败"：坏 JSON / 空 body → 原样返回。
+func Compose(body []byte, systemPrompt, mode string) []byte {
+	switch mode {
+	case ModeReplace:
+		return Rewrite(body, systemPrompt)
+	case ModeAppend:
+		return Append(body, systemPrompt)
+	case ModeAfter:
+		return ComposeAfter(body, systemPrompt)
+	default:
+		return body
+	}
 }
 
 // Rewrite 解析 OpenAI 请求体并替换系统提示词：
@@ -86,6 +209,63 @@ func Rewrite(body []byte, systemPrompt string) []byte {
 		[]any{map[string]any{"role": "system", "content": systemPrompt}},
 		kept...,
 	)
+	obj["messages"] = rewritten
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// ComposeAfter 在 messages 头部插入网关 system，而客户端"开头连续
+// system/developer 块"逐字保留并紧随其后（后组合：客户端提示词在网关提示词之后）。
+//
+// 与 Append 互为镜像（两者不变量相同：既有消息逐字不动、只动插入位置）：
+//
+//	Append      : [客户端 system 块] [网关 system] [其余]
+//	ComposeAfter: [网关 system] [客户端 system 块] [其余]
+//
+// 差别在于谁先被模型读到：后组合让网关提示词占据首位，同时客户端
+// 工具约定/项目规范仍留在 system 位置生效（不被丢弃）。
+//
+// 边界判定与 Append 完全一致（只认开头连续块，遇第一条非 system/developer
+// 即停；中途 system 消息位置不变、不重排——避免扰动 tool 结果的相邻性）。
+// 守卫与 Rewrite/Append 逐条一致：空 body / 空 systemPrompt / 坏 JSON → 原样返回。
+func ComposeAfter(body []byte, systemPrompt string) []byte {
+	if len(body) == 0 || systemPrompt == "" {
+		return body
+	}
+	obj, err := jsondoc.Object(body)
+	if err != nil {
+		return body
+	}
+	msgs, ok := obj["messages"].([]any)
+	if !ok {
+		// 无 messages 字段或类型不符 → 插入单条 system 后原样保留其余字段。
+		obj["messages"] = []any{map[string]any{"role": "system", "content": systemPrompt}}
+		if out, err := json.Marshal(obj); err == nil {
+			return out
+		}
+		return body
+	}
+	// 扫描开头连续 system/developer 块，遇第一条非 system/developer 即停。
+	blockLen := 0
+	for _, m := range msgs {
+		mm, ok := m.(map[string]any)
+		if !ok {
+			break
+		}
+		role, _ := mm["role"].(string)
+		if role != "system" && role != "developer" {
+			break
+		}
+		blockLen++
+	}
+	gw := map[string]any{"role": "system", "content": systemPrompt}
+	rewritten := make([]any, 0, len(msgs)+1)
+	rewritten = append(rewritten, gw)
+	rewritten = append(rewritten, msgs[:blockLen]...)
+	rewritten = append(rewritten, msgs[blockLen:]...)
 	obj["messages"] = rewritten
 	out, err := json.Marshal(obj)
 	if err != nil {

@@ -42,6 +42,8 @@
     "billing_base": ""
   },
   "model_default_realm": "cn",
+  "fingerprint_rewrite": false,
+  "fingerprint_rules": [],
   "upstream": {
     "timeout_seconds": 120,
     "header_timeout_seconds": 120,
@@ -61,7 +63,13 @@
   },
   "prompt": {
     "mode": "none",
-    "file": ""
+    "preset": "default",
+    "file": "",
+    "text": "",
+    "profiles": {
+      "cn": {},
+      "global": {}
+    }
   },
   "upstash": {
     "url": "",
