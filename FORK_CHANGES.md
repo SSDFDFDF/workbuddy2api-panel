@@ -66,7 +66,7 @@ git log --oneline <已同步基线>..upstream/main     # 列出待判定提交�
 | 9 | **Web 管理面板** | 内嵌单页（明暗主题，七个视图）：账号运维 / 用量与积分 / 模型档位 / 在线改配置（热生效）/ 运行日志 / 任务中心 | 生效 |
 | 10 | **积分任务体系** | 任务列表/接受/领取 + 「一键完成」覆盖 17 个成长任务（纯 API）；任务中心全账号扫描 + 执行队列 | 生效 |
 | 11 | **出站代理** | 普通正向代理 + Resin 粘性代理池 + 账号级代理开关 | 未配置 = 不接入 |
-| 12 | **裸模型名默认域** | `model_default_realm = cn / global / auto` | `cn` |
+| 12 | **裸模型名默认域** | `model_default_realm = cn / global / auto(:cn,global) / auto:global,cn` | `cn` |
 | 13 | **客户端特征对齐** | 稳定设备/会话指纹、硬件特征离散化、`/v2/report` 桌面指纹、版本自检 | 启用 |
 | 14 | **面板版本配置** | 占位符来自后端内置基线（不硬编码）；「一键填入已拉取版本」；CLI 版本需人工核对 | 生效 |
 | 15 | **Responses / Anthropic 桥接** | `/v1/responses` 无状态文本 / function tools；`/v1/messages` 文本 / client tools。复用原有执行、重试、用量与日志；跨协议未知字段拒绝，原生 Chat 保留扩展。见 [兼容说明](README.md#protocol-compatibility) | 生效（限定子集） |

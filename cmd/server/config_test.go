@@ -1033,11 +1033,16 @@ func TestModelDefaultRealm(t *testing.T) {
 	if c.ModelDefaultRealm != "cn" {
 		t.Errorf("default model_default_realm=%q want cn", c.ModelDefaultRealm)
 	}
-	// 合法值：global / auto（大小写与空白归一）。
+	// 合法值：global / auto / auto:global,cn（大小写与空白归一，支持别名）。
 	for _, tc := range []struct{ in, want string }{
 		{"global", "global"},
 		{" Auto ", "auto"},
 		{"CN", "cn"},
+		{"auto:cn,global", "auto"},
+		{"cn,global", "auto"},
+		{"auto:global,cn", "auto:global,cn"},
+		{"global,cn", "auto:global,cn"},
+		{" Auto: Global, CN ", "auto:global,cn"},
 	} {
 		cc, err := ParseConfig([]byte(`{"model_default_realm":"` + tc.in + `"}`))
 		if err != nil {

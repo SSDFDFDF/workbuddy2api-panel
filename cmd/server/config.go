@@ -182,8 +182,8 @@ type Config struct {
 	// ModelDefaultRealm 裸模型名的默认域策略（无 cn:/global: 前缀时）：
 	//   "cn"（默认，零回归）= 裸名归 CN；
 	//   "global" = 裸名归国际版（纯 global 池免写前缀）；
-	//   "auto" = 按池内可用账号域自动判定（只有一个域有可用号时归该域，
-	//            两域都有/都没有时回落 cn）。
+	//   "auto"（或 "auto:cn,global"）= 自动判定（CN 优先，无号/失败时轮退至 global）；
+	//   "auto:global,cn" = 自动判定（Global 优先，无号/失败时轮退至 cn）。
 	// 显式 cn:/global: 前缀恒优先，不受本项影响。
 	ModelDefaultRealm string `json:"model_default_realm"`
 
@@ -852,14 +852,19 @@ func checkHourRange(field, switchKey string, hours []int) error {
 	return nil
 }
 
-// normalizeModelDefaultRealm 归一化 model_default_realm：小写去空白，只接受
-// cn/global/auto，其余（含空）一律回落 cn（向后兼容：旧 config 无此键）。
+// normalizeModelDefaultRealm 归一化 model_default_realm：小写去空白，接受
+// cn/global/auto/auto:global,cn（及别名 cn,global / global,cn 等），
+// 其余（含空）一律回落 cn（向后兼容：旧 config 无此键）。
 func normalizeModelDefaultRealm(v string) string {
-	switch strings.ToLower(strings.TrimSpace(v)) {
+	d := strings.ToLower(strings.TrimSpace(v))
+	d = strings.ReplaceAll(d, " ", "")
+	switch d {
 	case "global":
 		return "global"
-	case "auto":
+	case "auto", "auto:cn,global", "cn,global":
 		return "auto"
+	case "auto:global,cn", "global,cn":
+		return "auto:global,cn"
 	default:
 		return "cn"
 	}

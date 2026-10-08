@@ -8,9 +8,12 @@ const (
 	RealmDefaultCN = "cn"
 	// RealmDefaultGlobal 裸名归 global 域（纯国际版部署用，免写前缀）。
 	RealmDefaultGlobal = "global"
-	// RealmDefaultAuto 按池内可用账号域自动判定（只在一个域有可用号时归该域，
-	// 两域都有或都没有时回落 cn）。
+	// RealmDefaultAuto 按池内可用账号域自动判定（CN 优先，两域均可用时归 cn，
+	// cn 无号/失败时轮退至 global）。
 	RealmDefaultAuto = "auto"
+	// RealmDefaultAutoGlobalCN 按池内可用账号域自动判定（Global 优先，两域均可用时归 global，
+	// global 无号/失败时轮退至 cn）。
+	RealmDefaultAutoGlobalCN = "auto:global,cn"
 )
 
 // RealmResolver 解析模型名协议（PLAN D6）：
@@ -24,55 +27,106 @@ const (
 // 该类型同时被 handler（chat 出站路由）与 session 粘性闭包使用——二者必须用**同一个
 // resolver**，否则粘性分配的账号域与请求实际路由域可能不一致。
 type RealmResolver struct {
-	// Default 裸名默认域：cn / global / auto（空/非法视为 cn）。
+	// Default 裸名默认域：cn / global / auto / auto:global,cn（空/非法视为 cn）。
 	Default string
-	// RealmReady 报告某域当前是否有可用账号（auto 判定用）。nil = 两域都视为可用
-	// （auto 退化为 cn，安全默认）。
+	// RealmReady 报告某域当前是否有可用账号（auto 判定用）。nil = 视为不可用，回落首选域。
 	RealmReady func(realm string) bool
+	// RealmReadyForModel 报告某域当前对指定模型是否有可用账号（可选，若提供则优先使用模型级判定）。
+	RealmReadyForModel func(realm, model string) bool
 }
 
-// NewRealmResolver 构造 resolver。defaultRealm 归一化：非 global/auto 一律 cn。
-func NewRealmResolver(defaultRealm string, realmReady func(realm string) bool) *RealmResolver {
+// NormalizeRealmPolicy 归一化策略值：小写、去空格，接受 cn/global/auto/auto:global,cn 等。
+func NormalizeRealmPolicy(defaultRealm string) string {
 	d := strings.ToLower(strings.TrimSpace(defaultRealm))
-	if d != RealmDefaultGlobal && d != RealmDefaultAuto {
-		d = RealmDefaultCN
+	d = strings.ReplaceAll(d, " ", "")
+	switch d {
+	case RealmDefaultGlobal:
+		return RealmDefaultGlobal
+	case RealmDefaultAuto, "auto:cn,global", "cn,global":
+		return RealmDefaultAuto
+	case RealmDefaultAutoGlobalCN, "global,cn":
+		return RealmDefaultAutoGlobalCN
+	default:
+		return RealmDefaultCN
 	}
-	return &RealmResolver{Default: d, RealmReady: realmReady}
+}
+
+// NewRealmResolver 构造 resolver。defaultRealm 归一化：支持 cn、global、auto、auto:global,cn。
+func NewRealmResolver(defaultRealm string, realmReady func(realm string) bool) *RealmResolver {
+	return &RealmResolver{Default: NormalizeRealmPolicy(defaultRealm), RealmReady: realmReady}
+}
+
+func (r *RealmResolver) candidates() []string {
+	if r == nil {
+		return []string{RealmDefaultCN}
+	}
+	switch r.Default {
+	case RealmDefaultGlobal:
+		return []string{RealmDefaultGlobal}
+	case RealmDefaultAutoGlobalCN:
+		return []string{RealmDefaultGlobal, RealmDefaultCN}
+	case RealmDefaultAuto:
+		return []string{RealmDefaultCN, RealmDefaultGlobal}
+	default:
+		return []string{RealmDefaultCN}
+	}
+}
+
+// CandidateRealms 返回模型名解析后的有序候选域列表与裸模型名。
+//
+// 显式前缀恒优先：显式带 "cn:" 或 "global:" 时仅返回该单一域（严禁跨域轮退）。
+// 裸模型名按 Default 策略返回有序候选域切片（供主备轮退选号使用）。
+func (r *RealmResolver) CandidateRealms(model string) (realms []string, bare string) {
+	if idx := strings.IndexByte(model, ':'); idx >= 0 {
+		prefix := model[:idx]
+		if prefix == "cn" || prefix == "global" {
+			return []string{prefix}, model[idx+1:]
+		}
+	}
+	if r == nil {
+		return []string{RealmDefaultCN}, model
+	}
+	return r.candidates(), model
+}
+
+func (r *RealmResolver) isReady(realm, bare string) bool {
+	if r.RealmReadyForModel != nil && bare != "" {
+		return r.RealmReadyForModel(realm, bare)
+	}
+	if r.RealmReady != nil {
+		return r.RealmReady(realm)
+	}
+	return false
 }
 
 // Resolve 解析模型名 → (realm, bare)。r 为 nil 时等价于默认 cn（零回归兜底）。
 func (r *RealmResolver) Resolve(model string) (realm, bare string) {
-	if idx := strings.IndexByte(model, ':'); idx >= 0 {
-		prefix := model[:idx]
-		if prefix == "cn" || prefix == "global" {
-			return prefix, model[idx+1:]
+	candidates, bareModel := r.CandidateRealms(model)
+	if len(candidates) <= 1 {
+		if len(candidates) == 1 {
+			return candidates[0], bareModel
 		}
+		return RealmDefaultCN, bareModel
 	}
-	if r == nil {
-		return RealmDefaultCN, model
-	}
-	switch r.Default {
-	case RealmDefaultGlobal:
-		return RealmDefaultGlobal, model
-	case RealmDefaultAuto:
-		return r.autoRealm(), model
-	default:
-		return RealmDefaultCN, model
-	}
+	return r.autoRealm(bareModel), bareModel
 }
 
-// autoRealm 自动判定裸名归属：只在一个域有可用账号时归该域，其余（两域都有/都没有）
-// 回落 cn——绝不能因判定摇摆让同一裸名在两次请求间换域。
-func (r *RealmResolver) autoRealm() string {
-	if r.RealmReady == nil {
+// autoRealm 自动判定裸名归属：按候选域优先级遍历健康状态，首个就绪者胜出；
+// 若均未就绪（或无探测闭包），回落优先级首位候选域。
+func (r *RealmResolver) autoRealm(bare string) string {
+	candidates := r.candidates()
+	if len(candidates) <= 1 {
+		if len(candidates) == 1 {
+			return candidates[0]
+		}
 		return RealmDefaultCN
 	}
-	cnReady := r.RealmReady(RealmDefaultCN)
-	globalReady := r.RealmReady(RealmDefaultGlobal)
-	if globalReady && !cnReady {
-		return RealmDefaultGlobal
+	for _, cand := range candidates {
+		if r.isReady(cand, bare) {
+			return cand
+		}
 	}
-	return RealmDefaultCN
+	return candidates[0]
 }
 
 // resolveModel 包内便捷包装（handler 用；等价于一个默认 cn 的 resolver）。

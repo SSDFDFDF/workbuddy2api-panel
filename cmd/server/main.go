@@ -111,11 +111,14 @@ func main() {
 
 	// 会话粘性路由（可配关闭）。
 	var sessRouter *session.Router
-	// 域策略解析器：裸模型名按 config model_default_realm 决定 cn/global/auto。
+	// 域策略解析器：裸模型名按 config model_default_realm 决定 cn/global/auto 系列。
 	// handler（chat 路由）与粘性闭包必须共用同一实例，否则二者域不一致。
 	realmResolver := server.NewRealmResolver(cfg.ModelDefaultRealm, func(realm string) bool {
 		return len(p.AvailableUIDsForRealm(realm)) > 0
 	})
+	realmResolver.RealmReadyForModel = func(realm, model string) bool {
+		return len(p.WeightedAvailableUIDsForModelRealm(model, realm)) > 0
+	}
 	if cfg.ModelDefaultRealm != "cn" {
 		log.Printf("[realm] 裸模型名默认域=%s（显式 cn:/global: 前缀恒优先）", cfg.ModelDefaultRealm)
 	}

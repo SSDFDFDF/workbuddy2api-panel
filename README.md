@@ -352,7 +352,7 @@ uv run --no-project --with openai==3.26.0 --with anthropic==1.12.1 python -c \
 | `session_sticky.enabled` | `true` | 会话粘性路由开关 |
 | `session_sticky.ttl` | `30m` | 会话绑定 TTL（滚动续期） |
 | `session_sticky.gc_interval` | `5m` | 过期绑定 GC 周期 |
-| `model_default_realm` | `cn` | 裸模型名（无 `cn:`/`global:` 前缀）的默认域：`cn`=归国内版（历史默认）；`global`=归国际版（纯 global 池免写前缀）；`auto`=按池内可用账号域自动判定（仅一个域有可用号时归该域，两域都有/都没有回落 `cn`）。显式前缀恒优先；非法值回落 `cn` |
+| `model_default_realm` | `cn` | 裸模型名（无 `cn:`/`global:` 前缀）的默认域：`cn`=归国内版（历史默认）；`global`=归国际版（纯 global 池免写前缀）；`auto`（或 `auto:cn,global`）=自动判定（CN 优先，无号/失败时轮退至 global）；`auto:global,cn`=自动判定（Global 优先，无号/失败时轮退至 cn）。显式前缀恒优先；非法值回落 `cn` |
 | `proxy_url` | 空 | **普通正向代理**地址（`http`/`https`/`socks5`/`socks5h`，凭证可写在 URL，如 `http://user:pass@127.0.0.1:8080`）。**空 = 不接入**；与 `resin_url` 互斥；账号可用 `use_proxy` 单独关闭（见下） |
 | `resin_url` | 空 | 外部粘性代理池 Resin 接入地址（含基址与 Token，如 `http://127.0.0.1:2260/my-token`）。**空 = 不接入**，出站行为与主线一致；详见 [FORK_CHANGES.md](FORK_CHANGES.md) |
 | `resin_platform_name` | 空 | Resin `Platform` 字段，必须与部署一致（不能含 `.` / `:` / `/`） |

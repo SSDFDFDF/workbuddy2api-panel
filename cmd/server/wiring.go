@@ -12,10 +12,20 @@ import (
 // CN 前缀请求（跨 realm 泄漏）。
 //
 // **必须与 handler 用同一个 resolver**：裸名的默认域由 model_default_realm 策略
-// （cn/global/auto）决定，两处不一致会导致粘性分配域与请求实际路由域错位。
+// （cn/global/auto/auto:global,cn）决定，两处不一致会导致粘性分配域与请求实际路由域错位。
+// 在 auto 策略下按优先级候选域检查，返回首个有可用账号的域候选集。
 func realmAwareAvailableForModel(p *pool.Pool, rr *server.RealmResolver) func(model string) []string {
 	return func(model string) []string {
-		realm, bare := rr.Resolve(model)
-		return p.WeightedAvailableUIDsForModelRealm(bare, realm)
+		candidates, bare := rr.CandidateRealms(model)
+		for _, realm := range candidates {
+			uids := p.WeightedAvailableUIDsForModelRealm(bare, realm)
+			if len(uids) > 0 {
+				return uids
+			}
+		}
+		if len(candidates) > 0 {
+			return p.WeightedAvailableUIDsForModelRealm(bare, candidates[0])
+		}
+		return nil
 	}
 }

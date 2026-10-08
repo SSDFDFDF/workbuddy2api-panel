@@ -606,16 +606,35 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 
 	// realm 前缀解析（D6）：model 名可能带 "[realm:]" 前缀。剥出 realm + bareModel，
 	// bareModel 用于选号/粘性/出站 body 重写（前缀是网关侧路由协议，上游只认裸名）。
-	// 裸名按 config model_default_realm 策略（cn/global/auto）；resolver 为 nil 时
-	// 回落 cn（零回归）。
-	realm, bareModel := h.realmResolver().Resolve(peek.Model)
-	if strings.TrimSpace(bareModel) == "" || (realm == "global" && !h.cfg.GlobalEnabled) {
+	// 裸名按 config model_default_realm 策略（cn/global/auto/auto:global,cn 系列）；
+	// resolver 为 nil 时回落 cn（零回归）。
+	candidateRealms, bareModel := h.realmResolver().CandidateRealms(peek.Model)
+	if strings.TrimSpace(bareModel) == "" {
 		out.Error(w, http.StatusBadRequest, "invalid_model", "model realm is disabled or model is empty")
 		return
 	}
+	// 显式 global: 前缀在 global 禁用时必须报错（非静默跨域）
+	if len(candidateRealms) == 1 && candidateRealms[0] == RealmDefaultGlobal && !h.cfg.GlobalEnabled {
+		out.Error(w, http.StatusBadRequest, "invalid_model", "model realm is disabled or model is empty")
+		return
+	}
+	if !h.cfg.GlobalEnabled {
+		filtered := make([]string, 0, len(candidateRealms))
+		for _, cr := range candidateRealms {
+			if cr != RealmDefaultGlobal {
+				filtered = append(filtered, cr)
+			}
+		}
+		candidateRealms = filtered
+	}
+	if len(candidateRealms) == 0 {
+		out.Error(w, http.StatusBadRequest, "invalid_model", "model realm is disabled or model is empty")
+		return
+	}
+	primaryRealm := candidateRealms[0]
 	modelRate := ""
 	if h.cfg.Upstream != nil {
-		modelRate = h.cfg.Upstream.ModelRate(realm, bareModel)
+		modelRate = h.cfg.Upstream.ModelRate(primaryRealm, bareModel)
 	}
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
@@ -645,18 +664,27 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 		principalID = hex.EncodeToString(sum[:16])
 	}
 	sessKey := ""
-	if peek.ConversationID != "" {
-		sessKey = realm + ":" + bareModel + ":" + peek.ConversationID
-		if principalID != "" {
-			sessKey = principalID + ":" + sessKey
-		}
-	}
 	stickyUID := ""
-	if h.cfg.Session != nil && sessKey != "" {
-		// 按模型解析：绑定号在**当前模型**被 6004 限额时视为不可用 → 重新分配，
-		// 而不是钉在限额号上反复失败（"限额后换不动号"的正解）。
-		if uid, ok := h.cfg.Session.ResolveForModel(sessKey, peek.Model); ok {
-			stickyUID = uid
+	if peek.ConversationID != "" {
+		// 在候选域中按优先级检查既有会话绑定（避免多轮对话因自动轮转发生跨域漂移）。
+		if h.cfg.Session != nil {
+			for _, cr := range candidateRealms {
+				k := cr + ":" + bareModel + ":" + peek.ConversationID
+				if principalID != "" {
+					k = principalID + ":" + k
+				}
+				if uid, ok := h.cfg.Session.ResolveForModel(k, peek.Model); ok {
+					stickyUID = uid
+					sessKey = k
+					break
+				}
+			}
+		}
+		if sessKey == "" {
+			sessKey = primaryRealm + ":" + bareModel + ":" + peek.ConversationID
+			if principalID != "" {
+				sessKey = principalID + ":" + sessKey
+			}
 		}
 	}
 
@@ -740,6 +768,10 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 			if a, ok := h.cfg.Pool.Status(uid); ok && a.Realm != "" {
 				realm = a.Realm
 			}
+			actualModelRate := modelRate
+			if h.cfg.Upstream != nil {
+				actualModelRate = h.cfg.Upstream.ModelRate(realm, bareModel)
+			}
 			h.cfg.Usage.Add(time.Now(), realm, uid, delta.Model, usage.Delta{
 				PromptTokens:     delta.PromptTokens,
 				HasPromptTokens:  delta.HasPromptTokens,
@@ -752,7 +784,7 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 				HasCacheTokens:   st.hasCache,
 				CacheHitTokens:   st.cacheHit,
 				CacheMissTokens:  st.cacheMiss,
-				ModelRate:        modelRate,
+				ModelRate:        actualModelRate,
 				LatencyMs:        delta.LatencyMs,
 				HasLatency:       delta.HasLatencyMs,
 				TokensPerSecond:  delta.TokensPerSecond,
@@ -761,24 +793,11 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 		}
 	}
 
-	// 系统提示词组合（出站前、轮转前；每个请求一次）。
-	//
-	// mode（由 config 装配期解析，见 cmd/server/prompt_config.go）：
-	//   - none    ：不改写（客户端 system 逐字出站）；
-	//   - replace ：删全部 system/developer，只留网关提示词（指纹面最小）；
-	//   - append  ：客户端开头块之后插网关提示词（客户端在前）；
-	//   - after   ：网关提示词置首，客户端开头块紧随其后（后组合）。
-	//
-	// 规则按请求 realm 选（cn/global 各自一份，未配则回落默认规则）——
-	// 同一网关可对 CN 与 Global 账号发不同提示词。
-	if rule, ok := h.promptRuleFor(realm); ok {
-		body = prompt.Compose(body, rule.Text, rule.Mode)
-	}
-
 	// outbound model 名重写为 bareModel（D6）：realm 前缀是网关侧路由协议，
 	// 上游不认前缀（global 账号也请求裸模型名）。裸名时 bareModel==peek.Model 恒等。
+	baseBody := body
 	if bareModel != peek.Model {
-		body = rewriteModel(body, bareModel)
+		baseBody = rewriteModel(baseBody, bareModel)
 	}
 
 	// 会话头族（issue #35）：后台按 X-Conversation-Request-ID（对话轮级）聚合请求，
@@ -811,7 +830,7 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 		var acct *auth.Auth
 		if stickyUID != "" {
 			acct = h.cfg.Pool.PickByUIDForModel(stickyUID, bareModel)
-			if acct == nil || (realm != "" && acct.Realm() != realm) {
+			if acct == nil || !containsRealm(candidateRealms, acct.Realm()) {
 				// 粘性号在当前模型不可用（冷却/占满/该模型被 6004 限额）或 realm 不符 → 解绑，
 				// 本次回落普通轮换。
 				unbindSticky()
@@ -819,9 +838,13 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 			}
 		}
 		if acct == nil {
-			// 模型感知 + realm 感知选号：模型非空时启用 6004 模型级冷却豁免
-			// （healthyForModel），realm 谓词过滤跨域账号。
-			acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, realm)
+			// 模型感知 + realm 感知选号：按候选域优先级遍历选号（主备轮退）
+			for _, cr := range candidateRealms {
+				acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, cr)
+				if acct != nil {
+					break
+				}
+			}
 		}
 		if acct == nil {
 			st.status = http.StatusServiceUnavailable
@@ -875,9 +898,15 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 			}
 		}
 
+		// 系统提示词组合：按实际选中账号所属域应用（同一网关对 CN 与 Global 可配不同规则）
+		attemptBody := baseBody
+		if rule, ok := h.promptRuleFor(acct.Realm()); ok {
+			attemptBody = prompt.Compose(baseBody, rule.Text, rule.Mode)
+		}
+
 		// 客户端 IP 按请求传递（PassthroughIP 开启时注入；消除共享字段竞态）。
 		attemptStarted := time.Now()
-		rc, status, respBody, terr := h.cfg.Upstream.ChatStreamContext(r.Context(), acct, body, clientIP, chatMeta)
+		rc, status, respBody, terr := h.cfg.Upstream.ChatStreamContext(r.Context(), acct, attemptBody, clientIP, chatMeta)
 		// 分类信封一次成型：upstream 已在错误路径返回 *upstream.Error（Kind +
 		// Retry-After 头解析）。传输层错误（非 *Error）走抖动换号分支；防御分支
 		// （terr 为 nil 但 status>=400，如 ErrNone 兜底）回落本地 Classify，双保险。
@@ -1084,7 +1113,15 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 				h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
 				// 粘性跟随最终成功号：本轮成功的账号成为该会话的粘性绑定（覆盖旧绑定）。
 				// 若 sticky 号失败、轮换到别的号成功，这里把会话重绑到新号，多轮对话下一跳不再随机抽。
-				if sessKey != "" && h.cfg.Session != nil {
+				if peek.ConversationID != "" && h.cfg.Session != nil {
+					actualSessKey := acct.Realm() + ":" + bareModel + ":" + peek.ConversationID
+					if principalID != "" {
+						actualSessKey = principalID + ":" + actualSessKey
+					}
+					if sessKey != "" && sessKey != actualSessKey {
+						h.cfg.Session.Unbind(sessKey)
+						sessKey = actualSessKey
+					}
 					h.cfg.Session.Bind(sessKey, acct.UID)
 				}
 			}
@@ -1159,7 +1196,15 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 		// 非流式同理：聚合成功（无 error 帧、非空流）才算这一跳成功，事后才记成功/绑粘性。
 		h.cfg.Pool.NoteSuccess(acct.UID)
 		h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
-		if sessKey != "" && h.cfg.Session != nil {
+		if peek.ConversationID != "" && h.cfg.Session != nil {
+			actualSessKey := acct.Realm() + ":" + bareModel + ":" + peek.ConversationID
+			if principalID != "" {
+				actualSessKey = principalID + ":" + actualSessKey
+			}
+			if sessKey != "" && sessKey != actualSessKey {
+				h.cfg.Session.Unbind(sessKey)
+				sessKey = actualSessKey
+			}
 			h.cfg.Session.Bind(sessKey, acct.UID)
 		}
 		// 成本账本（非流式）：从聚合响应的 usage 取 credit 与 token 总数。
@@ -1569,4 +1614,13 @@ func (h *Handler) hintOf(kind upstream.ErrKind, body, bareModel string, hasImage
 		msg = uerr.Msg
 	}
 	return upstream.GatewayHint(kind, msg, h.hintContext(bareModel, hasImage))
+}
+
+func containsRealm(realms []string, realm string) bool {
+	for _, r := range realms {
+		if r == realm {
+			return true
+		}
+	}
+	return false
 }

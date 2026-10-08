@@ -731,9 +731,10 @@
                 <select name="model_default_realm">
                   <option value="cn">cn — 裸名归国内版（默认）</option>
                   <option value="global">global — 裸名归国际版</option>
-                  <option value="auto">auto — 按池内可用域名自动判定</option>
+                  <option value="auto">auto — 自动判定 (CN 优先，故障轮退至 Global)</option>
+                  <option value="auto:global,cn">auto:global,cn — 自动判定 (Global 优先，故障轮退至 CN)</option>
                 </select>
-                <span class="hint">无 cn:/global: 前缀时的归属；auto 仅一个域有可用号时归该域。显式前缀恒优先；需重启</span></label>
+                <span class="hint">无 cn:/global: 前缀时的归属；支持优先排序与跨域故障自动轮退。显式前缀恒优先；需重启</span></label>
             </div>
           </div>
         </div>
