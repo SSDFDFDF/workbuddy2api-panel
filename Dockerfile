@@ -1,12 +1,23 @@
 # syntax=docker/dockerfile:1
+# 前端构建层：React + Vite 产物（固定三件套 → internal/panel/web/）
+# 源码树先整体拷进来（vite outDir 相对路径需要 ../internal/panel/web 存在）
+FROM node:22-alpine AS frontend
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+WORKDIR /src
+COPY . .
+RUN cd frontend && npm config set registry $NPM_REGISTRY && npm install && npm run build \
+ && ls /src/internal/panel/web
+
 FROM golang:1.23-alpine AS build
 # 构建时可传入 --build-arg GOPROXY=... 覆盖（默认官方源，国内环境可传 goproxy）
 ARG GOPROXY=https://proxy.golang.org,direct
 ENV GOPROXY=${GOPROXY}
 WORKDIR /src
-COPY go.mod ./
+COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
+# 前端产物从前一层取（覆盖源码树里的 web/，保证镜像内是新构建）
+COPY --from=frontend /src/internal/panel/web ./internal/panel/web
 # 一次编译全部二进制（工具进镜像，容器内可直接跑脚本）。全部 -trimpath -s -w。
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/wb2api ./cmd/server \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/signin_bin ./cmd/signin \

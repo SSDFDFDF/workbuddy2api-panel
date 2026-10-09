@@ -50,14 +50,25 @@ run: ## 本机启动服务（go run ./cmd/server）
 	@test -f $(CONFIG) || { cp config.example.json $(CONFIG); echo "已从 config.example.json 生成 $(CONFIG)（首次启动日志会打印随机 api_key）"; }
 	$(GO) run ./cmd/server -config $(CONFIG)
 
+# ---- 前端（React + Vite，产物嵌进 Go 二进制）-----------------------------
+FRONTEND_DIR := frontend
+WEB_DIR      := internal/panel/web
+NPM          ?= npm
+
+.PHONY: frontend
+frontend: ## 构建前端（npm run build → internal/panel/web/）
+	@test -x "$(shell command -v node 2>/dev/null)" || { echo "缺少 node（跳过前端构建，沿用 $(WEB_DIR)/ 里的已有产物）"; exit 0; }
+	cd $(FRONTEND_DIR) && ([ -d node_modules ] || $(NPM) install) && $(NPM) run build
+	@echo "→ $(WEB_DIR)/（index.html + app.js + app.css）"
+
 # ---- 构建 ----------------------------------------------------------------
 .PHONY: build
-build: ## 构建服务端 wb2api（当前平台）
+build: frontend ## 构建服务端 wb2api（当前平台；先构建前端）
 	$(GO) build $(BUILD_FLAGS) -o wb2api$(EXE) ./cmd/server
 	@echo "→ wb2api$(EXE) (版本 $(APP_VERSION))"
 
 .PHONY: build-all
-build-all: ## 构建全部二进制（server/signin/login/credit）
+build-all: frontend ## 构建全部二进制（server/signin/login/credit；先构建前端）
 	@set -e; for c in $(CMDS); do \
 	  pkg="$${c%%:*}"; out="$${c##*:}"; \
 	  $(GO) build $(BUILD_FLAGS) -o "$$out$(EXE)" "./cmd/$$pkg"; \
@@ -78,6 +89,7 @@ release: ## 五平台二进制 + zip/tar.gz + checksums（输出到 dist/）
 	  command -v zip >/dev/null 2>&1 || { echo "缺少 zip（Windows 包需要）"; exit 1; }; \
 	fi
 	@rm -rf $(DIST_DIR) && mkdir -p $(DIST_DIR)
+	@$(MAKE) --no-print-directory frontend
 	@set -e; V="$(APP_VERSION)"; V="$${V%-panel}"; \
 	for p in $(PLATFORMS); do \
 	  os="$${p%%/*}"; arch="$${p##*/}"; ext=""; [ "$$os" = windows ] && ext=".exe"; \
@@ -191,7 +203,7 @@ health: ## 健康检查（默认 http://localhost:7863/healthz）
 .PHONY: clean
 clean: ## 删除构建产物（二进制、dist/、coverage.out）
 	rm -f wb2api wb2api.exe signin_bin signin_bin.exe login login.exe credit credit.exe coverage.out
-	rm -rf $(DIST_DIR)
+	rm -rf $(DIST_DIR) $(WEB_DIR)
 
 .PHONY: clean-dist
 clean-dist: ## 只清理 dist/

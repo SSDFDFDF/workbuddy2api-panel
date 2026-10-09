@@ -1,0 +1,158 @@
+/* ── 面板主题层：Tailwind v4 注册 + 设计令牌（明暗两套） ─────────────────
+   令牌沿用旧版冷石墨色板：底色分层 + 单一靛蓝强调，语义色只给状态。
+   组件一律用 Tailwind 工具类 + var(--token)（bg-[var(--surface)] 形态），
+   令牌集中在 tokens.css，主题切换只换 data-theme。 */
+@import 'tailwindcss';
+
+:root {
+  --bg: #0c0e14;
+  --surface: #14171f;
+  --surface-2: #1a1e28;
+  --raise: #202531;
+  --line: #262c3a;
+  --line-soft: #1e232e;
+  --ink: #e8ebf2;
+  --ink-2: #a8b0c2;
+  --ink-3: #6b7488;
+  --accent: #5b7cfa;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(91, 124, 250, 0.13);
+  --ok: #3ddc97;
+  --ok-soft: rgba(61, 220, 151, 0.12);
+  --warn: #f5b544;
+  --warn-soft: rgba(245, 181, 68, 0.12);
+  --bad: #f0655f;
+  --bad-soft: rgba(240, 101, 95, 0.12);
+  --mono: ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, monospace;
+  --sans: system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+
+[data-theme='light'] {
+  --bg: #f4f5f8;
+  --surface: #ffffff;
+  --surface-2: #f8f9fb;
+  --raise: #ffffff;
+  --line: #e2e5ec;
+  --line-soft: #eceef3;
+  --ink: #14171f;
+  --ink-2: #545c6e;
+  --ink-3: #8b93a5;
+  --accent: #3d5fe0;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(61, 95, 224, 0.09);
+  --ok: #0f9d63;
+  --ok-soft: rgba(15, 157, 99, 0.1);
+  --warn: #b47611;
+  --warn-soft: rgba(180, 118, 17, 0.11);
+  --bad: #cf3b34;
+  --bad-soft: rgba(207, 59, 52, 0.09);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.55 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: var(--accent-soft);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+
+/* 数字统一 tabular：所有观测值都是等宽数字，表格不跳。 */
+.tabular {
+  font-variant-numeric: tabular-nums;
+  font-family: var(--mono);
+}
+
+/* 滚动条（WebKit）：细条、随主题。 */
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 原生表单控件的主题适配：select/input/date 在暗色下默认是白的，必须统一。 */
+input,
+select,
+textarea,
+button {
+  font: inherit;
+  color: inherit;
+}
+
+/* select 下拉箭头（原生外观在暗色下反白，统一自绘）。 */
+.wb-select {
+  appearance: none;
+  background: var(--surface-2)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23888' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E")
+    no-repeat right 8px center;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+/* keyframes：脉冲与 toast 动画（Tailwind 任意值内联不方便复用，集中在此）。 */
+@keyframes wb-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+.wb-pulse-anim {
+  animation: wb-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes wb-dots {
+  0%,
+  20% {
+    content: '';
+  }
+  40% {
+    content: '·';
+  }
+  60% {
+    content: '··';
+  }
+  80%,
+  100% {
+    content: '···';
+  }
+}
+
+@keyframes wb-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+/* datetime-local 的图标按钮在暗色下是黑块，改为细箭头。 */
+[data-theme='dark'] input[type='datetime-local']::-webkit-calendar-picker-indicator {
+  filter: invert(0.7);
+}

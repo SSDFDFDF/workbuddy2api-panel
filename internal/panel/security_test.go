@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -71,11 +72,11 @@ func TestIndexReferencesExternalScript(t *testing.T) {
 	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/", nil))
 	body := rec.Body.String()
 
-	if !strings.Contains(body, `<script src="app.js"></script>`) {
-		t.Error("index.html must load app.js externally (inline script is blocked by CSP)")
+	if !strings.Contains(body, `src="./app.js"`) {
+		t.Error("index.html must load ./app.js externally (inline script is blocked by CSP)")
 	}
-	if !strings.Contains(body, `<link rel="stylesheet" href="app.css">`) {
-		t.Error("index.html must load app.css externally (styles live in app.css, not an inline <style>)")
+	if !strings.Contains(body, `href="./app.css"`) {
+		t.Error("index.html must load ./app.css externally (styles live in app.css, not an inline <style>)")
 	}
 	// 反例保护：出现内联 <script>...</script> 内容块即为回归
 	if strings.Contains(body, "<script>\n") || strings.Contains(body, "<script> ") {
@@ -95,10 +96,14 @@ func TestAppScriptServed(t *testing.T) {
 		t.Errorf("Content-Type=%q want javascript", ct)
 	}
 	body := rec.Body.String()
-	if body != string(panelJS) {
-		t.Error("app.js 响应与 init 时拼接的 bundle 不一致（js/ 分片未正确下发）")
+	b, err := fs.ReadFile(webFS, "web/app.js")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(body, "'use strict'") {
+	if body != string(b) {
+		t.Error("app.js 响应与 embed 的产物不一致")
+	}
+	if !strings.Contains(body, "WorkBuddy") && !strings.Contains(body, "panel/api") {
 		t.Error("app.js body looks wrong")
 	}
 }
@@ -115,11 +120,15 @@ func TestAppStylesServed(t *testing.T) {
 		t.Errorf("Content-Type=%q want css", ct)
 	}
 	body := rec.Body.String()
-	if body != string(appCSS) {
+	b, err := fs.ReadFile(webFS, "web/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != string(b) {
 		t.Error("app.css 响应与 embed 的样式表不一致")
 	}
 	if !strings.Contains(body, ":root") || !strings.Contains(body, "--bg:") {
-		t.Error("app.css body looks wrong")
+		t.Error("app.css body looks wrong（设计令牌丢失）")
 	}
 }
 
