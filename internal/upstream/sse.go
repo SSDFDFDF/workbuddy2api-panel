@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/jsondoc"
+	"workbuddy_manager/internal/jsondoc"
 )
 
 const maxSSEEvent = 8 << 20

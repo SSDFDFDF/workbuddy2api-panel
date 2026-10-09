@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
+	"workbuddy_manager/internal/auth"
+	"workbuddy_manager/internal/reqlog"
 )
 
 // failWriter 模拟「客户端保持连接但不读」：写正文时返回错误。

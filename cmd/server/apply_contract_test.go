@@ -10,7 +10,7 @@ package main
 import (
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/config"
+	"workbuddy_manager/internal/config"
 )
 
 // hotAppliedPaths 声明 saveConfig 实际热应用的配置路径（末尾 ".*" = 整组热应用）。

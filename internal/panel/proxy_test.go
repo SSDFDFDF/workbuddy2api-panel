@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
+	"workbuddy_manager/internal/auth"
+	"workbuddy_manager/internal/pool"
 )
 
 // TestAccountProxyEndpoint 验证账号级代理开关接口：切换 → 落盘 → 状态透出 → 校验。

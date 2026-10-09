@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"workbuddy_manager/internal/auth"
 )
 
 // hasPendingSave 报告是否存在尚未成功落盘的变更（版本号口径）。

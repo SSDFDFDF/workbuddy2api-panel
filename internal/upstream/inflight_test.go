@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"workbuddy_manager/internal/auth"
 )
 
 // TestInflightCoalescesConcurrentCalls 单飞语义：并发同 key 只执行一次，结果共享。

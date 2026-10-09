@@ -12,11 +12,11 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/config"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/config/runtime"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"workbuddy_manager/internal/config"
+	"workbuddy_manager/internal/config/runtime"
+	"workbuddy_manager/internal/pool"
+	"workbuddy_manager/internal/scheduler"
+	"workbuddy_manager/internal/upstream"
 )
 
 // TestConcurrentConfigSaveSerialized 守护「保存配置」的事务互斥：

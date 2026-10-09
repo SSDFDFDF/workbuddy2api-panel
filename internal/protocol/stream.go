@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"workbuddy_manager/internal/upstream"
 )
 
 // Stream relays text immediately but buffers tools until the native completion

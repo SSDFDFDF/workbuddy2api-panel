@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/jsondoc"
+	"workbuddy_manager/internal/jsondoc"
 )
 
 func namespaceFixture(t *testing.T, ns, name string) map[string]any {

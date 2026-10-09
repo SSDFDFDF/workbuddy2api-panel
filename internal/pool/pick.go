@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
+	"workbuddy_manager/internal/auth"
+	"workbuddy_manager/internal/logfmt"
 )
 
 // Pick 单一选号入口（无请求级轮换、无 realm 过滤，模型感知缺省账号级）。

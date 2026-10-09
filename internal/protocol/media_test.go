@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/media"
+	"workbuddy_manager/internal/media"
 )
 
 // 8 字节合法 PNG 头。

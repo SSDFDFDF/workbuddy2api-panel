@@ -10,9 +10,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"workbuddy_manager/internal/auth"
+	"workbuddy_manager/internal/reqlog"
+	"workbuddy_manager/internal/upstream"
 )
 
 func protocolRequest(path string, stream bool) *http.Request {

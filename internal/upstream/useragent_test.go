@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"workbuddy_manager/internal/auth"
 )
 
 func TestV2RealmIdentity(t *testing.T) {

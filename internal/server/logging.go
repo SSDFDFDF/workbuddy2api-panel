@@ -14,11 +14,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/jsondoc"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"workbuddy_manager/internal/jsondoc"
+	"workbuddy_manager/internal/logfmt"
+	"workbuddy_manager/internal/pool"
+	"workbuddy_manager/internal/reqlog"
+	"workbuddy_manager/internal/upstream"
 )
 
 // maxUserAgentLen 归档与面板展示保留的 UA 字节上限。UA 是客户端完全可控的

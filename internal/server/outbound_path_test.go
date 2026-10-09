@@ -8,11 +8,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/forwarding"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/scrub"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"workbuddy_manager/internal/auth"
+	"workbuddy_manager/internal/forwarding"
+	"workbuddy_manager/internal/prompt"
+	"workbuddy_manager/internal/scrub"
+	"workbuddy_manager/internal/upstream"
 )
 
 // 内置指纹夹具（与 scrub 包同一实测口径：Claude Code 身份串）。

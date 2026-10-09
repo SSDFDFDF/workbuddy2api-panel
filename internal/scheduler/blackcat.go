@@ -6,8 +6,8 @@ import (
 	"log"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"workbuddy_manager/internal/logfmt"
+	"workbuddy_manager/internal/upstream"
 )
 
 // nowForNightWindow 夜猫子窗口判定所用时钟（生产恒为 time.Now）。

@@ -11,12 +11,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/config"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/config/runtime"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/media"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"workbuddy_manager/internal/config"
+	"workbuddy_manager/internal/config/runtime"
+	"workbuddy_manager/internal/media"
+	"workbuddy_manager/internal/pool"
+	"workbuddy_manager/internal/scheduler"
+	"workbuddy_manager/internal/upstream"
 )
 
 // TestUnknownConfigKeySurvivesSave unknown 键在保存回写时保留（不静默删用户数据）。

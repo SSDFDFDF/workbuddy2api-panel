@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/jsondoc"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"workbuddy_manager/internal/jsondoc"
+	"workbuddy_manager/internal/upstream"
 )
 
 const emptyIdentityStream = `data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"a","type":"function","function":{"name":"","arguments":"{"}},{"index":1,"id":"b","type":"function","function":{"name":"other","arguments":"{}"}}]}}]}` + "\n\n" +

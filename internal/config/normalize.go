@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/media"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/proxy"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/scrub"
+	"workbuddy_manager/internal/media"
+	"workbuddy_manager/internal/proxy"
+	"workbuddy_manager/internal/scrub"
 )
 
 func (c *Config) normalize() error {

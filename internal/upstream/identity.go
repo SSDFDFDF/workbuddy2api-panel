@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"workbuddy_manager/internal/auth"
 )
 
 // IdentityProfile is a realm-scoped identity. Purpose overrides never change realm.

@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/jsondoc"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/media"
+	"workbuddy_manager/internal/jsondoc"
+	"workbuddy_manager/internal/media"
 )
 
 const MaxRequestBytes = 32 << 20

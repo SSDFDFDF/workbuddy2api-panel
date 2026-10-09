@@ -9,10 +9,10 @@ package config
 import (
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/proxy"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/scrub"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"workbuddy_manager/internal/prompt"
+	"workbuddy_manager/internal/proxy"
+	"workbuddy_manager/internal/scrub"
+	"workbuddy_manager/internal/upstream"
 )
 
 // 入站准入的缺省值（server.* 可覆盖）。与 internal/server 的默认值保持一致；

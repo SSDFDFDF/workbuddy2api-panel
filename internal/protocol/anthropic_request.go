@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/jsondoc"
+	"workbuddy_manager/internal/jsondoc"
 )
 
 func anthropicRequest(src map[string]any) (map[string]any, error) {

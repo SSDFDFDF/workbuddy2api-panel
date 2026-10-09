@@ -12,8 +12,8 @@ import (
 	"encoding/json"
 
 	"fmt"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"net/http"
+	"workbuddy_manager/internal/auth"
 )
 
 // streakRedeemPath / lottery 路径（growth 域，growthJSON 走 www.workbuddy.cn）。

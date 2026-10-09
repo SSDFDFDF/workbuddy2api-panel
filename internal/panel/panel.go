@@ -22,16 +22,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/config"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/config/runtime"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/proxy"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
+	"workbuddy_manager/internal/auth"
+	"workbuddy_manager/internal/config"
+	"workbuddy_manager/internal/config/runtime"
+	"workbuddy_manager/internal/httpauth"
+	"workbuddy_manager/internal/pool"
+	"workbuddy_manager/internal/proxy"
+	"workbuddy_manager/internal/reqlog"
+	"workbuddy_manager/internal/scheduler"
+	"workbuddy_manager/internal/upstream"
+	"workbuddy_manager/internal/usage"
 )
 
 // Config 面板依赖（main 装配注入）。

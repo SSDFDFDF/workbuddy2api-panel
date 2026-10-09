@@ -15,7 +15,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/jsondoc"
+	"workbuddy_manager/internal/jsondoc"
 )
 
 // 组合位置（config prompt.mode / prompt.profiles.<realm>.mode 取值）。

@@ -6,9 +6,9 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/protocol"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"workbuddy_manager/internal/httpauth"
+	"workbuddy_manager/internal/protocol"
+	"workbuddy_manager/internal/upstream"
 )
 
 func isInferencePath(path string) bool {

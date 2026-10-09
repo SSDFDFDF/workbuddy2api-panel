@@ -31,7 +31,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
+	"workbuddy_manager/internal/prompt"
 )
 
 // PromptProfile 单个账号域的提示词覆盖项（键 cn / global）。

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"workbuddy_manager/internal/upstream"
 )
 
 type blockKind uint8

@@ -21,8 +21,8 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/jsondoc"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"workbuddy_manager/internal/jsondoc"
+	"workbuddy_manager/internal/upstream"
 )
 
 // runtimeMetaKeys 运行期元数据键：写在配置对象上供面板展示，但**不是配置输入**。

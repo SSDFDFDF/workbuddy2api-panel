@@ -10,7 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/jsondoc"
+	"workbuddy_manager/internal/jsondoc"
 )
 
 // LoadCacheSecret creates an account-independent persistent HMAC secret atomically.

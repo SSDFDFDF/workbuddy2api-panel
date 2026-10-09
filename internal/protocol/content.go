@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/media"
+	"workbuddy_manager/internal/media"
 )
 
 // mediaError 把 media 包的校验错误转成协议侧的统一 400 信封（Param/Message 原样），

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"workbuddy_manager/internal/upstream"
 )
 
 func TestToolSelectionContract(t *testing.T) {

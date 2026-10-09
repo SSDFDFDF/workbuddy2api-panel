@@ -3,7 +3,7 @@ package protocol
 import (
 	"fmt"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"workbuddy_manager/internal/upstream"
 )
 
 func declaredToolNames(req *Request) []string {

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
+	"workbuddy_manager/internal/auth"
+	"workbuddy_manager/internal/pool"
 )
 
 func TestRealmResolverExplicitPrefixWins(t *testing.T) {

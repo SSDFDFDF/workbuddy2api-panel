@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"workbuddy_manager/internal/auth"
 )
 
 // TestNicknameConcurrentReadWrite 守护昵称的跨锁访问回归：

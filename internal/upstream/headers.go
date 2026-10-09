@@ -9,8 +9,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
+	"workbuddy_manager/internal/auth"
+	"workbuddy_manager/internal/session"
 )
 
 const (

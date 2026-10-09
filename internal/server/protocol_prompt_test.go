@@ -9,13 +9,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/forwarding"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/jsondoc"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/protocol"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/scrub"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"workbuddy_manager/internal/auth"
+	"workbuddy_manager/internal/forwarding"
+	"workbuddy_manager/internal/jsondoc"
+	"workbuddy_manager/internal/prompt"
+	"workbuddy_manager/internal/protocol"
+	"workbuddy_manager/internal/scrub"
+	"workbuddy_manager/internal/upstream"
 )
 
 func promptProtocolRequest(t *testing.T, kind protocol.Kind) []byte {

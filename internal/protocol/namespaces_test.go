@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/jsondoc"
+	"workbuddy_manager/internal/jsondoc"
 )
 
 const nsFunction = `{"type":"function","name":"lookup","description":"exact child guidance","parameters":{"type":"object","properties":{"n":{"type":"integer","default":9007199254740993}}},"strict":false}`

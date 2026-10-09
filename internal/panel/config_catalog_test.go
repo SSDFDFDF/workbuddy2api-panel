@@ -16,7 +16,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/config"
+	"workbuddy_manager/internal/config"
 )
 
 // cfgMapPaths 从 30-config.js 的 CFG_MAP 里解析「表单字段名 → 配置路径」。

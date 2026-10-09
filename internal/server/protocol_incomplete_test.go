@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
+	"workbuddy_manager/internal/auth"
+	"workbuddy_manager/internal/reqlog"
 )
 
 func TestPartialToolsAccountingAndNoReplay(t *testing.T) {

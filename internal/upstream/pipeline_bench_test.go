@@ -19,7 +19,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/forwarding"
+	"workbuddy_manager/internal/forwarding"
 )
 
 // benchPayloadSize 与 media.MaxImageBytes 对齐的档位（0 = 纯文本）。

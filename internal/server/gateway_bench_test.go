@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"workbuddy_manager/internal/auth"
+	"workbuddy_manager/internal/upstream"
 )
 
 // gatewayBenchSSE 一个最小的合法上游 SSE 响应（非流式聚合路径会消费它）。

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
+	"workbuddy_manager/internal/prompt"
 )
 
 // previewTextLimit 预览返回的正文上限（字节）。超过则截断并置 truncated=true：
