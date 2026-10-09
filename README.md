@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/DGZSbot/ai-icon/refs/heads/main/WorkBuddy.png" alt="WorkBuddy2API" width="120">
+  <img src="https://raw.githubusercontent.com/DGZSbot/ai-icon/refs/heads/main/WorkBuddy.png" alt="WorkBuddy Manager" width="120">
 </p>
 
-<h1 align="center">WorkBuddy2API Panel</h1>
+<h1 align="center">WorkBuddy Manager</h1>
 
 <p align="center">
   <b>把腾讯 CodeBuddy / WorkBuddy 账号变成 OpenAI 兼容 API 的多账号网关 · 附 Web 管理面板</b><br>
@@ -26,7 +26,7 @@
 
 ## 项目简介
 
-WorkBuddy2API 是一个自托管的 **OpenAI / Anthropic 协议桥接网关**，将腾讯 CodeBuddy / WorkBuddy（`www.workbuddy.cn` / `www.workbuddy.ai`）账号包装为统一的 API：原生 `/v1/chat/completions`，以及无状态文本 / 工具子集的 `/v1/responses`、`/v1/messages`，并自带一个内嵌的 Web 管理面板。
+WorkBuddy Manager 是一个自托管的 **OpenAI / Anthropic 协议桥接网关**，将腾讯 CodeBuddy / WorkBuddy（`www.workbuddy.cn` / `www.workbuddy.ai`）账号包装为统一的 API：原生 `/v1/chat/completions`，以及无状态文本 / 工具子集的 `/v1/responses`、`/v1/messages`，并自带一个内嵌的 Web 管理面板。
 
 - **账号**：面板内 OAuth 设备授权一键登录，凭证落盘并热加载进池（免重启）；多账号共享、单号故障自动换号。
 - **调度**：积分加权选号、429/402 分级冷却与熔断、会话粘性绑定、在途租约限流。

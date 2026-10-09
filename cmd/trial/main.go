@@ -7,8 +7,8 @@
 //	go run ./cmd/trial
 //
 //	# 容器内：先 cp 进去再 exec
-//	docker cp trial workbuddy2api:/tmp/trial
-//	docker exec -w /app workbuddy2api /tmp/trial
+//	docker cp trial workbuddy_manager:/tmp/trial
+//	docker exec -w /app workbuddy_manager /tmp/trial
 //
 // 结果逐账号输出到 stdout：
 //

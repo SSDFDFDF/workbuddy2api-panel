@@ -1,4 +1,4 @@
-// main.go workbuddy2api 入口：加载配置、构建 pool、起调度器与 HTTP 服务。
+// main.go workbuddy_manager 入口：加载配置、构建 pool、起调度器与 HTTP 服务。
 package main
 
 import (
@@ -438,7 +438,7 @@ func main() {
 	default:
 		log.Printf("入站准入已关闭（server.max_inflight_requests / max_inflight_bytes_mb 均为 0）")
 	}
-	log.Printf("workbuddy2api listening on %s (api_key=%v)，管理面板 http://127.0.0.1%s/panel/", cfg.Listen, cfg.APIKey != "", panelListenPath(cfg.Listen))
+	log.Printf("workbuddy_manager listening on %s (api_key=%v)，管理面板 http://127.0.0.1%s/panel/", cfg.Listen, cfg.APIKey != "", panelListenPath(cfg.Listen))
 	select {
 	case err := <-serveErr:
 		// 监听失败（端口占用/地址无效）：直接退出，不做停机流程。

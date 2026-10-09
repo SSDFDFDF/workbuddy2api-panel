@@ -1,4 +1,4 @@
-# workbuddy2api-panel — 常用开发/构建/运维入口
+# workbuddy_manager — 常用开发/构建/运维入口
 #
 # 快速开始：
 #   make help        # 列出全部目标
@@ -37,7 +37,7 @@ export GOOS GOARCH CGO_ENABLED
 # ---- 帮助 ----------------------------------------------------------------
 .PHONY: help
 help: ## 显示所有目标
-	@echo "workbuddy2api-panel (版本 $(APP_VERSION), host $(shell $(GO) env GOOS)/$(shell $(GO) env GOARCH))"
+	@echo "workbuddy_manager (版本 $(APP_VERSION), host $(shell $(GO) env GOOS)/$(shell $(GO) env GOARCH))"
 	@echo ""
 	@echo "用法: make <target> [GOOS=... GOARCH=... CONFIG=...]"
 	@echo ""
