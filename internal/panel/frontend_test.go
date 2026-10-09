@@ -827,7 +827,7 @@ process.stdout.write(JSON.stringify({
 // 出现在表单里。
 //
 // 为什么需要：`logging.request_client_info` 曾经在表单里存在过，后来在某次改动中
-// 被连带删掉，而 Go 侧的配置键、livecfg 热生效通路、README 的描述都还在——面板
+// 被连带删掉，而 Go 侧的配置键、config/runtime 热生效通路、README 的描述都还在——面板
 // 少了一个开关而 Go 测试全绿，只有人肉点开配置页才会发现。这里把"表单字段 ↔
 // CFG_MAP"与"关键热改键必须在表单里"两条都钉住。
 func TestConfigFormMatchesCFGMap(t *testing.T) {

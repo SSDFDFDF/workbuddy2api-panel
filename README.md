@@ -295,6 +295,24 @@ uv run --no-project --with openai==3.26.0 --with anthropic==1.12.1 python -c \
 
 **`config.example.json` 是配置项最完整的参考**：每个字段、默认值与结构都能在其中找到，示例值一律是 `test_key` 之类占位符，**不含任何真实密钥**。下表为字段含义速查。
 
+### 配置版本与自动迁移
+
+配置文件带 `config_version`（当前 `3`）。启动（以及面板保存）时会检查它：
+
+- **版本较旧**（或没有这个键的历史文件）→ 程序**自动迁移一次**并按新版本回写，同时留一份迁移前快照
+  `config.json.v<旧版本>`（例：`config.json.v2`），可直接 `cp` 回去回退；
+- **版本较新**（文件由更新版程序写入）→ 拒绝启动并提示用新版程序，避免按旧结构强解析而静默丢键；
+- 面板「配置」页顶部会显示本次实际发生过的迁移条目（`_migrations`）。
+
+迁移的语义是"**一次性**"：跑过一次之后磁盘上就是当前版本，不会有兼容分支长期留在程序里。
+因此历史遗留只会被处理一次，不会每次启动都告警。
+
+历史上被忽略/丢弃的旧键（`features.*`、`upstream.user_agent`、`upstream.client_version`、
+`upstream.cli_version`、`cooldown.hard_credit` / `err_threshold` / `err_cooldown`、
+`schedule.travel_interval_minutes`、`prompt.mode` 的 `custom` / `passthrough`）现在都会被迁移一次：
+能忠实映射的搬过去（版本号、`custom→replace`、`passthrough→none`），映射不了的（`user_agent`）
+删掉并在迁移说明里给出替代键，不会静默改变行为。
+
 ### 字段速查
 
 | 字段 | 默认 | 说明 |

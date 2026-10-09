@@ -1,3 +1,7 @@
+// config_concurrency_test.go 配置保存路径的并发安全（事务互斥）。
+//
+// 告警去重表的并发安全测试已随 config.LogWarnings 迁到
+// internal/config/config_test.go 的 TestConcurrentWarnings。
 package main
 
 import (
@@ -8,7 +12,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/config"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/config/runtime"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
@@ -23,7 +28,7 @@ func TestConcurrentConfigSaveSerialized(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"api_key":"init"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	live := livecfg.New(livecfg.Snapshot{})
+	live := runtime.New(runtime.Snapshot{})
 	p := pool.New("")
 	up := &upstream.Client{}
 	sch := scheduler.New(scheduler.Config{})
@@ -50,35 +55,11 @@ func TestConcurrentConfigSaveSerialized(t *testing.T) {
 	for err := range errCh {
 		t.Fatalf("concurrent save must not fail: %v", err)
 	}
-	cfg, err := Load(path)
+	cfg, err := config.Load(path)
 	if err != nil {
 		t.Fatalf("final config must stay parseable: %v", err)
 	}
 	if cfg.APIKey == "" || cfg.APIKey == "init" {
 		t.Fatalf("one submitted api_key must win, got %q", cfg.APIKey)
 	}
-}
-
-// TestConcurrentConfigWarnings 守护告警去重表的并发安全：GET/POST 配置
-// 会并发调用 logConfigWarnings，普通 map 无锁读写会直接触发 concurrent map writes。
-func TestConcurrentConfigWarnings(t *testing.T) {
-	printedConfigWarningsMu.Lock()
-	printedConfigWarnings = map[string]bool{}
-	printedConfigWarningsMu.Unlock()
-
-	cfg := &Config{Warnings: []string{"concurrent-warning-regression"}}
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			<-start
-			for j := 0; j < 200; j++ {
-				logConfigWarnings(cfg)
-			}
-		}()
-	}
-	close(start)
-	wg.Wait()
 }

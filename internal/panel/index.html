@@ -431,7 +431,7 @@
           <div class="pad">
             <div class="sub-hd">基础服务</div>
             <div class="grid2">
-              <label class="fld"><span class="lb">监听地址 <span class="badge b-restart">需重启</span></span>
+              <label class="fld"><span class="lb">监听地址</span>
                 <input name="listen" placeholder=":7863">
                 <span class="hint">改动需重启进程生效</span></label>
               <label class="fld"><span class="lb">API 密钥 <span class="badge b-live">即时生效</span></span>
@@ -445,55 +445,55 @@
 
             <div class="sub-hd">入站准入（内存保护）</div>
             <div class="grid3">
-              <label class="fld"><span class="lb">并发准入上限 <span class="badge b-restart">需重启</span></span>
+              <label class="fld"><span class="lb">并发准入上限</span>
                 <input name="max_inflight_requests" type="number" min="0" placeholder="64">
                 <span class="hint">同时「读取 + 解析 + 图片校验」的请求数上限；0 = 不限制</span></label>
-              <label class="fld"><span class="lb">并发字节预算 <span class="badge b-restart">需重启</span></span>
+              <label class="fld"><span class="lb">并发字节预算</span>
                 <input name="max_inflight_bytes_mb" type="number" min="0" placeholder="256">
                 <span class="hint">按 Content-Length 计的 MiB 上限；0 = 不限制。单请求实际驻留约 2 倍体积</span></label>
-              <label class="fld"><span class="lb">满载等待 <span class="badge b-restart">需重启</span></span>
+              <label class="fld"><span class="lb">满载等待</span>
                 <input name="ingress_wait" placeholder="5s">
                 <span class="hint">满载时等待多久再回 503；0 = 立即拒绝；格式 5s / 500ms</span></label>
             </div>
-            <label class="fld"><span class="lb">入站读取超时 <span class="badge b-restart">需重启</span></span>
+            <label class="fld"><span class="lb">入站读取超时</span>
               <input name="read_timeout" placeholder="300s">
               <span class="hint">含 body 上传的总时长上限；大上下文/文件块经反代超时会 400（issue #100）；0 = 不限制</span></label>
 
             <div class="sub-hd">超时控制</div>
             <div class="grid3">
-              <label class="fld"><span class="lb">短请求超时 <span class="badge b-restart">需重启</span></span>
+              <label class="fld"><span class="lb">短请求超时</span>
                 <input name="timeout_seconds" type="number" min="1" placeholder="120">
                 <span class="hint">非流式与元数据请求超时（秒）</span></label>
-              <label class="fld"><span class="lb">聊天首字节超时 <span class="badge b-restart">需重启</span></span>
+              <label class="fld"><span class="lb">聊天首字节超时</span>
                 <input name="header_timeout_seconds" type="number" min="1" placeholder="120">
                 <span class="hint">等待上游响应头的超时（秒）</span></label>
-              <label class="fld"><span class="lb">流空闲超时 <span class="badge b-restart">需重启</span></span>
+              <label class="fld"><span class="lb">流空闲超时</span>
                 <input name="idle_timeout_seconds" type="number" min="1" placeholder="300">
                 <span class="hint">流式传输无数据包的最大间隔（秒）</span></label>
             </div>
 
             <div class="sub-hd">代理接入</div>
             <div class="grid2">
-              <label class="fld"><span class="lb">普通代理 URL <span class="badge b-restart">需重启</span></span>
+              <label class="fld"><span class="lb">普通代理 URL</span>
                 <input name="proxy_url" placeholder="留空 = 不接入，如 http://user:pass@127.0.0.1:8080 或 socks5://127.0.0.1:1080">
                 <span class="hint">http/https/socks5(s) 正向代理，凭证可写在 URL；与 Resin 互斥</span></label>
             </div>
             <div class="grid2">
-              <label class="fld"><span class="lb">Resin 代理 URL <span class="badge b-restart">需重启</span></span>
+              <label class="fld"><span class="lb">Resin 代理 URL</span>
                 <input name="resin_url" placeholder="留空 = 不接入，如 http://127.0.0.1:2260/my-token">
                 <span class="hint">含基址与 Token；清空即关闭代理</span></label>
-              <label class="fld"><span class="lb">Resin Platform <span class="badge b-restart">需重启</span></span>
+              <label class="fld"><span class="lb">Resin Platform</span>
                 <input name="resin_platform_name" placeholder="如 Default">
                 <span class="hint">必须与部署一致；不能含 . / :</span></label>
             </div>
             <div class="grid2">
-              <label class="fld"><span class="lb">Resin 接入模式 <span class="badge b-restart">需重启</span></span>
+              <label class="fld"><span class="lb">Resin 接入模式</span>
                 <select name="resin_mode">
                   <option value="reverse">reverse — 反向代理（推荐）</option>
                   <option value="forward">forward — 正向代理</option>
                 </select>
                 <span class="hint">选择代理转发模式</span></label>
-              <label class="fld"><span class="lb">Resin 认证版本 <span class="badge b-restart">需重启</span></span>
+              <label class="fld"><span class="lb">Resin 认证版本</span>
                 <select name="resin_auth_version">
                   <option value="V1">V1 — Platform.Account:Token（推荐）</option>
                   <option value="LEGACY_V0">LEGACY_V0 — Token:Platform:Account</option>
@@ -632,7 +632,7 @@
               <label class="fld"><span class="lb">国际版在途上限</span>
                 <input name="max_in_flight_global" type="number" min="1" placeholder="2">
                 <span class="hint">global 域风控更紧，默认 2</span></label>
-              <label class="fld"><span class="lb">会话粘性 TTL <span class="badge b-restart">需重启</span></span>
+              <label class="fld"><span class="lb">会话粘性 TTL</span>
                 <input name="ttl" placeholder="30m">
                 <span class="hint">相同会话固定账号的最长保留时间</span></label>
             </div>
@@ -709,7 +709,7 @@
           <header>
             <h3>客户端仿真与上游 <span class="hint">官方客户端/CLI版本号伪装与默认域名映射</span></h3>
             <span class="grow"></span>
-            <span class="badge b-restart">需重启</span>
+           
           </header>
           <div class="pad">
             <div class="sub-hd">客户端与 CLI 版本号伪装</div>
@@ -743,7 +743,7 @@
 
             <div class="sub-hd">模型默认域名</div>
             <div class="grid2">
-              <label class="fld"><span class="lb">裸模型名默认域 <span class="badge b-restart">需重启</span></span>
+              <label class="fld"><span class="lb">裸模型名默认域</span>
                 <select name="model_default_realm">
                   <option value="cn">cn — 裸名归国内版（默认）</option>
                   <option value="global">global — 裸名归国际版</option>
@@ -760,7 +760,7 @@
           <header>
             <h3>网关提示词工程 <span class="hint">系统级 System Prompt 注入与分域控制</span></h3>
             <span class="grow"></span>
-            <span class="badge b-restart">需重启</span>
+           
           </header>
           <div class="pad">
             <div class="grp">

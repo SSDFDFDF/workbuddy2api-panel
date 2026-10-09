@@ -1,19 +1,15 @@
-package main
+package config
 
 import (
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/media"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
 func TestDefault(t *testing.T) {
@@ -124,8 +120,9 @@ func TestBadDuration(t *testing.T) {
 	}
 }
 
-func TestHardCreditKeyIgnored(t *testing.T) {
-	// 退役键忽略并告警（不阻断启动）：用户不需要为了升级而删旧键。
+func TestHardCreditKeyMigratedAway(t *testing.T) {
+	// 退役键不阻断启动，且由**一次性迁移**清掉（而不是永久"忽略并告警"）。
+	// 详见 migrate.go 的文件头：长期忽略会让配置文件永远带着死键。
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
 	os.WriteFile(fp, []byte(`{"cooldown":{"hard_credit":"not-a-duration","soft_rate":"30s"}}`), 0o600)
@@ -134,11 +131,12 @@ func TestHardCreditKeyIgnored(t *testing.T) {
 		t.Fatalf("retired key must not block startup: %v", err)
 	}
 	if c.SoftRateDur.Seconds() != 30 {
-		t.Errorf("soft_rate=%v want 30s", c.SoftRateDur)
+		t.Errorf("soft_rate=%v want 30s（同段其余键照常生效）", c.SoftRateDur)
 	}
-	if !hasWarning(c.Warnings, "cooldown.hard_credit") {
-		t.Errorf("retired key must be reported: %v", c.Warnings)
+	if !hasMigration(c.Migrations, "cooldown.hard_credit") {
+		t.Errorf("退役键必须出现在迁移说明里: %v", c.Migrations)
 	}
+	assertMigratedOnDisk(t, fp, `"hard_credit"`)
 }
 
 func TestNewPoolConfigDefaults(t *testing.T) {
@@ -362,7 +360,7 @@ func TestUpstreamEnvOverride(t *testing.T) {
 }
 
 // TestRetiredTravelIntervalKeyIgnored 退役的 travel_interval_minutes 键仅告警，同段其余键照常生效。
-func TestRetiredTravelIntervalKeyIgnored(t *testing.T) {
+func TestRetiredTravelIntervalKeyMigratedAway(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
 	os.WriteFile(fp, []byte(`{"schedule":{"travel_interval_minutes":15,"checkin_hours":[9]}}`), 0o600)
@@ -373,8 +371,39 @@ func TestRetiredTravelIntervalKeyIgnored(t *testing.T) {
 	if len(c.Schedule.CheckinHours) != 1 || c.Schedule.CheckinHours[0] != 9 {
 		t.Errorf("checkin_hours=%v want [9]（同段其余键照常生效）", c.Schedule.CheckinHours)
 	}
-	if !hasWarning(c.Warnings, "schedule.travel_interval_minutes") {
-		t.Errorf("retired key must be reported: %v", c.Warnings)
+	if !hasMigration(c.Migrations, "schedule.travel_interval_minutes") {
+		t.Errorf("退役键必须出现在迁移说明里: %v", c.Migrations)
+	}
+	assertMigratedOnDisk(t, fp, `"travel_interval_minutes"`)
+}
+
+// hasMigration 报告迁移说明里是否含指定片段（迁移说明是"键名 → 处理"的逐条字符串）。
+func hasMigration(notes []string, needle string) bool {
+	for _, n := range notes {
+		if strings.Contains(n, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// assertMigratedOnDisk 断言迁移已**回写**：文件里不再出现旧键，且版本号升到当前版本。
+// 这是"一次性迁移"的关键性质——迁移必须落盘，否则每次启动都要再迁一遍。
+func assertMigratedOnDisk(t *testing.T, path, goneKey string) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), goneKey) {
+		t.Errorf("旧键 %s 仍在磁盘文件里（迁移没回写）:\n%s", goneKey, raw)
+	}
+	c, err := ParseConfig(raw)
+	if err != nil {
+		t.Fatalf("迁移后的文件必须能被当前版本解析: %v", err)
+	}
+	if c.ConfigVersion != CurrentVersion {
+		t.Errorf("config_version=%d want %d", c.ConfigVersion, CurrentVersion)
 	}
 }
 
@@ -791,7 +820,7 @@ func TestUpstreamUserAgentConfig(t *testing.T) {
 	if !hasWarning(legacy.Warnings, "upstream.user_agent") {
 		t.Errorf("retired key must be reported: %v", legacy.Warnings)
 	}
-	c, err := ParseConfig([]byte(`{"config_version":2,"upstream":{"profiles":{"global":{"client_version":"6.0.0","cli_version":"3.0.0","user_agents":{"chat":"custom/1"}}}}}`))
+	c, err := ParseConfig([]byte(`{"config_version":3,"upstream":{"profiles":{"global":{"client_version":"6.0.0","cli_version":"3.0.0","user_agents":{"chat":"custom/1"}}}}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -813,7 +842,7 @@ func hasWarning(warnings []string, needle string) bool {
 // TestUnknownConfigKeyTolerated 未知/笔误键只告警，不阻断：面板保存会把旧文件
 // 深合并回来，若严格拒收则任何历史遗留键都会让配置写不回去。
 func TestUnknownConfigKeyTolerated(t *testing.T) {
-	c, err := ParseConfig([]byte(`{"config_version":2,"upstream":{"profiles":{"cn":{"client_verison":"9.9.9"}}},"listen":":1234"}`))
+	c, err := ParseConfig([]byte(`{"config_version":3,"upstream":{"profiles":{"cn":{"client_verison":"9.9.9"}}},"listen":":1234"}`))
 	if err != nil {
 		t.Fatalf("unknown key must not fail parse: %v", err)
 	}
@@ -822,19 +851,6 @@ func TestUnknownConfigKeyTolerated(t *testing.T) {
 	}
 	if !hasWarning(c.Warnings, "upstream.profiles.cn.client_verison") {
 		t.Errorf("typo inside nested profile must be reported: %v", c.Warnings)
-	}
-}
-
-// TestUnknownConfigKeySurvivesSave unknown 键在保存回写时保留（不静默删用户数据）。
-func TestUnknownConfigKeySurvivesSave(t *testing.T) {
-	start := map[string]any{"config_version": float64(2), "listen": ":1", "my_note": "keep me"}
-	incoming := map[string]any{"listen": ":2"}
-	merged := mergeConfigMaps(start, incoming)
-	if _, err := ParseConfig(mergedJSON(merged)); err != nil {
-		t.Fatalf("save path must accept existing unknown keys: %v", err)
-	}
-	if merged["my_note"] != "keep me" {
-		t.Fatalf("unknown key dropped on save: %v", merged)
 	}
 }
 
@@ -1140,7 +1156,7 @@ func TestPruneUnknownKeysNestedValid(t *testing.T) {
 		"features":  map[string]any{"sanitize_blacklist_fingerprints": true},
 		"bogus_top": 1,
 	}
-	pruned := pruneUnknownKeys(raw)
+	pruned := PruneUnknownKeys(raw)
 
 	// 合法嵌套键必须全部保留。
 	cn := raw["prompt"].(map[string]any)["profiles"].(map[string]any)["cn"].(map[string]any)
@@ -1231,70 +1247,6 @@ func TestMediaImagePolicy(t *testing.T) {
 	}
 }
 
-// TestSaveConfigMediaPolicyRoundTrip 面板保存路径的类型往返：
-// 面板提交的是 JSON（select 是字符串、checkbox 是布尔、数字下拉经 Number 转换），
-// 后端走 merge → pruneUnknownKeys → ParseConfig → 热应用。这里用与前端 collectConfig
-// 相同形态的 payload（bool + number）钉住 media 段：
-//   - 三个键都不是未知键（不被剪掉）；
-//   - 数值档位落到 int 字段（不是字符串）；
-//   - 热应用后进程级策略真的生效。
-func TestSaveConfigMediaPolicyRoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(path, []byte(`{"listen":":1","media":{"tool_images":"auto"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	prevTool := media.CurrentToolPolicy()
-	prevImage := media.CurrentImagePolicy()
-	t.Cleanup(func() {
-		_ = media.SetToolPolicy(prevTool)
-		_ = media.SetImagePolicy(prevImage)
-	})
-
-	payload := []byte(`{"listen":":1","media":{"tool_images":"hoist","image_transcode":true,"image_max_dimension":1080}}`)
-	if _, err := saveConfig(payload, path, livecfg.New(livecfg.Snapshot{}), pool.New(""), &upstream.Client{}, scheduler.New(scheduler.Config{})); err != nil {
-		t.Fatalf("saveConfig: %v", err)
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parsed, err := ParseConfig(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if parsed.Media.ToolImages != "hoist" || !parsed.Media.ImageTranscode || parsed.Media.ImageMaxDimension != 1080 {
-		t.Fatalf("media policy not persisted: %+v", parsed.Media)
-	}
-	if got := media.CurrentToolPolicy(); got != media.ToolPolicyHoist {
-		t.Fatalf("tool policy not hot-applied: %q", got)
-	}
-	if got := media.CurrentImagePolicy(); !got.Transcode || got.MaxDimension != 1080 {
-		t.Fatalf("image policy not hot-applied: %+v", got)
-	}
-}
-
-// TestSaveConfigRejectsInvalidMediaPolicy 非法档位保存时报错且不改动热状态。
-func TestSaveConfigRejectsInvalidMediaPolicy(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(path, []byte(`{"listen":":1"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	prevImage := media.CurrentImagePolicy()
-	t.Cleanup(func() { _ = media.SetImagePolicy(prevImage) })
-	if err := media.SetImagePolicy(media.ImagePolicy{MaxDimension: 2000}); err != nil {
-		t.Fatal(err)
-	}
-	_, err := saveConfig([]byte(`{"listen":":1","media":{"image_max_dimension":4096}}`), path, livecfg.New(livecfg.Snapshot{}), pool.New(""), &upstream.Client{}, scheduler.New(scheduler.Config{}))
-	if err == nil || !strings.Contains(err.Error(), "media.image_max_dimension") {
-		t.Fatalf("invalid dimension accepted: %v", err)
-	}
-	if got := media.CurrentImagePolicy(); got.MaxDimension != 2000 {
-		t.Fatalf("rejected save must not change the live policy: %+v", got)
-	}
-}
-
 // TestIngressConfigDefaultsAndValidation 入站准入配置的缺省、显式值与非法值。
 //
 // 语义要点：0 是合法值（= 该项不限制），负值必须 fail fast——静默钳 0 会把
@@ -1341,61 +1293,26 @@ func TestIngressConfigDefaultsAndValidation(t *testing.T) {
 	}
 }
 
-// TestSaveConfigIngressRoundTrip 面板保存路径的类型往返（server.* 入站准入四项）：
-// 面板提交的是 JSON（number → int，时长 → 字符串），后端走
-// merge → pruneUnknownKeys → ParseConfig。钉住三件事：
-//   - 四项都不是未知键（不被剪掉）；
-//   - 数值落到 int 字段（不是字符串），且 **0 是合法取值**（"不限制"）——前端把
-//     0 与空串区分开正是为此（见 internal/panel/frontend_test.go 的 CollectIngressPolicy）；
-//   - 时长字面量（含裸 "0"）被解析成对应 duration，而不是被当成缺省值回落。
-func TestSaveConfigIngressRoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(path, []byte(`{"listen":":1"}`), 0o600); err != nil {
-		t.Fatal(err)
+// TestConcurrentWarnings 守护告警去重表的并发安全：面板 GET/POST 配置会并发调用
+// LogWarnings，普通 map 无锁读写会直接触发 concurrent map writes。
+func TestConcurrentWarnings(t *testing.T) {
+	printedWarningsMu.Lock()
+	printedWarnings = map[string]bool{}
+	printedWarningsMu.Unlock()
+
+	cfg := &Config{Warnings: []string{"concurrent-warning-regression"}}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for j := 0; j < 200; j++ {
+				LogWarnings(cfg)
+			}
+		}()
 	}
-	// 与前端 collectConfig 相同形态：两个上限是 Number，两个时长是字符串。
-	payload := []byte(`{"listen":":1","server":{"max_inflight_requests":0,"max_inflight_bytes_mb":64,"ingress_wait":"0","read_timeout":"600s"}}`)
-	restart, err := saveConfig(payload, path, livecfg.New(livecfg.Snapshot{}), pool.New(""), &upstream.Client{}, scheduler.New(scheduler.Config{}))
-	if err != nil {
-		t.Fatalf("saveConfig: %v", err)
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(raw), "max_inflight_unset") {
-		t.Fatal("未知键混入落盘内容")
-	}
-	parsed, err := ParseConfig(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// 0 必须原样保留（显式关掉并发上限），不能回落成默认 64。
-	if parsed.Server.MaxInflightRequests != 0 {
-		t.Errorf("max_inflight_requests=%d want 0（显式 0 = 不限制，不得回落默认）", parsed.Server.MaxInflightRequests)
-	}
-	if parsed.Server.MaxInflightBytesMB != 64 {
-		t.Errorf("max_inflight_bytes_mb=%d want 64", parsed.Server.MaxInflightBytesMB)
-	}
-	// 裸 "0" 解析为 0 时长（= 满载立即拒绝），不是缺省 5s。
-	if parsed.Server.IngressWait != "0" || parsed.IngressWaitDur != 0 {
-		t.Errorf("ingress_wait=%q dur=%v want \"0\"/0（裸 0 = 立即拒绝，非缺省 5s）",
-			parsed.Server.IngressWait, parsed.IngressWaitDur)
-	}
-	if parsed.ServerReadTimeoutDur != 600*time.Second {
-		t.Errorf("read_timeout dur=%v want 600s", parsed.ServerReadTimeoutDur)
-	}
-	// 装配期字段：面板必须提示这四项需重启（否则用户改完以为即时生效）。
-	need := []string{"server.max_inflight_requests", "server.max_inflight_bytes_mb",
-		"server.ingress_wait", "server.read_timeout"}
-	got := map[string]bool{}
-	for _, f := range restart {
-		got[f] = true
-	}
-	for _, f := range need {
-		if !got[f] {
-			t.Errorf("restart_required 缺 %s（实际 %v）", f, restart)
-		}
-	}
+	close(start)
+	wg.Wait()
 }

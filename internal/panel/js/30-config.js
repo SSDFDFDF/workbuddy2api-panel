@@ -84,6 +84,71 @@ const CLEARABLE_CFG = new Set(['prompt_file', 'prompt_text', 'prompt_cn_text', '
  */
 const NUMERIC_CFG = new Set(['media_image_max_dimension']);
 
+/* ---------- 字段目录：哪些字段需重启，唯一真相在后端 ----------
+ *
+ * internal/config/catalog.go 是「改了要不要重启」的唯一数据源，面板不再在
+ * index.html 里手写徽标——两份名单必然会漂移（session_sticky.enabled 曾经
+ * 既没进重启清单、也没有徽标：用户取消勾选后显示"配置已保存"，实际粘性路由
+ * 照旧，且无任何提示）。
+ *
+ * 目录拿不到时**不加任何徽标**（不猜、不回落旧文案）：宁可少一个提示，
+ * 也不能显示错的口径。
+ */
+let CFG_CATALOG = null; // null = 尚未加载；[] = 加载失败（保持沉默）
+
+// matchPath 与 Go 侧 config.MatchPath 同语义：
+// 末尾 ".*" = 该子树下的全部叶子（递归），其余为精确匹配。
+function matchPath(pattern, path) {
+  if (pattern.endsWith('.*')) return path.startsWith(pattern.slice(0, -2) + '.');
+  return pattern === path;
+}
+
+// catalogEntry 返回覆盖该字段路径的目录项（无则 null）。
+function catalogEntry(path) {
+  if (!CFG_CATALOG) return null;
+  for (const f of CFG_CATALOG) if (matchPath(f.path, path)) return f;
+  return null;
+}
+
+async function loadCatalog() {
+  if (CFG_CATALOG !== null) return CFG_CATALOG;
+  try {
+    const d = await api('config/catalog');
+    CFG_CATALOG = Array.isArray(d.fields) ? d.fields : [];
+  } catch (e) {
+    CFG_CATALOG = []; // 失败保持沉默：徽标是提示，不是功能
+    console.warn('config catalog unavailable:', e.message);
+  }
+  return CFG_CATALOG;
+}
+
+// applyCatalogBadges 按目录给表单字段挂/摘「需重启」徽标（title 给原因）。
+// 幂等：重复调用只更新，不会叠加。
+function applyCatalogBadges() {
+  const form = $('cfgForm');
+  if (!form || !CFG_CATALOG) return;
+  for (const [name, path] of Object.entries(CFG_MAP)) {
+    const el = form.elements[name];
+    if (!el) continue;
+    const box = el.closest('.fld') || el.closest('.switch');
+    const lb = box && box.querySelector('.lb');
+    if (!lb) continue;
+    const entry = catalogEntry(path.join('.'));
+    let badge = lb.querySelector(':scope > .badge.b-restart');
+    if (entry && entry.mode === 'restart') {
+      if (!badge) {
+        badge = document.createElement('span');
+        badge.className = 'badge b-restart';
+        badge.textContent = '需重启';
+        lb.appendChild(badge);
+      }
+      badge.title = entry.why || '改动需重启进程生效';
+    } else if (badge) {
+      badge.remove();
+    }
+  }
+}
+
 /* ---------- 自定义指纹规则：文本编解码 ----------
  *
  * 配置文件里是结构化数组（fingerprint_rules: [{match, replace, mode, action}]），
@@ -160,15 +225,21 @@ async function loadConfig() {
     renderModeMap();
     markDurationFields(); // 回填后重置校验态（清掉残留红框；现值来自后端必然合法）
     applyVersionInfo(d.version_info, f);
+    loadCatalog().then(applyCatalogBadges); // 「需重启」徽标由后端目录驱动（不硬编码）
     loadPromptPresets(); // 预设目录来自后端（不硬编码名单）；与回填互不依赖
     refreshPromptPresetHint();
-    $('cfgNote').textContent = '';
-    // 配置告警（未知/旧配置键）：只告知，不阻断保存。
+    // 配置页底部一行提示，两类信息（都是"只告知，不阻断保存"）：
+    //   _migrations —— 本次加载实际执行过的版本迁移（文件已被自动改写 + 留快照）；
+    //                 必须可见，否则用户不知道自己的配置被迁移过、旧键去哪了。
+    //   _warnings   —— 未知配置项（拼写错误/未登记的键）。
+    const migs = (cfgLoaded && Array.isArray(cfgLoaded._migrations)) ? cfgLoaded._migrations : [];
     const warns = (cfgLoaded && Array.isArray(cfgLoaded._warnings)) ? cfgLoaded._warnings : [];
-    if (warns.length && $('cfgNote')) {
-      $('cfgNote').textContent = `配置告警：${warns.join('；')}`;
-    }
+    const bits = [];
+    if (migs.length) bits.push(`已自动迁移配置（${migs.join('；')}）；迁移前原文保留为 config.json.v<旧版本>`);
+    if (warns.length) bits.push(`配置告警：${warns.join('；')}`);
+    $('cfgNote').textContent = bits.join(' ｜ ');
     if (warns.length) console.warn('config warnings:', warns);
+    if (migs.length) console.info('config migrations:', migs);
   } catch (e) { toast('读取配置失败：' + e.message, 'err'); }
 }
 // applyVersionInfo 用后端返回的版本信息初始化版本区：

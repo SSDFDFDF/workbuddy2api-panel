@@ -1,5 +1,5 @@
 {
-  "config_version": 2,  "listen": ":7863",
+  "config_version": 3,  "listen": ":7863",
   "api_key": "test_key",
   "auth_dir": "./auths",
   "state_file": "./data/state.json",

@@ -23,8 +23,9 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/config"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/config/runtime"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/proxy"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
@@ -44,19 +45,12 @@ type Config struct {
 	Version   string               // 面板版本号（展示用）
 
 	// Live 运行期可变配置（在线改配置立即生效）。
-	Live *livecfg.Holder
+	Live *runtime.Holder
 
-	// ConfigPath config.json 路径与加载器（配置页读写用）。
-	// LoadConfig 返回解析后的配置对象（前端展示/校验用，具体类型由 main 注入的闭包决定）；
-	// nil 时配置页返回 501。
-	ConfigPath string
-	LoadConfig func() (any, error)
-	// SaveConfig 校验并落盘配置，返回需要重启才能生效的字段列表；随后由 main 注入的
-	// ApplyConfig 闭包完成热生效（池参数/排程/密钥/脱敏）。error 时配置不写盘。
-	SaveConfig func(raw []byte) (restartRequired []string, err error)
-	// PreviewPrompt 解析草稿的 prompt 段并返回各域生效规则（配置页“立即预览”用）：
-	// 不落盘、不校验其余配置。nil 时该接口返回 501。
-	PreviewPrompt func(raw []byte) (any, error)
+	// ConfigAPI 配置域 HTTP handler（internal/config/api.go，含配置读写与提示词预览）：
+	// 配置的读写逻辑属于配置域本身，面板只把它挂到 /panel/api/* 并套鉴权。
+	// 面板不感知配置结构，也不含任何 apply 逻辑；nil 时配置接口不挂载。
+	ConfigAPI *config.API
 
 	// StickyCount 返回粘性会话绑定数；nil 时报告 0。
 	StickyCount func() int
@@ -216,9 +210,14 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/usage", p.withAuth(p.usage))
 	p.mux.HandleFunc("POST /panel/api/usage/save", p.withAuth(p.usageSave))
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.withAuth(p.modelProbes))
-	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
-	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
-	p.mux.HandleFunc("POST /panel/api/prompt/preview", p.withAuth(p.previewPrompt))
+	// 配置域接口（配置文件读写 + 提示词草稿预览）整体由 internal/config 提供，
+	// 面板只负责挂载与鉴权：配置的字段语义、热生效范围、重启项清单都归配置域，
+	// 面板不再复制一份。
+	if p.cfg.ConfigAPI != nil {
+		for _, pat := range p.cfg.ConfigAPI.Paths() {
+			p.mux.Handle(pat, p.withAuth(p.cfg.ConfigAPI.ServeHTTP))
+		}
+	}
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API
@@ -229,7 +228,7 @@ func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // withAuth 与 server 包同口径的 Bearer 鉴权（经 httpauth 常量时间比较）；
-// api_key 为空时放行。密钥经 livecfg 快照读取：面板里改了 api_key，下一个请求
+// api_key 为空时放行。密钥经 config/runtime 快照读取：面板里改了 api_key，下一个请求
 // 即用新值（无需重启）。
 func (p *Panel) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

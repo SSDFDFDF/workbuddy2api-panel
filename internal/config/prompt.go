@@ -1,10 +1,10 @@
-// prompt_config.go 系统提示词配置的解析与分域规则构建。
+// prompt.go 系统提示词配置的解析与分域规则构建。
 //
 // 配置形状（顶层 + 分域覆盖）：
 //
 //	"prompt": {
-//	  "mode":   "after",       // none | replace | append | after（历史别名照收）
-//	  "preset": "minimal",     // default | minimal（minimal 按 realm 取中/英文）
+//	  "mode":   "after",       // none | replace | append | after | inject（历史别名照收）
+//	  "preset": "minimal",     // default | minimal（minimal 按 realm 取中/英文；尾部自带 inject 槽位标记）
 //	  "file":   "",            // 素材：文件路径
 //	  "text":   "",            // 素材：内联正文（优先级最高）
 //	  "profiles": {
@@ -22,7 +22,7 @@
 // 为什么素材不逐项回落：若顶层设了 text、realm 只设 preset=minimal，逐项回落会
 // 让 realm 实际拿到顶层的 text（minimal 被静默忽略），用户以为切换了却没有——
 // 整体覆盖让"我设了素材"这件事本身就有确定含义。
-package main
+package config
 
 import (
 	"fmt"
@@ -137,8 +137,9 @@ func (c *Config) normalizePromptPreset(path string, v *string) error {
 	return nil
 }
 
-// normalizePromptMode 校验并归一 mode。只认 none/replace/append/after；
-// 旧取值（custom/passthrough/...）不兼容、不迁移，直接报错要求用户改配置。
+// normalizePromptMode 校验并归一 mode。只认当前取值（none/replace/append/after）；
+// 旧取值（custom/passthrough）由 migrate.go 在读文件时一次性改名，因此走到这里
+// 仍是非法的取值就是用户手写的错值，直接报错（不静默降级）。
 func (c *Config) normalizePromptMode(v, path string) (string, error) {
 	m, ok := prompt.NormalizeMode(v)
 	if !ok {

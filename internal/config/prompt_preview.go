@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"encoding/json"
@@ -56,8 +56,8 @@ type PromptPreviewRule struct {
 	Error string `json:"error,omitempty"`
 }
 
-// previewPromptConfig 面板预览入口：只解析 prompt 段，其余字段一律忽略。
-func previewPromptConfig(raw []byte) (*PromptPreview, error) {
+// PreviewPromptConfig 面板预览入口：只解析 prompt 段，其余字段一律忽略。
+func PreviewPromptConfig(raw []byte) (*PromptPreview, error) {
 	draft := &Config{}
 	if err := json.Unmarshal(raw, draft); err != nil {
 		return nil, fmt.Errorf("parse prompt draft: %w", err)

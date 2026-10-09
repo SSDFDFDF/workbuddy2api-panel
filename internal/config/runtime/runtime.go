@@ -1,4 +1,4 @@
-// Package livecfg 运行期可变配置的并发安全持有者。
+// Package runtime 运行期可变配置的并发安全持有者。
 //
 // 背景：进程启动时读入的配置是普通字段（读多写零），但管理面板允许在线改配置，
 // 于是少量"可热生效"的字段需要有并发安全的读写点。此处用不可变快照 + atomic 指针：
@@ -6,7 +6,7 @@
 //
 // 只承载**读路径深、热改需求强**的少数字段；池参数/排程参数等各有既有 setter
 // （pool.SetBreaker、scheduler.Reconfigure 等），不重复收编到这里。
-package livecfg
+package runtime
 
 import (
 	"sync/atomic"

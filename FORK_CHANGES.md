@@ -62,7 +62,7 @@ git log --oneline <已同步基线>..upstream/main     # 列出待判定提交�
 | 5 | **出站指纹改写层** | 改写 user/assistant/tool/推理/工具入参里的已知指纹串（内置 7 类 + 自定义规则） | `false` |
 | 6 | **分域身份与 UA** | 按 `realm × 用途` 生成版本、产品名、Origin、语言与 UA；不随代理域名变化 | CN `5.7.6`/Global `5.6.2` |
 | 7 | **缓存键** | `prompt_cache_key` 改 HMAC 派生（持久化 secret）；无显式会话则不生成 | 生效 |
-| 8 | **配置容错** | 未知/旧键忽略并告警（启动日志 + 面板），保存时丢弃；`config_version: 2` | 生效 |
+| 8 | **配置版本迁移** | `config_version` + 一次性迁移（读时识别版本 → 改写 → 回写 + `.v<旧版本>` 快照）；未知键告警、面板保存时丢弃 | 生效 |
 | 9 | **Web 管理面板** | 内嵌单页（明暗主题，七个视图）：账号运维 / 用量与积分 / 模型档位 / 在线改配置（热生效）/ 运行日志 / 任务中心 | 生效 |
 | 10 | **积分任务体系** | 任务列表/接受/领取 + 「一键完成」覆盖 17 个成长任务（纯 API）；任务中心全账号扫描 + 执行队列 | 生效 |
 | 11 | **出站代理** | 普通正向代理 + Resin 粘性代理池 + 账号级代理开关 | 未配置 = 不接入 |
@@ -126,16 +126,32 @@ content:[]。空数组保持原形，不作为 null、缺失结果或虚构文�
 
 厂商直连补丁不等于 WorkBuddy 能力；后续采用补丁须提供真实上游脱敏请求 / 原始帧依据与回归测试。
 
-## 4. 配置不兼容（旧键不识别、不迁移：启动告警、面板保存时丢弃）
+## 4. 配置版本与一次性迁移（`config_version`）
 
-| 旧键 | 替代 |
+配置文件带 `config_version`（当前 `3`），由 `internal/config/migrate.go` 执行
+**一次性迁移**：读取时识别版本 → 逐级改写 → 立即回写（并留 `config.json.v<旧版本>` 快照）。
+迁移跑过后磁盘上就是当前版本，**兼容分支不会长期留在程序里**（normalize 只认当前版本）。
+
+不支持迁移的情况会 fail fast 并给出人工路径：版本比程序新（用新版程序启动）、
+版本早于迁移链起点。
+
+迁移覆盖的历史遗留（v1 时代改名未迁移的键 + 更早退役的键）：
+
+| 旧键 | 迁移处理 |
 | --- | --- |
-| `features.sanitize_blacklist_fingerprints` | `fingerprint_rewrite` + `fingerprint_rules` |
-| `upstream.user_agent` / `client_version` / `cli_version` | `upstream.profiles.<realm>.*` |
-| `prompt.mode: custom` | `prompt.mode: replace`（旧值现为非法，报错） |
-| `prompt.mode: passthrough` | `prompt.mode: none`（同上） |
+| `features.sanitize_blacklist_fingerprints: true` | → `fingerprint_rewrite: true`（**仅显式 true**；v1 缺省为 true、当前缺省为 false，缺省不迁，不替用户开开关），随后删除 `features` 段 |
+| `upstream.client_version` / `cli_version` | → `upstream.profiles.{cn,global}.{client_version,cli_version}`（v1 是全局单值、对两域都生效；目标域已有显式值的不覆盖） |
+| `upstream.user_agent` | **删除并给出替代键提示**（v1 是「全路径完全覆盖」，当前只有按域×按用途的 `user_agents`，机械映射必然猜错用途，所以不猜） |
+| `prompt.mode: custom` | → `replace` |
+| `prompt.mode: passthrough` | → `none` |
+| `cooldown.hard_credit` / `err_threshold` / `err_cooldown` | 删除（硬冷却固定次日 04:00，连续错误语义并入熔断器） |
+| `schedule.travel_interval_minutes` | 删除（已被 `schedule.travel_hours` 取代） |
 
-其余默认值变更：`upstream.chat_base_cn` → `https://www.workbuddy.cn`。
+其它默认值变更：`upstream.chat_base_cn` → `https://www.workbuddy.cn`。
+
+> 历史：本节原先的口径是「旧键不识别、不迁移：启动告警、面板保存时丢弃」。
+> 那个口径的代价是死键跟着配置文件永久存在、每次启动都告警；改为一次性迁移后，
+> 旧键只被处理一次，之后零告警、零分支。
 
 ## 5. 挂载点（冲突最可能）
 
@@ -148,7 +164,7 @@ content:[]。空数组保持原形，不作为 null、缺失结果或虚构文�
 | 工具结果图片策略 | **新增** `internal/media/{policy,hoist}.go`；`internal/protocol/request.go`（Decode 按入口策略）、`internal/server/protocol.go`（Mutated 重序列化）、`cmd/server/{config,main}.go` |
 | 图片转码/压缩 | **新增** `internal/media/image.go`（解码/缩放/JPEG 阶梯，依赖 `golang.org/x/image`）；`cmd/server/{config,main}.go`；面板表单项（`internal/panel/{index.html,js/30-config.js}`） |
 | 重试与账号策略 | `internal/server/handler.go`、`internal/upstream/client.go` |
-| 系统提示词 | **新增** `internal/prompt/`、`cmd/server/prompt_config.go`、`cmd/server/prompt_preview.go`（官方明文模板原件归档见 [docs/official-templates/README.md](docs/official-templates/README.md)，重新导出：`make templates-export`） |
+| 系统提示词 | `internal/prompt/`（预设库与组合逻辑）、`internal/config/prompt.go` + `internal/config/prompt_preview.go`（配置解析与面板预览）（官方明文模板原件归档见 [docs/official-templates/README.md](docs/official-templates/README.md)，重新导出：`make templates-export`） |
 | 指纹改写 | **新增** `internal/scrub/` |
 | 分域身份与 UA | **新增** `internal/upstream/identity.go`、`internal/auth/snapshot.go`；`internal/upstream/{headers,client,desktop,hint,usage}.go` |
 | 缓存键 / 配置容错 | `internal/upstream/cache_key.go`、`cmd/server/{config,config_warnings,main}.go` |

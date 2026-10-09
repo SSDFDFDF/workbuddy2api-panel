@@ -15,12 +15,13 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/config"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/config/runtime"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/jsondoc"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/media"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
@@ -55,20 +56,20 @@ func main() {
 	cfgPath := flag.String("config", "config.json", "配置文件路径（默认当前目录 config.json；不存在时自动生成推荐配置）")
 	flag.Parse()
 
-	cfg, err := Load(*cfgPath)
+	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		// errors.Is 才能看穿 Load 里 fmt.Errorf("%w") 的包装；os.IsNotExist 不行。
 		if errors.Is(err, fs.ErrNotExist) {
 			// 首次运行：目录下没有配置 → 自动落一份推荐配置（含随机 api_key）再加载。
 			// 双击 exe / 裸跑 docker 即开，无需先手工复制样例。
-			if key, werr := WriteDefault(*cfgPath); werr == nil {
+			if key, werr := config.WriteDefault(*cfgPath); werr == nil {
 				log.Printf("config %s 不存在，已生成推荐配置（api_key=%s，记录在该文件里，可自行修改）", *cfgPath, key)
-				cfg, err = Load(*cfgPath)
+				cfg, err = config.Load(*cfgPath)
 			}
 			if err != nil {
 				// 生成失败（目录只读等）：退回纯默认 + env（旧行为兜底），不阻塞启动。
 				log.Printf("config %s not found (auto-generate failed), using defaults+env: %v", *cfgPath, err)
-				cfg, err = Load("")
+				cfg, err = config.Load("")
 			}
 		}
 		if err != nil {
@@ -76,7 +77,8 @@ func main() {
 		}
 	}
 
-	logConfigWarnings(cfg)
+	config.LogWarnings(cfg)
+	config.LogMigrations(cfg)
 
 	auths, err := auth.LoadDir(cfg.AuthDir)
 	if err != nil {
@@ -279,7 +281,7 @@ func main() {
 	// 管理面板日志镜像：标准 log（stderr）与 chat 表格日志（stdout）双路复制进
 	// 面板环形缓冲，供 /panel/api/logs 读取；控制台输出行为完全不变。
 	// live 承载可热改字段（api_key/soft_rate/脱敏开关），面板保存配置时在线替换。
-	live := livecfg.New(livecfg.Snapshot{
+	live := runtime.New(runtime.Snapshot{
 		APIKey:           cfg.APIKey,
 		SoftCooldown:     cfg.SoftRateDur,
 		RecordClientInfo: cfg.Logging.RequestClientInfo,
@@ -325,25 +327,30 @@ func main() {
 		Proxy: cfg.ProxyClient,
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
-		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),
-		ConfigPath: *cfgPath,
-		LoadConfig: func() (any, error) {
-			c, err := Load(*cfgPath)
-			if err != nil {
-				return nil, err
-			}
-			// 面板配置页据此展示 `_warnings`（未知/退役键、旧取值迁移），
-			// 不静默吞掉不生效的配置项。
-			logConfigWarnings(c)
-			return c, nil
-		},
-		SaveConfig: func(raw []byte) ([]string, error) {
-			return saveConfig(raw, *cfgPath, live, p, up, sch)
-		},
-		// 配置页"立即预览"：解析草稿 prompt 段并返回各域生效正文，不落盘。
-		PreviewPrompt: func(raw []byte) (any, error) {
-			return previewPromptConfig(raw)
-		},
+		ProbeFile: stateSibling(cfg.StateFile, "output_probes.json"),
+		// 配置域接口：读写逻辑与字段语义都在 internal/config，面板只挂载。
+		ConfigAPI: config.NewAPI(config.APIConfig{
+			ConfigPath: *cfgPath,
+			LoadConfig: func() (any, error) {
+				c, err := config.Load(*cfgPath)
+				if err != nil {
+					return nil, err
+				}
+				// 面板配置页据此展示 `_warnings`（未知键）与 `_migrations`
+				//（本次实际执行的版本迁移），不静默吞掉配置被改过这件事。
+				config.LogWarnings(c)
+				config.LogMigrations(c)
+				return c, nil
+			},
+			SaveConfig: func(raw []byte) ([]string, error) {
+				return saveConfig(raw, *cfgPath, live, p, up, sch)
+			},
+			// 配置页"立即预览"：解析草稿 prompt 段并返回各域生效正文，不落盘。
+			PreviewPrompt: func(raw []byte) (any, error) {
+				return config.PreviewPromptConfig(raw)
+			},
+			VersionInfo: func() any { return upstream.GetLatestVersionInfo() },
+		}),
 	})
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
 	// 无需手动扫描；hook 返回即启动（异步执行），已在跑时内部跳过。
@@ -374,7 +381,7 @@ func main() {
 		PromptText:   cfg.PromptText,
 		// 分域提示词规则（cn/global 各一份，键 "" 为默认）。装配期构建、不可热改。
 		PromptRules: cfg.PromptRules,
-		// 来源记录开关经 livecfg 热生效；此处同时填静态字段，供 Live 为 nil 的
+		// 来源记录开关经 config/runtime 快照热生效；此处同时填静态字段，供 Live 为 nil 的
 		// 裸用/测试路径拿到同一缺省值。
 		RecordClientInfo: cfg.Logging.RequestClientInfo,
 		// handler 侧第三道闸（global realm）：false（显式逃生门）时不列 global: 模型名。
@@ -511,124 +518,109 @@ func panelListenPath(listen string) string {
 	return listen
 }
 
-// saveConfig 面板保存配置：校验 → 落盘 → 热应用 → 返回需重启的字段列表。
+// saveConfig 面板保存配置：校验 → 版本迁移 → 落盘 → 热应用 → 返回需重启字段。
 //
-// 热生效范围（设计取舍）：
-//   - api_key / cooldown.soft_rate → livecfg 快照（prompt.* 需重启，见 restartRequiredFields）
-//   - pool.* → pool.SetBreaker/SetMaxInFlight/SetSoftRateMax/SetWeights/SetCostExploreInterval/SetPreferExpiring/SetCreditFloor
-//   - schedule.* → scheduler.Reconfigure/SetBalanceInterval/SetExpiringSoonWindow
+// 步骤：
+//  1. 读磁盘旧文件（保留用户手写的未知键，供深合并）；
+//  2. 旧文件先做版本迁移（config.MigrateMap）：写下去的文件永远是当前版本；
+//  3. 合并面板提交的键 → 清掉运行期元数据与未知键；
+//  4. 校验（与启动同一套 Default+normalize），失败直接返回、不落盘；
+//  5. 原子落盘（config.WriteFileAtomic，含 Docker 单文件 bind mount 回落）；
+//  6. 热应用能立即生效的字段，并按「差异 ∩ 需重启目录」返回清单
+//     （字段名单唯一真相：internal/config/catalog.go）。
 //
-// 需重启（涉及监听地址、HTTP client 超时、auth_dir 等装配期依赖）：
-//   - listen / auth_dir / state_file / upstream.* / upstash.* / session_sticky.*（TTL 类）
+// 串行化：整个「读 → 改 → 写」在 config.FileTx 事务锁里（见 internal/config/lock.go）。
+// 多个保存请求（多标签页/脚本重试）共用同一份 config.json 与同一个 .tmp，无锁时
+// 已实测出现 rename ENOENT，以及后写覆盖先写、磁盘版本与热生效顺序错位；
+// 只给临时文件换随机名解决不了丢更新。同一把锁也被版本迁移的回写路径持有，
+// 否则两者交错时"迁移回写"会覆盖掉一次刚保存的改动。
 //
-// 落盘用"先写 tmp 再 rename"原子替换，且优先保留磁盘上的原始 JSON 结构（只改
-// 面板表单覆盖到的键），避免把用户手写的注释性字段/未知键洗掉——这里直接整体
-// 序列化校验后的配置，未知键在 json.Unmarshal 时已丢失，故先合并原始 map。
-// logConfigWarnings 把配置告警打到 stdout（面板日志页同源）：未知/退役键、
-// 旧取值迁移都只告警不阻断，但必须可见，否则用户会以为旧开关仍在生效。
-// printedConfigWarnings 记录已打印过的告警，避免每次 Load 重复刷屏。
-// 读侧不止启动路径：面板 GET /panel/api/config 走 LoadConfig 闭包，POST 走
-// saveConfig，两者可能并发调用 logConfigWarnings——普通 map 无锁读写既是数据
-// 竞争，也可能直接触发 fatal error: concurrent map writes。
-var (
-	printedConfigWarningsMu sync.Mutex
-	printedConfigWarnings   = map[string]bool{}
-)
-
-func logConfigWarnings(c *Config) {
-	if c == nil {
-		return
+// 注意：锁不可重入，函数体内部不得再调用 config.FileTx / config.Load。
+func saveConfig(raw []byte, path string, live *runtime.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) ([]string, error) {
+	var (
+		restart []string
+		err     error
+	)
+	txErr := config.FileTx(func() error {
+		restart, err = saveConfigTx(raw, path, live, p, up, sch)
+		return err
+	})
+	if txErr != nil {
+		return nil, txErr
 	}
-	printedConfigWarningsMu.Lock()
-	defer printedConfigWarningsMu.Unlock()
-	for _, w := range c.Warnings {
-		if printedConfigWarnings[w] {
-			continue
-		}
-		printedConfigWarnings[w] = true
-		log.Printf("WARN: [config] %s", w)
-	}
+	return restart, nil
 }
 
-// configSaveMu 串行化「读旧配置 → 合并 → 校验 → 落盘 → 热应用」全流程。
-//
-// 为什么必须是事务级互斥：多个保存请求（多标签页、脚本重试）共用同一份
-// config.json 与同一个 config.json.tmp。并发进入时已实测出现 rename ENOENT
-// （一个请求的 rename 与另一个的 WriteFile 交错），即使不报错也存在后写覆盖
-// 先写、磁盘最终版本与热生效顺序错位。只给临时文件换随机名解决不了丢更新。
-var configSaveMu sync.Mutex
-
-func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) ([]string, error) {
-	configSaveMu.Lock()
-	defer configSaveMu.Unlock()
-	// 1) 解析原始 JSON 为 map（保留用户手写的未知键），再叠加面板提交的键。
+// saveConfigTx 执行保存事务本体；调用方必须已持有 config.FileTx（不可重入）。
+func saveConfigTx(raw []byte, path string, live *runtime.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) ([]string, error) {
+	// 1) 读旧文件并解析为 map（保留用户手写的未知键）。
 	oldRaw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read current config: %w", err)
 	}
-	var cur, incoming map[string]any
-	if err := json.Unmarshal(oldRaw, &cur); err != nil {
-		cur = map[string]any{}
+	// 旧文件解码失败（非法 JSON / 顶层不是对象）时把 oldCfg 留空：差异计算会
+	// 退化成"全部变更"，重启清单回到保守的全量（宁可多报不可漏报）。
+	cur, oerr := jsondoc.Object(oldRaw)
+	oldUnusable := oerr != nil
+	if oldUnusable {
+		cur = map[string]any{} // 能继续做的只有"用提交内容覆盖"，其余键无从保留
 	}
-	if err := json.Unmarshal(raw, &incoming); err != nil {
-		return nil, fmt.Errorf("parse submitted config: %w", err)
+	incoming, ierr := jsondoc.Object(raw)
+	if ierr != nil {
+		return nil, fmt.Errorf("parse submitted config: %w", ierr)
 	}
-	merged := mergeConfigMaps(cur, incoming)
-	// 旧/未知键不保留：保存 = 用当前结构覆盖配置文件，改名前的旧键
-	//（如 prompt.mode=custom、features.* 段）就此被清掉，不再重复告警。
-	pruned := pruneUnknownKeys(merged)
 
-	// 2) 校验（与启动同一套 Default+normalize），失败直接返回、不落盘。
-	newCfg, err := ParseConfig(mergedJSON(merged))
+	// 2) 版本迁移（一次性）：磁盘上的旧文件先迁到当前版本。
+	// 写下去的文件永远是当前版本，下次启动不会重复迁移。与 Load 的差别：
+	// 这里不写迁移快照（面板保存已有 .bak 兜底，提交本身就是用户明确意图的覆盖）。
+	if rep, merr := config.MigrateMap(cur); merr != nil {
+		return nil, merr
+	} else if rep.Migrated() {
+		log.Printf("config: 保存时自动迁移 v%d → v%d%s", rep.From, rep.To, migrationNotesSuffix(rep.Notes))
+	}
+
+	// 旧配置的解析结果（供差异计算）。必须在合并提交前解析：合并会原地改写 cur。
+	// 解析失败（含上面的解码失败）时保持 nil → DiffConfig 视为"全部变更"，
+	// 重启清单退回保守的全量。
+	var oldCfg *config.Config
+	if !oldUnusable {
+		if c, cerr := config.ParseConfig(config.MergedJSON(cur)); cerr == nil {
+			oldCfg = c
+		}
+	}
+
+	// 3) 叠加面板提交的键 → 再去掉运行期元数据 → 清未知键。
+	merged := config.MergeConfigMaps(cur, incoming)
+	// 运行期元数据不落盘（否则每次启动都把上次的告警/迁移提示写回文件）。
+	delete(merged, "_warnings")
+	delete(merged, "_migrations")
+	// 未知键不保留：保存 = 用当前结构覆盖配置文件（已知历史键已由迁移清掉，
+	// 这里只管用户拼错的/未登记的）。
+	pruned := config.PruneUnknownKeys(merged)
+
+	// 4) 校验（与启动同一套 Default+normalize），失败直接返回、不落盘。
+	newCfg, err := config.ParseConfig(config.MergedJSON(merged))
 	if err != nil {
 		return nil, err
 	}
 	// 保存时也把告警打出：用户刚改完配置就能看到哪一项没生效。
-	logConfigWarnings(newCfg)
+	config.LogWarnings(newCfg)
 	if len(pruned) > 0 {
 		log.Printf("config: 已丢弃 %d 个未知/旧配置键：%s", len(pruned), strings.Join(pruned, ", "))
 	}
 
-	// 3) 落盘（原子替换）。
+	// 5) 落盘（原子替换 + 只读/挂载错误的可操作提示；与版本迁移回写共用同一实现）。
 	out, err := json.MarshalIndent(merged, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("marshal config: %w", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, out, 0o600); err != nil {
-		return nil, fmt.Errorf("write config: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		// A single-file Docker bind mount cannot be renamed over its mount
-		// target (Linux returns EBUSY / "device or resource busy"). Keep the
-		// atomic path for regular files, but update the mounted file in place
-		// for this specific deployment shape.
-		if !errors.Is(err, syscall.EBUSY) {
-			return nil, fmt.Errorf("replace config: %w", err)
-		}
-		f, openErr := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
-		if openErr != nil {
-			_ = os.Remove(tmp)
-			return nil, fmt.Errorf("replace config (bind mount fallback): %w", openErr)
-		}
-		_, writeErr := f.Write(out)
-		if writeErr == nil {
-			writeErr = f.Sync()
-		}
-		closeErr := f.Close()
-		// 写失败时保留 tmp（挂载文件已被 O_TRUNC 破坏，tmp 里是完整新内容，
-		// 可手工恢复）；写成功才清理。
-		if writeErr != nil {
-			return nil, fmt.Errorf("replace config (bind mount fallback, 完整新内容保留在 %s): %w", tmp, writeErr)
-		}
-		_ = os.Remove(tmp)
-		if closeErr != nil {
-			return nil, fmt.Errorf("replace config (bind mount fallback): %w", closeErr)
-		}
+	if err := config.WriteFileAtomic(path, out); err != nil {
+		return nil, err
 	}
 
-	// 4) 热应用：能立即生效的字段全部应用，并列出仍需重启的字段。
-	live.Store(livecfg.Snapshot{
+	// 6) 热应用：能立即生效的字段全部应用，并列出仍需重启的字段。
+	// 字段名单的唯一真相是 internal/config/catalog.go（见 restartRequiredFields）。
+	live.Store(runtime.Snapshot{
 		APIKey:           newCfg.APIKey,
 		SoftCooldown:     newCfg.SoftRateDur,
 		RecordClientInfo: newCfg.Logging.RequestClientInfo,
@@ -666,66 +658,36 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	sch.SetBalanceInterval(newCfg.BalanceRefreshInterval)
 	sch.SetIncludeDisabledInTasks(newCfg.Schedule.IncludeDisabledInTasks)
 
-	return restartRequiredFields(newCfg), nil
+	return restartRequiredFields(oldCfg, newCfg), nil
 }
 
-// restartRequiredFields 返回本次改动中无法热生效、需要重启进程的字段名。
-// 恒返回完整清单中的"与当前进程装配期依赖相关"的项——面板据此提示用户。
-func restartRequiredFields(c *Config) []string {
+// restartRequiredFields 返回本次保存中「确实改动、且无法热生效」的字段名。
+//
+// 基准是 oldCfg（保存前的磁盘配置）与 newCfg（保存后的配置），两者都经
+// Default+normalize 解析：没碰过的字段不会出现，因此"只改了个热字段"不会再回
+// "20 项需重启进程生效"。oldCfg 为 nil（旧文件不可解析）时 DiffConfig 视为
+// 全部变更，退回保守的全量清单——宁可多报不可漏报。
+//
+// 字段名单不在这里：唯一真相是 internal/config/catalog.go。本函数只做
+// 「差异 ∩ Restart」的集合运算，所以新增/热化字段时只需改目录一处，
+// TestApplyClaimsEveryHotField 会在"目录说 Hot 但没人热应用"时失败。
+func restartRequiredFields(oldCfg, newCfg *config.Config) []string {
+	cat := config.Entries()
 	var out []string
-	// 这些字段在进程内被监听地址/HTTP client/目录句柄等装配期对象捕获。
-	if c.Listen != "" {
-		out = append(out, "listen")
+	for _, p := range config.DiffConfig(oldCfg, newCfg).Slice() {
+		if cat.IsRestartPath(p) {
+			out = append(out, p)
+		}
 	}
-	if c.AuthDir != "" {
-		out = append(out, "auth_dir")
-	}
-	if c.StateFile != "" {
-		out = append(out, "state_file")
-	}
-	out = append(out, "upstream.timeout_seconds", "upstream.header_timeout_seconds", "upstream.idle_timeout_seconds")
-	// upstream.user_agent 在装配期被写进出站 client（main.go 的 up.UserAgent = ...），
-	// 之后不再读取——不在 livecfg 热快照里，也无法热改。此前漏列，导致面板改完
-	// 显示"已保存"却不提示需要重启，用户以为没生效（issue #102 附带发现 2）。
-	out = append(out, "upstream.profiles", "upstream.chat_base_cn", "upstream.first_model_event_seconds", "upstream.first_generation_seconds", "upstream.tail_seconds", "global", "prompt")
-	if c.Upstash.URL != "" || c.Upstash.Token != "" {
-		out = append(out, "upstash")
-	}
-	out = append(out, "session_sticky.ttl", "session_sticky.gc_interval")
-	out = append(out, "logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb")
-	out = append(out, "server.read_timeout")
-	// 入站准入三项在装配期构造 limiter（含上限与等待时长），改值需重启。
-	out = append(out, "server.max_inflight_requests", "server.max_inflight_bytes_mb", "server.ingress_wait")
-	out = append(out, "proxy_url")
-	out = append(out, "resin_url", "resin_platform_name", "resin_mode", "resin_auth_version")
-	// model_default_realm 在装配期构造 RealmResolver（handler + 粘性闭包共享），需重启。
-	out = append(out, "model_default_realm")
 	return out
 }
 
-// mergeConfigMaps 把 incoming 深合并进 cur（原地），返回 cur。
-// 对嵌套对象逐键覆盖而不是整体替换：面板表单只提交它管理的键，
-// 未提交的兄弟键（含用户手写的未知键）保持原样。
-func mergeConfigMaps(cur, incoming map[string]any) map[string]any {
-	for k, v := range incoming {
-		if inMap, ok := v.(map[string]any); ok {
-			if curMap, ok := cur[k].(map[string]any); ok {
-				cur[k] = mergeConfigMaps(curMap, inMap)
-				continue
-			}
-		}
-		cur[k] = v
+// migrationNotesSuffix 拼接迁移说明（无说明时不输出空括号）。
+func migrationNotesSuffix(notes []string) string {
+	if len(notes) == 0 {
+		return ""
 	}
-	return cur
-}
-
-// mergedJSON 把合并后的 map 序列化回 JSON（供 ParseConfig 校验）。
-func mergedJSON(m map[string]any) []byte {
-	b, err := json.Marshal(m)
-	if err != nil {
-		return []byte("{}")
-	}
-	return b
+	return "（" + strings.Join(notes, "；") + "）"
 }
 
 // buildScrubLayer 由配置构建出站指纹改写层。

@@ -19,10 +19,10 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/config/runtime"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/forwarding"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/jsondoc"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/media"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
@@ -60,7 +60,7 @@ type Config struct {
 
 	// Live 运行期可变配置（面板在线改 api_key / soft_rate / 脱敏开关时立即生效）。
 	// nil 时回退静态字段（测试与裸用场景）。
-	Live *livecfg.Holder
+	Live *runtime.Holder
 
 	// PromptRules 各域提示词规则（键："" 默认、cn、global），键不存在时回落 ""。
 	// 由 config.PromptRules 传入（装配期构建、不可热改）。nil 时回落到下方
@@ -104,11 +104,11 @@ type Config struct {
 }
 
 // loadLive 返回当前运行期快照；Live 为 nil 时用静态字段合成。
-func (h *Handler) loadLive() livecfg.Snapshot {
+func (h *Handler) loadLive() runtime.Snapshot {
 	if h.cfg.Live != nil {
 		return h.cfg.Live.Load()
 	}
-	return livecfg.Snapshot{
+	return runtime.Snapshot{
 		APIKey:           h.cfg.APIKey,
 		SoftCooldown:     h.cfg.SoftCooldown,
 		RecordClientInfo: h.cfg.RecordClientInfo,

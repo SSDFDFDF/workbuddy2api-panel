@@ -1,13 +1,13 @@
-// config_warnings.go 配置键识别：只认 Config 结构里存在的键。
+// keyshape.go 配置键识别：只认 Config 结构里存在的键。
 //
 // 三条口径：
 //   - 未知键（含改名前的旧键、已删除的配置段）在启动/保存时进 Warnings，不阻断；
 //   - 不认识就不读取：旧键的值一律不参与配置语义（没有别名，也没有迁移）；
-//   - 面板保存时直接丢弃未知键（pruneUnknownKeys），让配置文件被新结构覆盖，
+//   - 面板保存时直接丢弃未知键（PruneUnknownKeys），让配置文件被新结构覆盖，
 //     而不是把历史遗留永久带着走。
 //
 // 只有「认识的键、值非法」才报错。
-package main
+package config
 
 import (
 	"reflect"
@@ -110,7 +110,7 @@ func joinPath(path, key string) string {
 	return path + "." + key
 }
 
-// pruneUnknownKeys 从原始配置 map 中删除 Config 不认识的键（就地修改），返回删除的路径。
+// PruneUnknownKeys 从原始配置 map 中删除 Config 不认识的键（就地修改），返回删除的路径。
 //
 // 为什么在保存时删而不是保留：旧键（改名前的 mode 取值、已删除的 prompt/features 段）
 // 保留下来只会让每次启动都重复告警，且让用户误以为它仍在生效。保存 = 用当前结构覆盖，
@@ -118,7 +118,7 @@ func joinPath(path, key string) string {
 //
 // 只在保存路径调用：启动路径仍需 raw 原文（未知键进 Warnings 提示用户），
 // 且不能在读文件时改盘。
-func pruneUnknownKeys(raw map[string]any) []string {
+func PruneUnknownKeys(raw map[string]any) []string {
 	paths := unknownConfigKeys(raw)
 	for _, p := range paths {
 		// 数组元素路径（a[]）不在配置结构里出现，跳过。
