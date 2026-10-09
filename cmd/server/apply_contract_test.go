@@ -24,6 +24,10 @@ var hotAppliedPaths = []string{
 	"cooldown.soft_rate",
 	"cooldown.soft_rate_max",
 	"logging.request_client_info",
+	// 归档参数（reqlog.Recorder.Reconfigure 整体换 writer）
+	"logging.request_archive_enabled",
+	"logging.request_retention_days",
+	"logging.request_archive_max_mb",
 	// 出站指纹改写层（不可变层整体替换）
 	"fingerprint_rewrite",
 	"fingerprint_rules",
@@ -35,6 +39,40 @@ var hotAppliedPaths = []string{
 	"pool.*",
 	// 排程参数（scheduler.Reconfigure / SetBalanceInterval / …）
 	"schedule.*",
+	// 入站准入限额（Handler.SetIngressLimits）
+	"server.max_inflight_requests",
+	"server.max_inflight_bytes_mb",
+	"server.ingress_wait",
+	// 会话粘性（Router.ReconfigureHot：启停/TTL/GC 周期）
+	"session_sticky.*",
+	// 提示词规则（prompt.Holder 原子快照整体替换）
+	"prompt.*",
+	// 域策略（上游快照 + auth/handler 闸门 + RealmResolver.SetDefault）
+	"global.enabled",
+	"global.chat_base",
+	"global.billing_base",
+	"model_default_realm",
+	// 上游身份与出站行为（upstream.Client.Configure / SetProxy）
+	"upstream.profiles.*",
+	"upstream.client_name",
+	"upstream.device_token",
+	"upstream.device_token_file",
+	"upstream.passthrough_ip",
+	"upstream.chat_base_cn",
+	"upstream.timeout_seconds",
+	"upstream.header_timeout_seconds",
+	"upstream.idle_timeout_seconds",
+	"upstream.first_model_event_seconds",
+	"upstream.first_generation_seconds",
+	"upstream.tail_seconds",
+	// 出站代理（proxy.Dynamic 指针整体替换）
+	"proxy_url",
+	"resin_url",
+	"resin_platform_name",
+	"resin_mode",
+	"resin_auth_version",
+	// 账号目录重扫 + 池对齐（auth.LoadDir / pool.SyncToDir / Panel.SetAuthDir）
+	"auth_dir",
 }
 
 // TestApplyClaimsEveryHotField 目录里 Hot 且非 Passive 的字段必须被契约声明覆盖。
@@ -95,42 +133,36 @@ func TestRestartFieldsOnlyFromDiff(t *testing.T) {
 	}
 
 	// 改一个真需重启的字段：只报它，不报邻居。
-	next2, err := config.ParseConfig([]byte(`{"listen":":1","auth_dir":"./other","pool":{"max_in_flight":3}}`))
+	next2, err := config.ParseConfig([]byte(`{"listen":":2","pool":{"max_in_flight":3}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := restartRequiredFields(old, next2)
-	if len(got) != 1 || got[0] != "auth_dir" {
-		t.Errorf("应只报 auth_dir，实际 %v", got)
+	if len(got) != 1 || got[0] != "listen" {
+		t.Errorf("应只报 listen，实际 %v", got)
 	}
 
-	// 旧配置不可解析（nil）→ 保守回退为全量 Restart 清单。
+	// 旧配置不可解析（nil）→ 保守回退为全量 Restart 清单（当前共 5 项 Restart 字段，
+	// 空值字段不构成差异，故这里要求至少覆盖非空的那几项）。
 	all := restartRequiredFields(nil, next2)
-	if len(all) < 10 {
+	if len(all) < 3 {
 		t.Errorf("旧配置不可解析时应回退为全量清单，实际只报 %v", all)
 	}
 }
 
-// TestRestartFieldsCoverSessionStickyEnabled 回归 session_sticky.enabled：
-// 面板上取消勾选它曾经显示"已保存"却零效果且无提示。
-func TestRestartFieldsCoverSessionStickyEnabled(t *testing.T) {
-	old, err := config.ParseConfig([]byte(`{"session_sticky":{"enabled":true}}`))
+// TestHotFieldsNoRestartPrompt 热化字段不得再出现在"需重启"提示里（回归旧 bug
+// 的反面：以前 session_sticky.enabled 改了不提示；现在它已热生效，就**不该**提示）。
+func TestHotFieldsNoRestartPrompt(t *testing.T) {
+	old, err := config.ParseConfig([]byte(`{"listen":":1","session_sticky":{"enabled":true},"logging":{"request_archive_enabled":true},"prompt":{"mode":"none"}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	next, err := config.ParseConfig([]byte(`{"session_sticky":{"enabled":false}}`))
+	next, err := config.ParseConfig([]byte(`{"listen":":1","session_sticky":{"enabled":false},"logging":{"request_archive_enabled":false},"prompt":{"mode":"replace","text":"x"}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := restartRequiredFields(old, next)
-	found := false
-	for _, f := range got {
-		if f == "session_sticky.enabled" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("session_sticky.enabled 改动必须提示需重启（装配期构造会话路由器），实际 %v", got)
+	if got := restartRequiredFields(old, next); len(got) != 0 {
+		t.Errorf("已热化字段不应提示需重启，实际 %v", got)
 	}
 }
 

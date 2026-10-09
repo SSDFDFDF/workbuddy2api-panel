@@ -1882,3 +1882,35 @@ func TestPromptFingerprintRecorded(t *testing.T) {
 			last.PromptMode, last.PromptSHA, last.PromptChars)
 	}
 }
+
+// TestPromptRulesHotSwap 提示词规则热改：PromptHold 整体替换后，下一次
+// promptRuleFor 立即拿到新规则（无需重建 handler / 重启进程）。
+func TestPromptRulesHotSwap(t *testing.T) {
+	hold := prompt.NewHolder(map[string]prompt.Rule{
+		"": {Mode: prompt.ModeReplace, Text: "OLD"},
+	})
+	h := NewHandler(Config{PromptHold: hold})
+
+	if r, ok := h.promptRuleFor("cn"); !ok || r.Text != "OLD" {
+		t.Fatalf("初始规则 = %+v ok=%v", r, ok)
+	}
+	hold.Store(map[string]prompt.Rule{
+		"cn":     {Mode: prompt.ModeAppend, Text: "NEW-CN"},
+		"global": {Mode: prompt.ModeReplace, Text: "NEW-GLOBAL"},
+	})
+	if r, ok := h.promptRuleFor("cn"); !ok || r.Text != "NEW-CN" || r.Mode != prompt.ModeAppend {
+		t.Fatalf("热改后 cn 规则 = %+v ok=%v", r, ok)
+	}
+	if r, ok := h.promptRuleFor("global"); !ok || r.Text != "NEW-GLOBAL" {
+		t.Fatalf("热改后 global 规则 = %+v ok=%v", r, ok)
+	}
+	// 换成 none / 空规则 = 回到透传。
+	hold.Store(map[string]prompt.Rule{"": {Mode: prompt.ModeNone, Text: "X"}})
+	if _, ok := h.promptRuleFor("cn"); ok {
+		t.Fatal("none 模式应视为不改写")
+	}
+	hold.Store(nil)
+	if _, ok := h.promptRuleFor("cn"); ok {
+		t.Fatal("空规则应视为不改写")
+	}
+}

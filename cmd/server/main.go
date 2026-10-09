@@ -25,6 +25,7 @@ import (
 	"workbuddy_manager/internal/media"
 	"workbuddy_manager/internal/panel"
 	"workbuddy_manager/internal/pool"
+	"workbuddy_manager/internal/prompt"
 	"workbuddy_manager/internal/redisstore"
 	"workbuddy_manager/internal/reqlog"
 	"workbuddy_manager/internal/scheduler"
@@ -112,10 +113,9 @@ func main() {
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(cfg.Pool.PreferExpiring)
 
-	// 会话粘性路由（可配关闭）。
-	var sessRouter *session.Router
 	// 域策略解析器：裸模型名按 config model_default_realm 决定 cn/global/auto 系列。
-	// handler（chat 路由）与粘性闭包必须共用同一实例，否则二者域不一致。
+	// handler（chat 路由）与粘性闭包必须共用同一实例，否则二者域不一致；实例常驻，
+	// 配置热改走 SetDefault（热路径读原子值）。
 	realmResolver := server.NewRealmResolver(cfg.ModelDefaultRealm, func(realm string) bool {
 		return len(p.AvailableUIDsForRealm(realm)) > 0
 	})
@@ -129,26 +129,22 @@ func main() {
 	if _, ok := store.(redisstore.Noop); !ok {
 		redisMode = "upstash"
 	}
-	if cfg.SessionSticky.Enabled {
-		sessRouter = session.New(session.Config{
-			TTL:        cfg.SessionTTL,
-			GCInterval: cfg.SessionGCInterval,
-			Store:      store,
-			Available:  p.AvailableUIDs,
-			// realm 感知闭包：带前缀模型名按 realm 过滤可用账号（跨 realm 不泄漏）；
-			// 裸名按 model_default_realm 策略（与 handler 同一 resolver）。
-			AvailableForModel: realmAwareAvailableForModel(p, realmResolver),
-		})
-		sessRouter.LoadFromStore() // 启动时从 Redis 恢复粘性（读操作仅此处）
-		sessRouter.StartGC()
-		defer sessRouter.StopGC()
-	}
-	sessCount := func() int {
-		if sessRouter != nil {
-			return sessRouter.Count()
-		}
-		return 0
-	}
+
+	// 会话粘性路由：**常驻构建**（config 可热改启停 / TTL / GC 周期）。
+	// Reconfigure 按配置初始化：启用时才从 Redis 恢复绑定并跑 GC；禁用时
+	// 零分配零 GC（Resolve/Bind 内部按 enabled 短路）。
+	sessRouter := session.New(session.Config{
+		TTL:        cfg.SessionTTL,
+		GCInterval: cfg.SessionGCInterval,
+		Store:      store,
+		Available:  p.AvailableUIDs,
+		// realm 感知闭包：带前缀模型名按 realm 过滤可用账号（跨 realm 不泄漏）；
+		// 裸名按 model_default_realm 策略（与 handler 同一 resolver）。
+		AvailableForModel: realmAwareAvailableForModel(p, realmResolver),
+	})
+	sessRouter.Reconfigure(cfg.SessionTTL, cfg.SessionGCInterval, cfg.SessionSticky.Enabled)
+	defer sessRouter.StopGC()
+	sessCount := func() int { return sessRouter.Count() }
 
 	up := upstream.New()
 	upstream.StartVersionCheckAsync()
@@ -159,27 +155,17 @@ func main() {
 	// 位于 up 装配之后：倍率表由探测下发，闭包每次调用读实时快照。
 	p.SetModelRateOf(func(realm, model string) string { return up.ModelRate(realm, model) })
 
-	// 短 RPC 总时长上限（refresh/checkin/balance/FetchModels），语义不变。
-	up.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
-	// 聊天 SSE 首字节前（响应头）上限：cfg 已 normalize（缺省回落 timeout_seconds）。
-	up.HeaderTimeout = time.Duration(cfg.Upstream.HeaderTimeoutSeconds) * time.Second
-	if tr, ok := up.ChatHTTP.Transport.(*http.Transport); ok {
-		tr.ResponseHeaderTimeout = up.HeaderTimeout
-	}
-	// 聊天 SSE 流中空闲上限（S3 空闲监控读取）。
-	up.IdleTimeout = time.Duration(cfg.Upstream.IdleTimeoutSeconds) * time.Second
-	up.Profiles = cfg.Upstream.Profiles
-	up.ChatBaseCN = cfg.Upstream.ChatBaseCN
+	// 上游出站配置热改快照（profiles/域名/开关/超时，见 upstream/options.go）。
+	// 短 RPC 超时不再写 HTTP.Timeout：由 ShortClient() 按快照派生，避免运行时
+	// 改写共享 client 字段的数据竞争。
+	up.Configure(upstreamOptions(cfg))
+	// 聊天 SSE 首字节前（响应头）上限：写进底层 Transport（重建连接池 + 客户端指针
+	// 原子替换，见 upstream.SetHeaderTimeout）；配置保存路径同样调用（热项）。
+	up.SetHeaderTimeout(time.Duration(cfg.Upstream.HeaderTimeoutSeconds) * time.Second)
 	up.CacheSecret, err = upstream.LoadCacheSecret(stateSibling(cfg.StateFile, "cache-secret"))
 	if err != nil {
 		log.Fatalf("cache secret: %v", err)
 	}
-	up.StreamTimeouts = upstream.StreamTimeoutConfig{
-		FirstModelEvent: time.Duration(cfg.Upstream.FirstModelEventSeconds) * time.Second,
-		FirstGeneration: time.Duration(cfg.Upstream.FirstGenerationSeconds) * time.Second,
-		Tail:            time.Duration(cfg.Upstream.TailSeconds) * time.Second,
-	}
-	up.ClientName = cfg.Upstream.ClientName
 	// 出站指纹改写层（默认关闭 = 严格逐字透传）。自定义规则非法时
 	// normalize 已 fail fast，这里构建不会失败。
 	scrubLayer, err := buildScrubLayer(cfg.FingerprintRewrite, cfg.FingerprintRules)
@@ -197,18 +183,12 @@ func main() {
 	if err := media.SetImagePolicy(media.ImagePolicy{Transcode: cfg.Media.ImageTranscode, MaxDimension: cfg.Media.ImageMaxDimension}); err != nil {
 		log.Fatalf("media image policy: %v", err)
 	}
-	up.DeviceToken = cfg.Upstream.DeviceToken
-	up.DeviceTokenFile = cfg.Upstream.DeviceTokenFile
-	up.PassthroughIP = cfg.Upstream.PassthroughIP
 	// global realm 路由（config global 段）：上游侧开关（第一道闸）+ base 覆盖；
 	// auth 侧开关（auth.SetGlobalEnabled）是第二道闸，两者同 config global.enabled。
-	up.GlobalEnabled = cfg.Global.Enabled
-	up.ChatBaseGlobal = cfg.Global.ChatBase
-	up.BillingBaseGlobal = cfg.Global.BillingBase
 	auth.SetGlobalEnabled(cfg.Global.Enabled)
-	// 出站代理（普通正向代理或 Resin）：proxy_url / resin_url 非空才接入。必须在读取
-	// 底层 *http.Transport 调整 ResponseHeaderTimeout 之后调用——SetProxy 会包一层
-	// RoundTripper，之后类型断言不再命中。未接入时为空操作，出站行为零改动。
+	// 出站代理（普通正向代理或 Resin）：proxy_url / resin_url 非空才接入。
+	// 转发层（proxy.Dynamic）自 upstream.New 起常驻，这里只设置当前实例；
+	// 之后配置热改同样只换指针，不触碰底层 Transport/连接池。未接入 = nil 直连。
 	up.SetProxy(cfg.ProxyClient)
 	if cfg.ProxyClient != nil {
 		log.Printf("[proxy] 出站代理已接入：mode=%s platform=%s auth=%s",
@@ -295,12 +275,9 @@ func main() {
 	log.Printf("[usage] 逐请求用量记录已启用: %s (%s)", usagePath, rec.Describe())
 
 	// 请求指标始终启用；JSONL 归档只写脱敏元数据，写盘失败不影响聊天请求。
-	requestLog := reqlog.New(reqlog.Config{
-		Dir:           stateSibling(cfg.StateFile, "request-logs"),
-		Enabled:       cfg.Logging.RequestArchiveEnabled,
-		RetentionDays: cfg.Logging.RequestRetentionDays,
-		MaxBytes:      int64(cfg.Logging.RequestArchiveMaxMB) << 20,
-	})
+	// 归档目录由 state_file 派生（state_file 是重启项，故这里固定装配期路径；
+	// 热改归档参数不会跟着状态文件搬家）。
+	requestLog := reqlog.New(archiveConfigFrom(cfg.StateFile, cfg))
 	defer requestLog.Close()
 	rs := requestLog.Snapshot().Archive
 	if rs.Enabled {
@@ -308,6 +285,21 @@ func main() {
 			rs.Dir, cfg.Logging.RequestRetentionDays, cfg.Logging.RequestArchiveMaxMB)
 	} else {
 		log.Printf("[reqlog] 请求指标已启用；JSONL 归档已关闭")
+	}
+
+	// hot 配置保存路径的热应用目标集合（见 saveConfigTx 与 hotTargets 定义）。
+	// handler/panel 在下面创建后回填：config API 的 SaveConfig 闭包引用同一对象，
+	// 因此闭包创建顺序不再依赖组件创建顺序。
+	hot := &hotTargets{
+		live:       live,
+		pool:       p,
+		upstream:   up,
+		schedule:   sch,
+		requestLog: requestLog,
+		prompt:     prompt.NewHolder(cfg.PromptRules),
+		session:    sessRouter,
+		realm:      realmResolver,
+		stateFile:  cfg.StateFile,
 	}
 
 	pn := panel.New(panel.Config{
@@ -343,7 +335,7 @@ func main() {
 				return c, nil
 			},
 			SaveConfig: func(raw []byte) ([]string, error) {
-				return saveConfig(raw, *cfgPath, live, p, up, sch)
+				return saveConfig(raw, *cfgPath, hot)
 			},
 			// 配置页"立即预览"：解析草稿 prompt 段并返回各域生效正文，不落盘。
 			PreviewPrompt: func(raw []byte) (any, error) {
@@ -377,10 +369,9 @@ func main() {
 		Live:         live,
 		Usage:        rec,
 		RequestLog:   requestLog,
-		PromptMode:   cfg.Prompt.Mode,
-		PromptText:   cfg.PromptText,
-		// 分域提示词规则（cn/global 各一份，键 "" 为默认）。装配期构建、不可热改。
-		PromptRules: cfg.PromptRules,
+		// 分域提示词规则（cn/global 各一份，键 "" 为默认）。热改走 PromptHold；
+		// 保存配置时由 saveConfigTx 整体 Store 新规则。
+		PromptHold: hot.prompt,
 		// 来源记录开关经 config/runtime 快照热生效；此处同时填静态字段，供 Live 为 nil 的
 		// 裸用/测试路径拿到同一缺省值。
 		RecordClientInfo: cfg.Logging.RequestClientInfo,
@@ -393,6 +384,10 @@ func main() {
 		MaxInflightBytesMB:  cfg.Server.MaxInflightBytesMB,
 		IngressWait:         cfg.IngressWaitDur,
 	})
+	// 回填延迟绑定目标（在此之前 HTTP 尚未开始服务，无并发写入）：面板保存配置
+	// 时经这两个句柄热改入站准入/会话粘性以外的处理器侧字段。
+	hot.handler = h
+	hot.panel = pn
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -492,7 +487,8 @@ func warmModelRates(ctx context.Context, up *upstream.Client, p *pool.Pool) {
 		}
 	}
 	// global：独立目录端点（workbuddy.ai），倍率按 "global" 域键存储。
-	if up.GlobalEnabled && ctx.Err() == nil {
+	// 用 GlobalOn() 读热改快照（静态字段只作装配期回退）。
+	if up.GlobalOn() && ctx.Err() == nil {
 		if uids := p.AvailableUIDsForRealm("global"); len(uids) > 0 {
 			if a := p.AuthByUID(uids[0]); a != nil {
 				// FetchGlobalModelInfos 无错误返回（内部负缓存自行节流），
@@ -536,13 +532,38 @@ func panelListenPath(listen string) string {
 // 否则两者交错时"迁移回写"会覆盖掉一次刚保存的改动。
 //
 // 注意：锁不可重入，函数体内部不得再调用 config.FileTx / config.Load。
-func saveConfig(raw []byte, path string, live *runtime.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) ([]string, error) {
+// hotTargets 配置保存路径的热应用目标集合。
+//
+// 为什么用结构体：热应用点随热化字段增多（鉴权快照/池/排程/上游/归档/提示词/
+// 处理器/面板），全部塞进 saveConfig 形参会失控；且 handler 与 panel 在装配
+// 后半段才创建（panel 需要 SaveConfig 闭包、handler 需要 panel 挂载），只能在
+// 创建后回填——闭包与回填引用同一个对象。回填发生在 HTTP 开始服务之前，
+// 保存请求期间只读，无数据竞争。
+type hotTargets struct {
+	live       *runtime.Holder
+	pool       *pool.Pool
+	upstream   *upstream.Client
+	schedule   *scheduler.Scheduler
+	requestLog *reqlog.Recorder
+	prompt     *prompt.Holder
+	session    *session.Router
+	realm      *server.RealmResolver
+
+	// stateFile 装配期状态文件路径（state_file 为重启项）：派生路径（归档目录等）
+	// 在热应用时保持与原目录一致，不因同一次保存里改了 state_file 而分裂持久化视图。
+	stateFile string
+
+	handler *server.Handler // 延迟绑定
+	panel   *panel.Panel    // 延迟绑定
+}
+
+func saveConfig(raw []byte, path string, hot *hotTargets) ([]string, error) {
 	var (
 		restart []string
 		err     error
 	)
 	txErr := config.FileTx(func() error {
-		restart, err = saveConfigTx(raw, path, live, p, up, sch)
+		restart, err = saveConfigTx(raw, path, hot)
 		return err
 	})
 	if txErr != nil {
@@ -552,7 +573,7 @@ func saveConfig(raw []byte, path string, live *runtime.Holder, p *pool.Pool, up 
 }
 
 // saveConfigTx 执行保存事务本体；调用方必须已持有 config.FileTx（不可重入）。
-func saveConfigTx(raw []byte, path string, live *runtime.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) ([]string, error) {
+func saveConfigTx(raw []byte, path string, hot *hotTargets) ([]string, error) {
 	// 1) 读旧文件并解析为 map（保留用户手写的未知键）。
 	oldRaw, err := os.ReadFile(path)
 	if err != nil {
@@ -609,6 +630,21 @@ func saveConfigTx(raw []byte, path string, live *runtime.Holder, p *pool.Pool, u
 		log.Printf("config: 已丢弃 %d 个未知/旧配置键：%s", len(pruned), strings.Join(pruned, ", "))
 	}
 
+	// 4.5) auth_dir 热重载预检（必须在落盘前完成，否则失败会留下“文件已改但未生效”）：
+	// 路径已存在且不是目录 → 拒绝；目录不存在按空目录处理（面板登录会 MkdirAll）。
+	authDirChanged := oldCfg == nil || oldCfg.AuthDir != newCfg.AuthDir
+	var newAuths []*auth.Auth
+	if authDirChanged {
+		if st, serr := os.Stat(newCfg.AuthDir); serr == nil && !st.IsDir() {
+			return nil, fmt.Errorf("auth_dir %q 已存在且不是目录", newCfg.AuthDir)
+		}
+		auths, aerr := auth.LoadDir(newCfg.AuthDir)
+		if aerr != nil {
+			return nil, fmt.Errorf("auth_dir: %w", aerr)
+		}
+		newAuths = auths
+	}
+
 	// 5) 落盘（原子替换 + 只读/挂载错误的可操作提示；与版本迁移回写共用同一实现）。
 	out, err := json.MarshalIndent(merged, "", "  ")
 	if err != nil {
@@ -620,14 +656,64 @@ func saveConfigTx(raw []byte, path string, live *runtime.Holder, p *pool.Pool, u
 
 	// 6) 热应用：能立即生效的字段全部应用，并列出仍需重启的字段。
 	// 字段名单的唯一真相是 internal/config/catalog.go（见 restartRequiredFields）。
-	live.Store(runtime.Snapshot{
+	hot.live.Store(runtime.Snapshot{
 		APIKey:           newCfg.APIKey,
 		SoftCooldown:     newCfg.SoftRateDur,
 		RecordClientInfo: newCfg.Logging.RequestClientInfo,
 	})
+	p, up, sch := hot.pool, hot.upstream, hot.schedule
 	p.SetBreaker(newCfg.Pool.BreakerThreshold, newCfg.BreakerCooldownDur, newCfg.BreakerCooldownMaxD)
 	p.SetMaxInFlight(newCfg.Pool.MaxInFlight)
 	p.SetMaxInFlightGlobal(newCfg.Pool.MaxInFlightGlobal)
+	// 归档参数热生效：开关/保留天数/上限整体换 writer（旧 writer 排空后停写）。
+	hot.requestLog.Reconfigure(archiveConfigFrom(hot.stateFile, newCfg))
+	// 提示词规则热生效：mode/preset/file/text/profiles 已在 normalize 阶段解析成
+	// PromptRules，这里整体替换快照（请求路径下一次查表即用新规则）。
+	hot.prompt.Store(newCfg.PromptRules)
+	// 入站准入限额热生效（当前在途请求继续持有名额，新限额只影响后续判定）。
+	if hot.handler != nil {
+		hot.handler.SetIngressLimits(newCfg.Server.MaxInflightRequests, newCfg.Server.MaxInflightBytesMB, newCfg.IngressWaitDur)
+	}
+	// 会话粘性热生效（启停 / TTL / GC 周期）。ReconfigureHot：Redis 恢复放后台，
+	// 不让同步的 LoadBinds（上限 30s）拖住配置保存与配置锁。
+	if hot.session != nil {
+		hot.session.ReconfigureHot(newCfg.SessionTTL, newCfg.SessionGCInterval, newCfg.SessionSticky.Enabled)
+	}
+	// 上游身份/域名/开关/超时快照热生效（profiles / client_name / device_token /
+	// chat_base* / global.enabled / 各档超时）。三处 global 闸门同一次切换：auth 侧
+	// （auth.SetGlobalEnabled）、上游侧（快照 GlobalEnabled）、handler 侧。
+	if hot.upstream != nil {
+		hot.upstream.Configure(upstreamOptions(newCfg))
+		// 首字节超时热生效：值变化时重建 Transport/客户端（连接池重置），
+		// 值未变时空操作（不会白拆连接池）。
+		hot.upstream.SetHeaderTimeout(time.Duration(newCfg.Upstream.HeaderTimeoutSeconds) * time.Second)
+		// 出站代理热生效（proxy_url / resin_*；nil = 取消代理恢复直连）：
+		// 只换当前转发层的内部指针，不改底层 Transport/连接池。
+		hot.upstream.SetProxy(newCfg.ProxyClient)
+	}
+	// 面板登录链路的出站代理同步替换。
+	if hot.panel != nil {
+		hot.panel.SetProxy(newCfg.ProxyClient)
+	}
+	auth.SetGlobalEnabled(newCfg.Global.Enabled)
+	if hot.handler != nil {
+		hot.handler.SetGlobalEnabled(newCfg.Global.Enabled)
+	}
+	// 裸名默认域策略热生效（handler 与粘性闭包共享同一 resolver 实例）。
+	if hot.realm != nil {
+		hot.realm.SetDefault(newCfg.ModelDefaultRealm)
+	}
+	// auth_dir 热生效：重扫目录并把账号池对齐到新目录（新账号加入、文件已删除的
+	// 账号从池中移除；状态保留），面板登录/导入的落盘目录同步切换。
+	if authDirChanged {
+		if hot.pool != nil {
+			hot.pool.SyncToDir(newAuths)
+		}
+		if hot.panel != nil {
+			hot.panel.SetAuthDir(newCfg.AuthDir)
+		}
+		log.Printf("config: auth_dir → %s（重载 %d 个账号，账号池已对齐）", newCfg.AuthDir, len(newAuths))
+	}
 	p.SetDegrade(newCfg.Pool.DegradeThreshold, newCfg.DegradeCooldownDur, newCfg.DegradeCooldownMaxD)
 	p.SetSoftRateMax(newCfg.SoftRateMaxDur)
 	p.SetCostExploreInterval(newCfg.CostExploreIntervalDur) // costTier 探索窗口热生效（0 关停）
@@ -688,6 +774,41 @@ func migrationNotesSuffix(notes []string) string {
 		return ""
 	}
 	return "（" + strings.Join(notes, "；") + "）"
+}
+
+// upstreamOptions 由配置构建上游热改选项（装配与保存路径共用同一口径，
+// 避免两处各写一份导致“热改后与重启后行为不一致”）。
+func upstreamOptions(cfg *config.Config) upstream.Options {
+	return upstream.Options{
+		Profiles:          cfg.Upstream.Profiles,
+		ClientName:        cfg.Upstream.ClientName,
+		DeviceToken:       cfg.Upstream.DeviceToken,
+		DeviceTokenFile:   cfg.Upstream.DeviceTokenFile,
+		PassthroughIP:     cfg.Upstream.PassthroughIP,
+		ChatBaseCN:        cfg.Upstream.ChatBaseCN,
+		ChatBaseGlobal:    cfg.Global.ChatBase,
+		BillingBaseGlobal: cfg.Global.BillingBase,
+		GlobalEnabled:     cfg.Global.Enabled,
+		IdleTimeout:       time.Duration(cfg.Upstream.IdleTimeoutSeconds) * time.Second,
+		StreamTimeouts: upstream.StreamTimeoutConfig{
+			FirstModelEvent: time.Duration(cfg.Upstream.FirstModelEventSeconds) * time.Second,
+			FirstGeneration: time.Duration(cfg.Upstream.FirstGenerationSeconds) * time.Second,
+			Tail:            time.Duration(cfg.Upstream.TailSeconds) * time.Second,
+		},
+		ShortTimeout: time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second,
+	}
+}
+
+// archiveConfigFrom 由配置构建归档参数（装配与热改共用同一口径）。
+// 归档目录固定由**装配期** stateFile 派生：state_file 是重启项，热改归档参数时
+// 不能把归档瞬间切到另一个目录（会分裂持久化视图）。
+func archiveConfigFrom(stateFile string, c *config.Config) reqlog.Config {
+	return reqlog.Config{
+		Dir:           stateSibling(stateFile, "request-logs"),
+		Enabled:       c.Logging.RequestArchiveEnabled,
+		RetentionDays: c.Logging.RequestRetentionDays,
+		MaxBytes:      int64(c.Logging.RequestArchiveMaxMB) << 20,
+	}
 }
 
 // buildScrubLayer 由配置构建出站指纹改写层。

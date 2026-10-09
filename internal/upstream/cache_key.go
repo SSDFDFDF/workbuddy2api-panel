@@ -90,7 +90,7 @@ func (c *Client) injectCacheKeyObject(obj map[string]any, aRealm, uid, conversat
 	if _, present := obj["prompt_cache_key"]; present {
 		return false
 	}
-	p := c.Profiles[aRealm]
+	p := c.optsNow().Profiles[aRealm]
 	profile, _ := json.Marshal(p)
 	material, _ := json.Marshal([]any{principal, aRealm, uid, obj["model"], string(profile), conversation})
 	mac := hmac.New(sha256.New, c.CacheSecret)

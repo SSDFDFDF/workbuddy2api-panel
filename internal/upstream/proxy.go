@@ -1,17 +1,19 @@
 // proxy.go upstream 与出站代理层（普通正向代理 / Resin）的低侵入接线。
 //
 // 设计（与 internal/proxy 的分工）：
-//   - 路由改写与凭证构造全在 internal/proxy（Transport / proxyFunc）；
+//   - 路由改写与凭证构造全在 internal/proxy（Dynamic / proxyFunc）；
 //   - 这里只做两件事：
-//     1) SetProxy：把 proxy Transport 包到 HTTP/ChatHTTP 共用的底层 Transport 上；
+//     1) SetProxy：把当前代理实例交给常驻的 proxy.Dynamic 转发层（无代理 = nil 直连）；
 //     2) tagProxy：在构造账号相关请求头时打一个内部账号标记头，告诉 Transport
 //     「本请求归属哪个代理账号」。
+//
+// 热改：proxy_url / resin_* 改配置时只替换 Dynamic 内的指针（见 main 的保存路径），
+// 底层 Transport 与连接池不变，因此请求并发期间没有 Transport 字段竞争。
 //
 // 账号级开关：tagProxy 在打标记前检查 auth.Auth.UseProxy()——账号显式关闭代理时
 // 不打标记，请求按未接入路径直连（全站所有账号出站路径都经此闸，故开关全局生效）。
 //
-// 未调用 SetProxy（未配置 proxy_url / resin_url）时，tagProxy 是空操作，出站行为与
-// 主线逐字一致。
+// 未配置代理（Dynamic 的当前实例为 nil）时 tagProxy 是空操作，出站行为与主线逐字一致。
 package upstream
 
 import (
@@ -34,39 +36,49 @@ func (c *Client) proxyAccount(a *auth.Auth) string {
 	return strings.TrimSpace(a.UID)
 }
 
-// SetProxy 接入出站代理：把 pc 的 Transport 包到当前共用的出站 Transport 上。
-// pc 为 nil 或未启用时空操作。重复调用幂等（已接入则跳过）。
+// SetProxy 替换当前出站代理实例（nil = 取消代理、恢复直连）。可反复调用：
+// 装配期设置初值，配置保存时热替换。
 //
-// 调用时机：必须在 https 出站 client 的装配期调用（main.go），且在读取底层
-// *http.Transport 调整超时之后（包上 Transport 后类型断言不再命中）。
+// 生产路径（upstream.New）从构造起就持有常驻 Dynamic 转发层，此处只换指针。
+// 手工构造的测试 Client（无 proxyDyn）在首次 SetProxy 时就地包一层：
+// 单线程装配场景安全；生产（New）不会走到这个分支。
 func (c *Client) SetProxy(pc *proxy.Client) {
-	if c == nil || !pc.Enabled() || c.proxy != nil || c.HTTP == nil {
+	if c == nil {
 		return
 	}
-	base := c.HTTP.Transport
-	if base == nil {
-		// 防御：不直接改写进程级 http.DefaultTransport（正代模式下会污染全局），
-		// 克隆一份自有副本。生产路径 c.HTTP.Transport 恒非 nil。
-		if dt, ok := http.DefaultTransport.(*http.Transport); ok {
-			base = dt.Clone()
-		} else {
-			base = http.DefaultTransport
+	dyn := c.proxyDyn.Load()
+	if dyn == nil {
+		c.proxyMu.Lock()
+		if dyn = c.proxyDyn.Load(); dyn == nil {
+			if c.HTTP == nil {
+				c.proxyMu.Unlock()
+				return
+			}
+			base := c.HTTP.Transport
+			if base == nil {
+				base = http.DefaultTransport
+			}
+			dyn = proxy.NewDynamic(base)
+			c.proxyDyn.Store(dyn)
+			c.HTTP.Transport = dyn
+			if c.ChatHTTP != nil {
+				c.ChatHTTP.Transport = dyn
+			}
 		}
+		c.proxyMu.Unlock()
 	}
-	wrapped := pc.Wrap(base)
-	c.HTTP.Transport = wrapped
-	if c.ChatHTTP != nil {
-		c.ChatHTTP.Transport = wrapped
-	}
-	c.proxy = pc
+	dyn.Set(pc)
 }
 
-// Proxy 返回已接入的出站代理客户端（未接入为 nil）。
+// Proxy 返回当前生效的出站代理客户端（未接入为 nil）。
 func (c *Client) Proxy() *proxy.Client {
 	if c == nil {
 		return nil
 	}
-	return c.proxy
+	if dyn := c.proxyDyn.Load(); dyn != nil {
+		return dyn.Current()
+	}
+	return nil
 }
 
 // tagProxy 在请求上打内部代理账号标记（未接入/账号为空/账号关闭代理时不做任何事）。
@@ -74,7 +86,7 @@ func (c *Client) Proxy() *proxy.Client {
 // 账号级代理开关（auth.Auth.UseProxy，默认 true）：关闭时直接不打标记 → 该账号的
 // 所有出站请求直连（chat / 签到 / 活跃上报 / 保活 / 余额刷新 / 领奖等全站路径）。
 func (c *Client) tagProxy(req *http.Request, a *auth.Auth) {
-	if c == nil || c.proxy == nil || req == nil {
+	if c == nil || req == nil || c.Proxy() == nil {
 		return
 	}
 	if a != nil && !a.UseProxy() {

@@ -46,7 +46,7 @@ const CFG_MAP = {
   resin_mode: ['resin_mode'], resin_auth_version: ['resin_auth_version'],
   request_client_info: ['logging', 'request_client_info'],
   // 服务级入站准入（server.*）：只覆盖「读取 + 整包解析 + 图片校验」，长流不占名额。
-  // 三项都在装配期构造 limiter（含等待时长），改动需重启。
+  // 三项限额与等待时长均已热生效（Handler.SetIngressLimits）；read_timeout 仍是重启项。
   max_inflight_requests: ['server', 'max_inflight_requests'],
   max_inflight_bytes_mb: ['server', 'max_inflight_bytes_mb'],
   ingress_wait: ['server', 'ingress_wait'],

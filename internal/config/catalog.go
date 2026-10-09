@@ -106,9 +106,16 @@ func MatchPath(pattern, path string) bool {
 
 // entries 目录全量数据。
 //
-// 口径：**如实反映当前实现**，不写"目标态"。P4 逐组件热化时把对应项的 Mode
-// 改成 Hot，并同步在 cmd/server 的热应用里接上动作——TestApplyClaimsEveryHotField
-// 会在两者不一致时失败。这样"面板说即时生效"永远等于"真的即时生效"。
+// 口径：**如实反映当前实现**，不写"目标态"。已热化的字段在这里标 Hot，并在
+// cmd/server 的热应用里接上动作——TestApplyClaimsEveryHotField 会在两者不一致时
+// 失败。这样"面板说即时生效"永远等于"真的即时生效"。
+//
+// 仍为 Restart 的只有 5 项：listen / state_file / server.read_timeout /
+// upstash.url / upstash.token——共同点是绑定监听套接字、派生持久化路径、或
+// 写进被并发读取的共享对象，没有安全的进程内替换点（Why 逐项写明）。
+//
+// upstream.header_timeout_seconds 走「重建 Transport + 原子换客户端」（连接池
+// 重置、值未变则空操作），因此不在 Restart 之列。
 var entries = Catalog{
 	// ── 基础 ────────────────────────────────────────────────────────────
 	// config_version：由 migrate.go 在加载/保存时自动归一（一次性版本迁移），
@@ -118,8 +125,10 @@ var entries = Catalog{
 		Why: "端口在装配期由 http.Server.Addr 绑定，热换需要起第二个 listener 并排空旧连接"},
 	{Path: "api_key", Mode: Hot, Group: "base",
 		Why: ""},
-	{Path: "auth_dir", Mode: Restart, Group: "base",
-		Why: "账号目录只在启动时扫描一次（auth.LoadDir + pool.SyncToDir）；面板内登录的新账号走 Add 热加载，不受此项影响"},
+	// auth_dir：保存时重扫目录并把账号池对齐（auth.LoadDir + pool.SyncToDir），
+	// 面板登录/导入的落盘目录同步切换；路径本身不在装配期被任何对象捕获。
+	{Path: "auth_dir", Mode: Hot, Group: "base",
+		Why: ""},
 	{Path: "state_file", Mode: Restart, Group: "base",
 		Why: "状态文件路径派生出用量/请求归档/模型缓存/cache-secret 等多个数据文件，中途换路径会分裂持久化视图"},
 	{Path: "panel.package_detail_limit", Mode: Hot, Passive: true, Group: "base",
@@ -132,22 +141,16 @@ var entries = Catalog{
 
 	// ── 日志与归档 ──────────────────────────────────────────────────────
 	{Path: "logging.request_client_info", Mode: Hot, Group: "base", Why: ""},
-	{Path: "logging.request_archive_enabled", Mode: Restart, Group: "base",
-		Why: "归档器（reqlog.Recorder）在装配期构造并持有开关/保留天数/上限，尚无 Reconfigure 入口"},
-	{Path: "logging.request_retention_days", Mode: Restart, Group: "base",
-		Why: "同上：归档器装配期构造"},
-	{Path: "logging.request_archive_max_mb", Mode: Restart, Group: "base",
-		Why: "同上：归档器装配期构造"},
+	{Path: "logging.request_archive_enabled", Mode: Hot, Group: "base", Why: ""},
+	{Path: "logging.request_retention_days", Mode: Hot, Group: "base", Why: ""},
+	{Path: "logging.request_archive_max_mb", Mode: Hot, Group: "base", Why: ""},
 
 	// ── 入站准入与读取 ──────────────────────────────────────────────────
-	{Path: "server.max_inflight_requests", Mode: Restart, Group: "ingress",
-		Why: "准入 limiter 在装配期构造（含上限与等待时长），尚无 SetIngress 入口"},
-	{Path: "server.max_inflight_bytes_mb", Mode: Restart, Group: "ingress",
-		Why: "同上：准入 limiter 装配期构造"},
-	{Path: "server.ingress_wait", Mode: Restart, Group: "ingress",
-		Why: "同上：准入 limiter 装配期构造"},
+	{Path: "server.max_inflight_requests", Mode: Hot, Group: "ingress", Why: ""},
+	{Path: "server.max_inflight_bytes_mb", Mode: Hot, Group: "ingress", Why: ""},
+	{Path: "server.ingress_wait", Mode: Hot, Group: "ingress", Why: ""},
 	{Path: "server.read_timeout", Mode: Restart, Group: "ingress",
-		Why: "http.Server.ReadTimeout 在 Serve 后被并发读取，进程内裸赋值有数据竞争"},
+		Why: "http.Server.ReadTimeout 在 Serve 后被并发读取，进程内裸赋值有数据竞争（无安全的原地替换点）"},
 
 	// ── 冷却与池 ────────────────────────────────────────────────────────
 	{Path: "cooldown.*", Mode: Hot, Group: "pool", Why: ""},
@@ -157,60 +160,37 @@ var entries = Catalog{
 	{Path: "schedule.*", Mode: Hot, Group: "schedule", Why: ""},
 
 	// ── 域策略 ──────────────────────────────────────────────────────────
-	{Path: "global.enabled", Mode: Restart, Group: "realm",
-		Why: "global 域开关在装配期写入上游 client 与 auth 侧闸门，尚无热替换入口"},
-	{Path: "global.chat_base", Mode: Restart, Group: "realm",
-		Why: "上游 base 被出站 client 在装配期捕获"},
-	{Path: "global.billing_base", Mode: Restart, Group: "realm",
-		Why: "上游 base 被出站 client 在装配期捕获"},
-	{Path: "model_default_realm", Mode: Restart, Group: "realm",
-		Why: "RealmResolver 在装配期构造，且被 handler 与会话粘性闭包共享实例"},
+	{Path: "global.enabled", Mode: Hot, Group: "realm", Why: ""},
+	{Path: "global.chat_base", Mode: Hot, Group: "realm", Why: ""},
+	{Path: "global.billing_base", Mode: Hot, Group: "realm", Why: ""},
+	{Path: "model_default_realm", Mode: Hot, Group: "realm", Why: ""},
 
 	// ── 提示词 ──────────────────────────────────────────────────────────
-	{Path: "prompt.*", Mode: Restart, Group: "prompt",
-		Why: "分域提示词规则在装配期构建后按值透传给 handler，尚无运行期快照入口"},
+	{Path: "prompt.*", Mode: Hot, Group: "prompt", Why: ""},
 
 	// ── 上游与出站身份 ──────────────────────────────────────────────────
-	{Path: "upstream.profiles.*", Mode: Restart, Group: "upstream",
-		Why: "出站身份 profile 在装配期写进出站 client（按 realm 选 UA/版本头）"},
-	{Path: "upstream.client_name", Mode: Restart, Group: "upstream",
-		Why: "用量归属头取值在装配期写进出站 client"},
-	{Path: "upstream.device_token", Mode: Restart, Group: "upstream",
-		Why: "设备风控 token 在装配期写进出站 client"},
-	{Path: "upstream.device_token_file", Mode: Restart, Group: "upstream",
-		Why: "设备 token 文件路径在装配期写进出站 client"},
-	{Path: "upstream.passthrough_ip", Mode: Restart, Group: "upstream",
-		Why: "客户端 IP 透传开关在装配期写进出站 client"},
-	{Path: "upstream.chat_base_cn", Mode: Restart, Group: "upstream",
-		Why: "上游 base 被出站 client 在装配期捕获"},
-	{Path: "upstream.timeout_seconds", Mode: Restart, Group: "upstream",
-		Why: "短 RPC 超时写进 http.Client.Timeout，运行期替换会与在途请求竞争"},
-	{Path: "upstream.header_timeout_seconds", Mode: Restart, Group: "upstream",
-		Why: "首字节超时写进 Transport.ResponseHeaderTimeout，Transport 被连接池共享"},
-	{Path: "upstream.idle_timeout_seconds", Mode: Restart, Group: "upstream",
-		Why: "SSE 流空闲上限在装配期写入出站 client"},
-	{Path: "upstream.first_model_event_seconds", Mode: Restart, Group: "upstream",
-		Why: "SSE 阶段上限在装配期写入出站 client"},
-	{Path: "upstream.first_generation_seconds", Mode: Restart, Group: "upstream",
-		Why: "SSE 阶段上限在装配期写入出站 client"},
-	{Path: "upstream.tail_seconds", Mode: Restart, Group: "upstream",
-		Why: "SSE 阶段上限在装配期写入出站 client"},
+	{Path: "upstream.profiles.*", Mode: Hot, Group: "upstream", Why: ""},
+	{Path: "upstream.client_name", Mode: Hot, Group: "upstream", Why: ""},
+	{Path: "upstream.device_token", Mode: Hot, Group: "upstream", Why: ""},
+	{Path: "upstream.device_token_file", Mode: Hot, Group: "upstream", Why: ""},
+	{Path: "upstream.passthrough_ip", Mode: Hot, Group: "upstream", Why: ""},
+	{Path: "upstream.chat_base_cn", Mode: Hot, Group: "upstream", Why: ""},
+	{Path: "upstream.timeout_seconds", Mode: Hot, Group: "upstream", Why: ""},
+	{Path: "upstream.header_timeout_seconds", Mode: Hot, Group: "upstream", Why: ""},
+	{Path: "upstream.idle_timeout_seconds", Mode: Hot, Group: "upstream", Why: ""},
+	{Path: "upstream.first_model_event_seconds", Mode: Hot, Group: "upstream", Why: ""},
+	{Path: "upstream.first_generation_seconds", Mode: Hot, Group: "upstream", Why: ""},
+	{Path: "upstream.tail_seconds", Mode: Hot, Group: "upstream", Why: ""},
 
 	// ── 会话粘性 ────────────────────────────────────────────────────────
-	{Path: "session_sticky.*", Mode: Restart, Group: "session",
-		Why: "会话路由器（含启用开关、TTL、GC 周期）在装配期构造；改这里需重启（面板登录的热加载不受影响）"},
+	{Path: "session_sticky.*", Mode: Hot, Group: "session", Why: ""},
 
 	// ── 出站代理 ────────────────────────────────────────────────────────
-	{Path: "proxy_url", Mode: Restart, Group: "proxy",
-		Why: "出站代理在装配期包一层 RoundTripper，运行期改写会与在途请求竞争"},
-	{Path: "resin_url", Mode: Restart, Group: "proxy",
-		Why: "同上：代理接入在装配期完成（Resin 还涉及 per-UID lease 身份）"},
-	{Path: "resin_platform_name", Mode: Restart, Group: "proxy",
-		Why: "同上：代理接入在装配期完成"},
-	{Path: "resin_mode", Mode: Restart, Group: "proxy",
-		Why: "同上：代理接入在装配期完成"},
-	{Path: "resin_auth_version", Mode: Restart, Group: "proxy",
-		Why: "同上：代理接入在装配期完成"},
+	{Path: "proxy_url", Mode: Hot, Group: "proxy", Why: ""},
+	{Path: "resin_url", Mode: Hot, Group: "proxy", Why: ""},
+	{Path: "resin_platform_name", Mode: Hot, Group: "proxy", Why: ""},
+	{Path: "resin_mode", Mode: Hot, Group: "proxy", Why: ""},
+	{Path: "resin_auth_version", Mode: Hot, Group: "proxy", Why: ""},
 
 	// ── 持久化镜像 ──────────────────────────────────────────────────────
 	{Path: "upstash.url", Mode: Restart, Group: "storage",

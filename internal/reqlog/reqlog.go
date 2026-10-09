@@ -136,6 +136,9 @@ type Snapshot struct {
 }
 
 // Recorder 并发安全的有界请求指标与归档记录器。
+//
+// archive 用 atomic.Pointer 持有**不可变快照**：面板热改 logging.request_archive_*
+// 时整体换一个新 writer（关闭旧的），请求热路径 Load 一次拿到一致视图，无锁无竞争。
 type Recorder struct {
 	mu          sync.Mutex
 	started     time.Time
@@ -145,20 +148,56 @@ type Recorder struct {
 	httpSuccess int64
 	durationSum int64
 	recent      []Event
-	archive     *archiveWriter
+	archive     atomic.Pointer[archiveWriter]
+	// closed 置位后 Reconfigure 不再新建 writer（进程关停阶段保存配置时不留
+	// 无人回收的归档 goroutine）。
+	closed atomic.Bool
 }
 
-// New 创建记录器；Dir 为空或 Enabled=false 时只启用内存指标。
-func New(cfg Config) *Recorder {
+// normalizeArchiveConfig 归一化归档参数（New / Reconfigure 共用，保证两者口径一致）。
+func normalizeArchiveConfig(cfg Config) Config {
 	if cfg.FileMaxBytes <= 0 {
 		cfg.FileMaxBytes = defaultFileMax
 	}
 	if cfg.QueueSize <= 0 {
 		cfg.QueueSize = defaultQueue
 	}
+	return cfg
+}
+
+// New 创建记录器；Dir 为空或 Enabled=false 时只启用内存指标。
+func New(cfg Config) *Recorder {
 	r := &Recorder{started: time.Now(), recent: make([]Event, 0, recentLimit)}
-	r.archive = newArchiveWriter(cfg)
+	r.archive.Store(newArchiveWriter(normalizeArchiveConfig(cfg)))
 	return r
+}
+
+// Reconfigure 在线替换归档参数（Enabled / Dir / RetentionDays / MaxBytes）。
+//
+// 语义：Enabled=false（或 Dir 为空）= 停止归档，只保留内存指标；重新启用会新建
+// writer 并重新打开当天文件。调用方为配置保存路径，不在请求热路径上。
+//
+// 新旧 writer 的交接顺序：先建新、再换指针、最后关旧。这样"新事件不丢"（换指针后
+// Record 一定拿到新 writer）；旧 writer 只剩队列里已收下的事件，排空后退出。两者
+// 可能短暂同时持有同一目录的文件句柄，归档文件以 O_APPEND 打开，追加写入互不破坏
+// 行完整性。若改成"先关旧再建新"，关旧的这段时间事件会因为 writer 退休而被丢弃。
+//
+// 返回是否真的发生了替换：配置未变时是空操作（避免无谓的 goroutine 抖动）。
+// 内存指标（recent/计数）不受影响，跨重配置保留。
+func (r *Recorder) Reconfigure(cfg Config) bool {
+	if r == nil || r.closed.Load() {
+		return false
+	}
+	cfg = normalizeArchiveConfig(cfg)
+	if old := r.archive.Load(); old != nil && old.sameConfig(cfg) {
+		return false
+	}
+	next := newArchiveWriter(cfg)
+	old := r.archive.Swap(next)
+	if old != nil {
+		old.close()
+	}
+	return true
 }
 
 // Begin 标记一个请求进入处理。
@@ -203,8 +242,14 @@ func (r *Recorder) Record(e Event) {
 		r.recent = r.recent[:recentLimit]
 	}
 	r.mu.Unlock()
-	if r.archive != nil {
-		r.archive.enqueue(e)
+	if w := r.archive.Load(); w != nil {
+		// Reconfigure 可能恰好在此刻换掉 writer：退休的 writer 会拒收（enqueue 返回
+		// false），此时用当前指针重试一次，避免这次归档记录凭空消失。
+		if !w.enqueue(e) {
+			if next := r.archive.Load(); next != nil && next != w {
+				next.enqueue(e)
+			}
+		}
 	}
 }
 
@@ -228,26 +273,33 @@ func (r *Recorder) Snapshot() Snapshot {
 		s.AvgDurationMs = float64(r.durationSum) / float64(r.completed)
 	}
 	r.mu.Unlock()
-	if r.archive != nil {
-		s.Archive = r.archive.stats()
+	if w := r.archive.Load(); w != nil {
+		s.Archive = w.stats()
 	}
 	return s
 }
 
 // ReadArchive 返回最近的归档事件（按时间倒序）。limit<=0 时回落 200，最大 1000。
 func (r *Recorder) ReadArchive(limit int, filter Filter) ([]Event, error) {
-	if r == nil || r.archive == nil {
+	if r == nil {
 		return nil, nil
 	}
-	return r.archive.read(limit, filter)
+	w := r.archive.Load()
+	if w == nil {
+		return nil, nil
+	}
+	return w.read(limit, filter)
 }
 
 // Close 刷盘并停止后台归档。
 func (r *Recorder) Close() {
-	if r == nil || r.archive == nil {
+	if r == nil {
 		return
 	}
-	r.archive.close()
+	r.closed.Store(true)
+	if w := r.archive.Load(); w != nil {
+		w.close()
+	}
 }
 
 func round1(v float64) float64 {
@@ -260,7 +312,11 @@ type archiveWriter struct {
 	stop      chan struct{}
 	done      chan struct{}
 	closeOnce sync.Once
-	dropped   atomic.Uint64
+	// closed 在 close() 关闭 run goroutine 之前置位：请求热路径与 Reconfigure
+	// 并发时，已退休 writer 不再收事件（否则会静默丢进无人消费的缓冲）。
+	closed  atomic.Bool
+	dropped atomic.Uint64
+
 	lastErrMu sync.Mutex
 	lastErr   string
 
@@ -307,14 +363,34 @@ func (w *archiveWriter) enabled() bool {
 	return w != nil && w.cfg.Enabled && w.cfg.Dir != "" && w.done != nil
 }
 
-func (w *archiveWriter) enqueue(e Event) {
-	if !w.enabled() {
-		return
+// accepting 报告 writer 是否仍接收新事件：已退休（close 后）不再接收，
+// 否则事件会静默落进无人消费的缓冲。stats/read 仍按 enabled() 口径保留可观测性。
+func (w *archiveWriter) accepting() bool {
+	return w.enabled() && !w.closed.Load()
+}
+
+// sameConfig 报告两份归档配置（已归一化）是否等价：等价则 Reconfigure 空操作。
+func (w *archiveWriter) sameConfig(cfg Config) bool {
+	if w == nil {
+		return false
+	}
+	return w.cfg.Enabled == cfg.Enabled && w.cfg.Dir == cfg.Dir &&
+		w.cfg.RetentionDays == cfg.RetentionDays && w.cfg.MaxBytes == cfg.MaxBytes &&
+		w.cfg.FileMaxBytes == cfg.FileMaxBytes && w.cfg.QueueSize == cfg.QueueSize
+}
+
+// enqueue 投入归档队列。返回 false 表示该 writer 已退休、本次事件未被收下
+// （调用方应改投当前 writer）；队列满仍返回 true（事件被丢弃并计入 dropped）。
+func (w *archiveWriter) enqueue(e Event) bool {
+	if !w.accepting() {
+		return false
 	}
 	select {
 	case w.ch <- e:
+		return true
 	default:
 		w.dropped.Add(1)
+		return true
 	}
 }
 
@@ -740,10 +816,12 @@ func (w *archiveWriter) stats() ArchiveStats {
 }
 
 func (w *archiveWriter) close() {
-	if !w.enabled() {
+	if w == nil || w.done == nil {
 		return
 	}
 	w.closeOnce.Do(func() {
+		// 先置 closed（拦住新事件），再关 stop 让 run 排空退出。
+		w.closed.Store(true)
 		close(w.stop)
 		<-w.done
 	})

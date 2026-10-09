@@ -377,3 +377,137 @@ func TestExtractKeyMultimodalContent(t *testing.T) {
 		t.Error("pure-image url changes must keep same derived key")
 	}
 }
+
+// TestReconfigureTogglesEnabledAndTTL 热改启停 / TTL：
+//   - 停用后 Resolve 不分配、Bind 不落绑定、Count 报 0（已有绑定保留）；
+//   - 重新启用立即恢复既有绑定（TTL 内）；
+//   - TTL 收紧后过期判断按新值生效。
+func TestReconfigureTogglesEnabledAndTTL(t *testing.T) {
+	st := newCountingStore()
+	r := routerWith(st, []string{"a", "b"}, time.Hour)
+	defer r.StopGC()
+
+	uid, ok := r.Resolve("conv-1")
+	if !ok || uid == "" {
+		t.Fatal("启用态应能分配")
+	}
+	if r.Count() != 1 {
+		t.Fatalf("Count=%d want 1", r.Count())
+	}
+
+	r.Reconfigure(time.Hour, time.Minute, false)
+	if r.Enabled() {
+		t.Fatal("Reconfigure(false) 后 Enabled 应为 false")
+	}
+	if _, ok := r.Resolve("conv-2"); ok {
+		t.Fatal("停用后不应再分配")
+	}
+	r.Bind("conv-3", "a")
+	if r.Count() != 0 {
+		t.Fatalf("停用后 Count 应报 0，实际 %d", r.Count())
+	}
+
+	r.Reconfigure(time.Hour, time.Minute, true)
+	if got, ok := r.Resolve("conv-1"); !ok || got != uid {
+		t.Fatalf("重新启用应恢复既有绑定 conv-1→%s，实际 %s ok=%v", uid, got, ok)
+	}
+
+	// TTL 收紧到 0（非正回落默认 30m）→ 用一个 1ns TTL 验证判定确实读新值：
+	// 旧绑定 lastActive 已是过去时刻，1ns 必过期 → 重新分配。
+	r.Reconfigure(time.Nanosecond, time.Minute, true)
+	if got, ok := r.Resolve("conv-1"); !ok || got == "" {
+		t.Fatal("TTL 过期后应重新分配")
+	}
+}
+
+// TestReconfigureGCIntervalRestart GC 周期变化时重启 GC goroutine（旧 ticker 不会残留）。
+func TestReconfigureGCIntervalRestart(t *testing.T) {
+	r := routerWith(newCountingStore(), []string{"a"}, time.Minute)
+	defer r.StopGC()
+	r.StartGC()
+	first := func() chan struct{} { r.mu.Lock(); defer r.mu.Unlock(); return r.gcStop }
+	stop1 := first()
+	if stop1 == nil {
+		t.Fatal("GC 应已启动")
+	}
+	r.Reconfigure(time.Minute, 2*time.Minute, true)
+	stop2 := first()
+	if stop2 == nil {
+		t.Fatal("换周期后 GC 仍应在跑")
+	}
+	if stop2 == stop1 {
+		t.Fatal("GC 周期变化应重启 goroutine（ticker 周期启动后固定）")
+	}
+	// 幂等：同周期重复 Reconfigure 不应再重启。
+	r.Reconfigure(time.Minute, 2*time.Minute, true)
+	if got := first(); got != stop2 {
+		t.Fatal("同周期重复 Reconfigure 不应重启 GC")
+	}
+	r.Reconfigure(time.Minute, 2*time.Minute, false)
+	if got := first(); got != nil {
+		t.Fatal("停用后 GC 应停止")
+	}
+}
+
+// blockingStore LoadBinds 阻塞到 release 被关闭（模拟 Upstash 慢读）。
+type blockingStore struct {
+	redisstore.Noop
+	release chan struct{}
+	binds   map[string]string
+}
+
+func (b *blockingStore) LoadBinds() map[string]string {
+	<-b.release
+	return b.binds
+}
+
+// TestReconfigureHotDoesNotBlockOnStore 热改路径的 Redis 恢复必须在后台：
+// LoadBinds 是同步网络读（Upstash 上限 30s），而配置保存持有 config.FileTx，
+// 同步等待会把保存请求与后续保存一起堵住。装配期路径（Reconfigure）保持同步。
+func TestReconfigureHotDoesNotBlockOnStore(t *testing.T) {
+	st := &blockingStore{release: make(chan struct{}), binds: map[string]string{"conv-restored": "a"}}
+	r := New(Config{
+		TTL:        time.Minute,
+		GCInterval: time.Minute,
+		Store:      st,
+		Available:  func() []string { return []string{"a", "b"} },
+	})
+	r.Reconfigure(time.Minute, time.Minute, false) // 禁用态：不触发恢复
+	defer r.StopGC()
+
+	done := make(chan struct{})
+	go func() {
+		r.ReconfigureHot(time.Minute, time.Minute, true)
+		close(done)
+	}()
+	select {
+	case <-done: // 期望立即返回（恢复在后台等着 release）
+	case <-time.After(time.Second):
+		t.Fatal("ReconfigureHot 被 Store.LoadBinds 阻塞（配置保存会被拖住 30s）")
+	}
+
+	close(st.release) // 放行后台恢复
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if uid, ok := r.Resolve("conv-restored"); ok {
+			if uid != "a" {
+				t.Fatalf("恢复的绑定应指向 a，实际 %s", uid)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("后台恢复未生效")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// 装配期路径仍需同步：新 Router 用 Reconfigure 启用时，恢复必须在返回前完成。
+	sync := &countingStore{binds: map[string]string{"conv-sync": "a"}}
+	r2 := New(Config{TTL: time.Minute, GCInterval: time.Minute, Store: sync,
+		Available: func() []string { return []string{"a", "b"} }})
+	r2.Reconfigure(time.Minute, time.Minute, true)
+	defer r2.StopGC()
+	if uid, ok := r2.Resolve("conv-sync"); !ok || uid != "a" {
+		t.Fatalf("装配期（Reconfigure）恢复必须同步完成，实际 uid=%q ok=%v", uid, ok)
+	}
+}

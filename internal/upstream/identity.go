@@ -34,7 +34,7 @@ func (c *Client) identity(a *auth.Auth) IdentityProfile {
 	}
 	p := DefaultIdentity(realm)
 	if c != nil {
-		if v, ok := c.Profiles[realm]; ok {
+		if v, ok := c.optsNow().Profiles[realm]; ok {
 			if v.ClientVersion != "" {
 				p.ClientVersion = v.ClientVersion
 			}

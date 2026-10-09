@@ -138,6 +138,6 @@ func promptPreviewNote() string {
 		"素材优先级：内联正文 > 文件 > 预设",
 		"mode：replace 只留网关提示词；after 网关在前、客户端在后；append 反之；inject 把客户端 system 套官方 <user_custom_instructions> 包装后追加到正文末尾",
 		"预设是官方渲染产物逐字（无模板标记、无运行期变量），加载即使用",
-		"改提示词需重启进程生效",
+		"保存后即时生效（PromptHold 快照整体替换，无需重启）",
 	}, "；")
 }

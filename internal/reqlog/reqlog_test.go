@@ -3,6 +3,7 @@ package reqlog
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -259,5 +260,136 @@ func TestArchivePruneHonorsSize(t *testing.T) {
 	}
 	if len(entries) != 1 || entries[0].Name() != "requests-2026-09-22.jsonl" {
 		t.Fatalf("remaining = %+v, want newest file only", entries)
+	}
+}
+
+// TestRecorderReconfigureArchive 归档参数热改：关闭 → 开启 → 换目录 → 再关闭。
+// 内存指标跨重配置保留；旧 writer 排空后新事件只落新目录；同配置重复提交是空操作。
+func TestRecorderReconfigureArchive(t *testing.T) {
+	r := New(Config{Enabled: false})
+	if s := r.Snapshot().Archive; s.Enabled {
+		t.Fatalf("初始应为关闭：%+v", s)
+	}
+	r.Record(Event{RequestID: "off-1", Status: 200, OK: true}) // 关闭态不落盘
+
+	dir1 := t.TempDir()
+	if !r.Reconfigure(Config{Enabled: true, Dir: dir1, RetentionDays: 7, MaxBytes: 1 << 20}) {
+		t.Fatal("启用归档应返回 changed=true")
+	}
+	if !r.Snapshot().Archive.Enabled {
+		t.Fatal("启用后 Archive.Enabled 应为 true")
+	}
+	r.Record(Event{RequestID: "on-1", Status: 200, OK: true})
+
+	dir2 := t.TempDir()
+	if !r.Reconfigure(Config{Enabled: true, Dir: dir2, RetentionDays: 3, MaxBytes: 1 << 20}) {
+		t.Fatal("换目录应返回 changed=true")
+	}
+	r.Record(Event{RequestID: "on-2", Status: 200, OK: true})
+
+	if r.Reconfigure(Config{Enabled: true, Dir: dir2, RetentionDays: 3, MaxBytes: 1 << 20}) {
+		t.Fatal("同配置重复提交应返回 changed=false")
+	}
+
+	if !r.Reconfigure(Config{Enabled: false}) {
+		t.Fatal("关闭归档应返回 changed=true")
+	}
+	r.Record(Event{RequestID: "off-2", Status: 200, OK: true})
+	if s := r.Snapshot().Archive; s.Enabled {
+		t.Fatalf("关闭后 Archive.Enabled 应为 false：%+v", s)
+	}
+	r.Close() // 排空两代 writer
+
+	if got := r.Snapshot().Completed; got != 4 {
+		t.Fatalf("内存指标应跨重配置保留：completed=%d want 4", got)
+	}
+	if _, err := r.ReadArchive(100, Filter{}); err != nil {
+		t.Fatalf("关闭后仍应可读历史归档：%v", err)
+	}
+
+	ids := func(dir string) []string {
+		t.Helper()
+		var out []string
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			if err := readFile(filepath.Join(dir, entry.Name()), Filter{}, func(e Event) {
+				out = append(out, e.RequestID)
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return out
+	}
+	d1, d2 := ids(dir1), ids(dir2)
+	if len(d1) != 1 || d1[0] != "on-1" {
+		t.Fatalf("dir1 事件 = %v want [on-1]", d1)
+	}
+	if len(d2) != 1 || d2[0] != "on-2" {
+		t.Fatalf("dir2 事件 = %v want [on-2]", d2)
+	}
+}
+
+// TestReconfigureConcurrentRecord 归档参数热改与请求记录并发：不得数据竞争或 panic。
+func TestReconfigureConcurrentRecord(t *testing.T) {
+	r := New(Config{})
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			r.Record(Event{RequestID: "x", Status: 200, OK: true})
+		}
+	}()
+	dir1, dir2 := t.TempDir(), t.TempDir()
+	for i := 0; i < 50; i++ {
+		if i%2 == 0 {
+			r.Reconfigure(Config{Enabled: true, Dir: dir1, RetentionDays: 7, MaxBytes: 1 << 20})
+		} else {
+			r.Reconfigure(Config{Enabled: true, Dir: dir2, RetentionDays: 7, MaxBytes: 1 << 20})
+		}
+		r.Snapshot()
+	}
+	r.Reconfigure(Config{Enabled: false})
+	close(stop)
+	wg.Wait()
+	r.Close()
+}
+
+// TestArchiveWriterRetiredRejectsEvents 已退休 writer 必须拒收事件：
+// 拒收（返回 false）让 Record 能改投当前 writer；若静默收下就会丢进无人消费的
+// 缓冲（Reconfigure 期间的事件凭空消失）。
+func TestArchiveWriterRetiredRejectsEvents(t *testing.T) {
+	w := newArchiveWriter(normalizeArchiveConfig(Config{Enabled: true, Dir: t.TempDir(), RetentionDays: 7, MaxBytes: 1 << 20}))
+	if !w.enqueue(Event{RequestID: "live"}) {
+		t.Fatal("活跃 writer 应收下事件")
+	}
+	w.close()
+	if w.enqueue(Event{RequestID: "retired"}) {
+		t.Fatal("已退休 writer 必须拒收事件（否则事件静默丢失）")
+	}
+	// 退休后仍可观测（stats/read 走 enabled 口径，供面板看历史）。
+	if !w.stats().Enabled {
+		t.Fatal("退休 writer 仍应报告 enabled（历史归档可读）")
+	}
+}
+
+// TestRecorderReconfigureAfterCloseIsNoop 关停后再保存配置不得新建归档 goroutine。
+func TestRecorderReconfigureAfterCloseIsNoop(t *testing.T) {
+	r := New(Config{Enabled: true, Dir: t.TempDir(), RetentionDays: 7, MaxBytes: 1 << 20})
+	if !r.Reconfigure(Config{Enabled: false}) {
+		t.Fatal("关闭归档应生效")
+	}
+	r.Close()
+	if r.Reconfigure(Config{Enabled: true, Dir: t.TempDir(), RetentionDays: 7, MaxBytes: 1 << 20}) {
+		t.Fatal("Close 之后不得再新建 writer")
 	}
 }

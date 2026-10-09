@@ -41,8 +41,8 @@ type GlobalCountry struct {
 // globalRegisterBase 注册激活端点的 base（注册链路在 www.workbuddy.ai，与 globalBillingBase 同域）。
 // 独立成方法便于测试替换。
 func (c *Client) globalRegisterBase() string {
-	if c.BillingBaseGlobal != "" {
-		return c.BillingBaseGlobal
+	if v := c.optsNow().BillingBaseGlobal; v != "" {
+		return v
 	}
 	return defaultGlobalBase
 }
@@ -77,7 +77,7 @@ func (c *Client) globalRegisterReq(method, url, token string, body any) (*http.R
 // a 用于 Resin 代理池账号标记（未接入时空操作）。
 func (c *Client) globalRegisterJSON(a *auth.Auth, req *http.Request) (code int, msg string, raw json.RawMessage, err error) {
 	c.tagProxy(req, a)
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.ShortClient().Do(req)
 	if err != nil {
 		return 0, "", nil, err
 	}

@@ -115,20 +115,50 @@ func TestCatalogModesConsistent(t *testing.T) {
 	}
 }
 
-// TestCatalogRestartPathsCoverSessionEnabled 回归：session_sticky 三项
-// （尤其 enabled）必须都在需重启集合内。
+// TestCatalogSessionStickyHot 回归 session_sticky 三项：Router.Reconfigure 已支持
+// 启停 / TTL / GC 周期热改，目录必须如实标 Hot。
 //
-// 历史 bug：enabled 既不在 restartRequiredFields 里，面板也没徽标——
-// 用户取消勾选后显示"配置已保存"，实际粘性路由照旧。
-func TestCatalogRestartPathsCoverSessionEnabled(t *testing.T) {
+// 历史 bug：enabled 既不在 restartRequiredFields 清单也没徽标——用户取消勾选后
+// 显示"配置已保存"，实际粘性路由照旧。热化后若仍标 Restart 会反向误导（明明即时
+// 生效却提示需重启）。
+func TestCatalogSessionStickyHot(t *testing.T) {
 	cat := Entries()
 	for _, p := range []string{
 		"session_sticky.enabled",
 		"session_sticky.ttl",
 		"session_sticky.gc_interval",
 	} {
-		if !cat.IsRestartPath(p) {
-			t.Errorf("%s 必须是 Restart（装配期构造会话路由器），否则面板改了不会生效也不提示", p)
+		f, ok := cat.Lookup(p)
+		if !ok || f.Mode != Hot {
+			t.Errorf("%s 必须标 Hot（saveConfig 已接 Router.Reconfigure），实际 %+v ok=%v", p, f, ok)
+		}
+	}
+}
+
+// TestCatalogRestartSetIsMinimal 钉住当前仍需重启的字段集合：任何新增 Restart 项
+// 都必须是有意识的决定（并在此更新），防止"新增字段忘了热化"悄悄退化为需重启。
+func TestCatalogRestartSetIsMinimal(t *testing.T) {
+	want := map[string]bool{
+		"listen":              true,
+		"state_file":          true,
+		"server.read_timeout": true,
+		"upstash.url":         true,
+		"upstash.token":       true,
+	}
+	got := map[string]bool{}
+	for _, f := range Entries() {
+		if f.Mode == Restart {
+			got[f.Path] = true
+		}
+	}
+	for p := range got {
+		if !want[p] {
+			t.Errorf("新增 Restart 项 %s：确认它确实无法热化；若已热化请同步更新 catalog 与本测试", p)
+		}
+	}
+	for p := range want {
+		if !got[p] {
+			t.Errorf("%s 已不在 Restart 集合：若已热化请从本测试的期望集合移除", p)
 		}
 	}
 }

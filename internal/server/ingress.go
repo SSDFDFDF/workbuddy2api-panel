@@ -46,6 +46,9 @@ const (
 )
 
 // ingressLimiter 入站并发/字节预算闸门（零值 = 不限制）。
+//
+// maxCount/maxBytes/wait 由 SetLimits 在 l.mu 内整体替换：热路径要么在锁内读
+// （fits/acquire/release/Stats），要么先取一次快照再使用，因此修改限额无数据竞争。
 type ingressLimiter struct {
 	maxCount int
 	maxBytes int64
@@ -63,37 +66,81 @@ type ingressLimiter struct {
 	peakBytes atomic.Int64
 }
 
+// ingressLimits 一次读取的准入参数快照（避免一次请求里混用新旧限额）。
+type ingressLimits struct {
+	maxCount int
+	maxBytes int64
+	wait     time.Duration
+}
+
+func (lim ingressLimits) enabled() bool { return lim.maxCount > 0 || lim.maxBytes > 0 }
+
 func newIngressLimiter(maxCount int, maxBytesMB int, wait time.Duration) *ingressLimiter {
-	l := &ingressLimiter{
-		maxCount: maxCount,
-		maxBytes: int64(maxBytesMB) << 20,
-		wait:     wait,
-	}
-	if l.maxCount < 0 {
-		l.maxCount = 0
-	}
-	if l.maxBytes < 0 {
-		l.maxBytes = 0
-	}
-	if l.wait < 0 {
-		l.wait = 0
-	}
+	l := &ingressLimiter{}
+	l.SetLimits(maxCount, maxBytesMB, wait)
 	return l
+}
+
+// SetLimits 热替换入站限额（配置保存路径调用）。限额放宽/关闭时广播唤醒等待者：
+// 否则已进入等待的请求要等到其他请求释放名额才会重新判断新限额。
+func (l *ingressLimiter) SetLimits(maxCount int, maxBytesMB int, wait time.Duration) {
+	if l == nil {
+		return
+	}
+	if maxCount < 0 {
+		maxCount = 0
+	}
+	maxBytes := int64(maxBytesMB) << 20
+	if maxBytes < 0 {
+		maxBytes = 0
+	}
+	if wait < 0 {
+		wait = 0
+	}
+	l.mu.Lock()
+	if l.maxCount == maxCount && l.maxBytes == maxBytes && l.wait == wait {
+		// 值未变：不广播。配置保存路径每次都会调用本方法，无谓广播会唤醒全部
+		// 等待者（惊群），而它们重新判定后仍然要等。
+		l.mu.Unlock()
+		return
+	}
+	l.maxCount = maxCount
+	l.maxBytes = maxBytes
+	l.wait = wait
+	if l.notify != nil {
+		close(l.notify)
+		l.notify = make(chan struct{})
+	}
+	l.mu.Unlock()
+}
+
+// snapshotLimits 在锁内取一次限额快照。
+func (l *ingressLimiter) snapshotLimits() ingressLimits {
+	if l == nil {
+		return ingressLimits{}
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return ingressLimits{maxCount: l.maxCount, maxBytes: l.maxBytes, wait: l.wait}
 }
 
 // enabled 报告是否启用限制（未配置或两项上限都为 0 = 不限）。
 func (l *ingressLimiter) enabled() bool {
-	return l != nil && (l.maxCount > 0 || l.maxBytes > 0)
+	return l.snapshotLimits().enabled()
 }
 
 // weightOf 计算一次请求的字节计入量。未知长度按 unknownRequestBytes。
 func (l *ingressLimiter) weightOf(declared int64) int64 {
+	return weightFor(l.snapshotLimits(), declared)
+}
+
+func weightFor(lim ingressLimits, declared int64) int64 {
 	if declared <= 0 {
 		return unknownRequestBytes
 	}
-	if l.maxBytes > 0 && declared > l.maxBytes {
+	if lim.maxBytes > 0 && declared > lim.maxBytes {
 		// 单请求已超总预算：按总预算计入（否则它永远拿不到名额）。
-		return l.maxBytes
+		return lim.maxBytes
 	}
 	return declared
 }
@@ -103,15 +150,16 @@ func (l *ingressLimiter) weightOf(declared int64) int64 {
 // ctx 取消或等待超时后仍无空间 → ok=false，调用方应立即回 503（快速失败优于排队堆积）。
 // 未启用限制时返回空操作释放函数，调用方无需分支。
 func (l *ingressLimiter) Acquire(ctx context.Context, declared int64) (func(), bool) {
-	if !l.enabled() {
+	lim := l.snapshotLimits()
+	if !lim.enabled() {
 		return func() {}, true
 	}
-	weight := l.weightOf(declared)
+	weight := weightFor(lim, declared)
 
 	// wait == 0：满载立即拒绝（fail fast，不排队）。
 	// 注意必须在这里显式返回：下面的 select 在 wait==0 时 timeout 为 nil
 	// （nil channel 永不就绪），若继续走循环就会一直阻塞到有释放为止。
-	if l.wait <= 0 {
+	if lim.wait <= 0 {
 		if l.tryAcquire(weight) {
 			return l.releaseFunc(weight), true
 		}
@@ -119,7 +167,7 @@ func (l *ingressLimiter) Acquire(ctx context.Context, declared int64) (func(), b
 		return nil, false
 	}
 
-	timer := time.NewTimer(l.wait)
+	timer := time.NewTimer(lim.wait)
 	defer timer.Stop()
 	timeout := timer.C
 
@@ -277,14 +325,25 @@ func (l *ingressLimiter) Stats() ingressStats {
 
 // StartIngressLog 周期性输出满载观测（仅在确实发生过等待/拒绝时打印，避免常态刷屏）。
 // 返回停止函数（main 退出时调用）。未启用准入时返回空操作。
+//
+// 注意：观测 goroutine 总是启动（配置可能在运行期热开启准入）；未启用时
+// waited/rejected 恒为 0，不会产生日志。
 func (h *Handler) StartIngressLog(interval time.Duration) func() {
 	l := h.ingress
 	return l.startIngressLog(interval)
 }
 
+// SetIngressLimits 热替换入站准入限额（配置保存路径调用，见 ingressLimits）。
+func (h *Handler) SetIngressLimits(maxRequests, maxBytesMB int, wait time.Duration) {
+	if h == nil {
+		return
+	}
+	h.ingress.SetLimits(maxRequests, maxBytesMB, wait)
+}
+
 // startIngressLog 是 StartIngressLog 的内部实现（见 ingressLimiter）。
 func (l *ingressLimiter) startIngressLog(interval time.Duration) func() {
-	if !l.enabled() {
+	if l == nil {
 		return func() {}
 	}
 	if interval <= 0 {

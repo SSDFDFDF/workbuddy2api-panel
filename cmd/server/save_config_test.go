@@ -7,17 +7,35 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"workbuddy_manager/internal/auth"
 	"workbuddy_manager/internal/config"
 	"workbuddy_manager/internal/config/runtime"
 	"workbuddy_manager/internal/media"
+	"workbuddy_manager/internal/panel"
 	"workbuddy_manager/internal/pool"
+	"workbuddy_manager/internal/prompt"
+	"workbuddy_manager/internal/reqlog"
 	"workbuddy_manager/internal/scheduler"
 	"workbuddy_manager/internal/upstream"
 )
+
+// testHotTargets 保存路径的最小热应用目标集：零值 upstream.Client / 空归档配置
+// 必须不 panic（真实装配由 main 构造，这里覆盖测试路径的健壮性）。
+func testHotTargets() *hotTargets {
+	return &hotTargets{
+		live:       runtime.New(runtime.Snapshot{}),
+		pool:       pool.New(""),
+		upstream:   &upstream.Client{},
+		schedule:   scheduler.New(scheduler.Config{}),
+		requestLog: reqlog.New(reqlog.Config{}),
+		prompt:     prompt.NewHolder(nil),
+	}
+}
 
 // TestUnknownConfigKeySurvivesSave unknown 键在保存回写时保留（不静默删用户数据）。
 func TestUnknownConfigKeySurvivesSave(t *testing.T) {
@@ -53,7 +71,7 @@ func TestSaveConfigMediaPolicyRoundTrip(t *testing.T) {
 	})
 
 	payload := []byte(`{"listen":":1","media":{"tool_images":"hoist","image_transcode":true,"image_max_dimension":1080}}`)
-	if _, err := saveConfig(payload, path, runtime.New(runtime.Snapshot{}), pool.New(""), &upstream.Client{}, scheduler.New(scheduler.Config{})); err != nil {
+	if _, err := saveConfig(payload, path, testHotTargets()); err != nil {
 		t.Fatalf("saveConfig: %v", err)
 	}
 	raw, err := os.ReadFile(path)
@@ -87,7 +105,7 @@ func TestSaveConfigRejectsInvalidMediaPolicy(t *testing.T) {
 	if err := media.SetImagePolicy(media.ImagePolicy{MaxDimension: 2000}); err != nil {
 		t.Fatal(err)
 	}
-	_, err := saveConfig([]byte(`{"listen":":1","media":{"image_max_dimension":4096}}`), path, runtime.New(runtime.Snapshot{}), pool.New(""), &upstream.Client{}, scheduler.New(scheduler.Config{}))
+	_, err := saveConfig([]byte(`{"listen":":1","media":{"image_max_dimension":4096}}`), path, testHotTargets())
 	if err == nil || !strings.Contains(err.Error(), "media.image_max_dimension") {
 		t.Fatalf("invalid dimension accepted: %v", err)
 	}
@@ -111,7 +129,7 @@ func TestSaveConfigIngressRoundTrip(t *testing.T) {
 	}
 	// 与前端 collectConfig 相同形态：两个上限是 Number，两个时长是字符串。
 	payload := []byte(`{"listen":":1","server":{"max_inflight_requests":0,"max_inflight_bytes_mb":64,"ingress_wait":"0","read_timeout":"600s"}}`)
-	restart, err := saveConfig(payload, path, runtime.New(runtime.Snapshot{}), pool.New(""), &upstream.Client{}, scheduler.New(scheduler.Config{}))
+	restart, err := saveConfig(payload, path, testHotTargets())
 	if err != nil {
 		t.Fatalf("saveConfig: %v", err)
 	}
@@ -141,17 +159,19 @@ func TestSaveConfigIngressRoundTrip(t *testing.T) {
 	if parsed.ServerReadTimeoutDur != 600*time.Second {
 		t.Errorf("read_timeout dur=%v want 600s", parsed.ServerReadTimeoutDur)
 	}
-	// 装配期字段：面板必须提示这四项需重启（否则用户改完以为即时生效）。
-	need := []string{"server.max_inflight_requests", "server.max_inflight_bytes_mb",
-		"server.ingress_wait", "server.read_timeout"}
+	// 入站准入三项已热化：不得再出现在 restart_required（改完即时生效）；
+	// read_timeout 仍属重启项，必须提示。
 	got := map[string]bool{}
 	for _, f := range restart {
 		got[f] = true
 	}
-	for _, f := range need {
-		if !got[f] {
-			t.Errorf("restart_required 缺 %s（实际 %v）", f, restart)
+	for _, f := range []string{"server.max_inflight_requests", "server.max_inflight_bytes_mb", "server.ingress_wait"} {
+		if got[f] {
+			t.Errorf("%s 已热化，不该提示需重启（实际 %v）", f, restart)
 		}
+	}
+	if !got["server.read_timeout"] {
+		t.Errorf("restart_required 缺 server.read_timeout（实际 %v）", restart)
 	}
 }
 
@@ -168,7 +188,7 @@ func TestSaveConfigStampsCurrentVersionAndMigratesLegacy(t *testing.T) {
 	}
 	// 面板提交一个热字段（与前端 collectConfig 同形态）。
 	payload := []byte(`{"pool":{"max_in_flight":9}}`)
-	if _, err := saveConfig(payload, path, runtime.New(runtime.Snapshot{}), pool.New(""), &upstream.Client{}, scheduler.New(scheduler.Config{})); err != nil {
+	if _, err := saveConfig(payload, path, testHotTargets()); err != nil {
 		t.Fatalf("saveConfig: %v", err)
 	}
 	raw, err := os.ReadFile(path)
@@ -213,7 +233,7 @@ func TestSaveConfigDropsRuntimeMetaAndHandlesCorruptOld(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"listen":":1","_warnings":["stale"],"_migrations":["stale"]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := saveConfig([]byte(`{"pool":{"max_in_flight":4}}`), path, runtime.New(runtime.Snapshot{}), pool.New(""), &upstream.Client{}, scheduler.New(scheduler.Config{})); err != nil {
+	if _, err := saveConfig([]byte(`{"pool":{"max_in_flight":4}}`), path, testHotTargets()); err != nil {
 		t.Fatalf("saveConfig: %v", err)
 	}
 	raw, err := os.ReadFile(path)
@@ -228,18 +248,19 @@ func TestSaveConfigDropsRuntimeMetaAndHandlesCorruptOld(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{ this is not json`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	restart, err := saveConfig([]byte(`{"pool":{"max_in_flight":5}}`), path, runtime.New(runtime.Snapshot{}), pool.New(""), &upstream.Client{}, scheduler.New(scheduler.Config{}))
+	restart, err := saveConfig([]byte(`{"pool":{"max_in_flight":5}}`), path, testHotTargets())
 	if err != nil {
 		t.Fatalf("坏旧文件不该阻断保存: %v", err)
 	}
-	if len(restart) < 5 {
-		t.Errorf("旧文件不可解析时重启清单应退回保守全量，实际 %v", restart)
+	if len(restart) < 3 {
+		t.Errorf("旧文件不可解析时重启清单应退回保守全量（非空 Restart 叶子），实际 %v", restart)
 	}
 	got := map[string]bool{}
 	for _, f := range restart {
 		got[f] = true
 	}
-	for _, want := range []string{"listen", "auth_dir", "state_file"} {
+	// 注意：upstash.* 空值在“零值旧配置”下不构成差异，故这里只要求固定的三项。
+	for _, want := range []string{"listen", "state_file", "server.read_timeout"} {
 		if !got[want] {
 			t.Errorf("保守全量清单缺 %s（实际 %v）", want, restart)
 		}
@@ -255,5 +276,104 @@ func TestSaveConfigDropsRuntimeMetaAndHandlesCorruptOld(t *testing.T) {
 	}
 	if c.ConfigVersion != config.CurrentVersion || c.Pool.MaxInFlight != 5 {
 		t.Errorf("落盘内容不对: version=%d max_in_flight=%d", c.ConfigVersion, c.Pool.MaxInFlight)
+	}
+}
+
+// TestSaveConfigHotReloadAuthDir auth_dir 热重载（P3c）：
+//   - 改目录后账号池立即对齐到新目录（旧目录账号移除、新目录账号加入）；
+//   - 面板落盘目录同步切换（登录/导入写新目录）；
+//   - 目标路径已存在且是文件 → 保存失败且配置文件不被改写（预检在落盘前）。
+func TestSaveConfigHotReloadAuthDir(t *testing.T) {
+	dir1, dir2 := t.TempDir(), t.TempDir()
+	writeAuth := func(dir, name, uid string) {
+		t.Helper()
+		raw := `{"auth":{"accessToken":"at","refreshToken":"r","expiresAt":1,"domain":""},"account":{"uid":"` + uid + `"}}`
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeAuth(dir1, "workbuddy-a.json", "uid-a")
+	writeAuth(dir2, "workbuddy-b.json", "uid-b")
+
+	path := filepath.Join(dir1, "config.json")
+	initial := []byte(`{"listen":":1","auth_dir":` + strconv.Quote(dir1) + `}`)
+	if err := os.WriteFile(path, initial, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	hot := testHotTargets()
+	hot.pool.SyncToDir(mustLoadAuths(t, dir1))
+
+	pn := panel.New(panel.Config{AuthDir: dir1})
+	hot.panel = pn
+
+	payload := []byte(`{"listen":":1","auth_dir":` + strconv.Quote(dir2) + `}`)
+	if _, err := saveConfig(payload, path, hot); err != nil {
+		t.Fatalf("saveConfig: %v", err)
+	}
+	total, _, _, _, _ := hot.pool.CountsDetailed()
+	if total != 1 {
+		t.Fatalf("账号池应只保留新目录的 1 个账号，实际 total=%d", total)
+	}
+
+	// 路径是文件 → 拒绝且不改写磁盘配置。
+	badPath := filepath.Join(dir1, "not-a-dir")
+	if err := os.WriteFile(badPath, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bad := []byte(`{"listen":":1","auth_dir":` + strconv.Quote(badPath) + `}`)
+	if _, err := saveConfig(bad, path, hot); err == nil {
+		t.Fatal("auth_dir 指向文件应保存失败")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := config.ParseConfig(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.AuthDir != dir2 {
+		t.Fatalf("失败的保存不得改写 auth_dir，实际 %q", parsed.AuthDir)
+	}
+}
+
+func mustLoadAuths(t *testing.T, dir string) []*auth.Auth {
+	t.Helper()
+	list, err := auth.LoadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return list
+}
+
+// TestSaveConfigHotReloadProxy proxy_url / resin_* 热重载：保存后上游出站与
+// 面板登录链路都换成新代理实例；再清空配置恢复直连（nil）。
+func TestSaveConfigHotReloadProxy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"listen":":1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hot := testHotTargets()
+	hot.upstream = upstream.New()
+	pn := panel.New(panel.Config{})
+	hot.panel = pn
+
+	if _, err := saveConfig([]byte(`{"listen":":1","proxy_url":"http://127.0.0.1:8080"}`), path, hot); err != nil {
+		t.Fatalf("save proxy: %v", err)
+	}
+	pc := hot.upstream.Proxy()
+	if pc == nil || !pc.Enabled() {
+		t.Fatal("保存 proxy_url 后上游应接入代理")
+	}
+	if pc.Mode() != "plain" {
+		t.Fatalf("普通代理 mode=%q", pc.Mode())
+	}
+
+	if _, err := saveConfig([]byte(`{"listen":":1","proxy_url":""}`), path, hot); err != nil {
+		t.Fatalf("clear proxy: %v", err)
+	}
+	if got := hot.upstream.Proxy(); got != nil {
+		t.Fatalf("清空 proxy_url 后应恢复直连，实际 %+v", got)
 	}
 }

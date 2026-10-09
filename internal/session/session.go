@@ -16,6 +16,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"workbuddy_manager/internal/redisstore"
@@ -43,27 +44,114 @@ type Config struct {
 	AvailableForModel func(model string) []string
 }
 
+// 默认参数（config 归一化后传入；这里兼作热改时的非法值兜底）。
+const (
+	defaultTTL        = 30 * time.Minute
+	defaultGCInterval = 5 * time.Minute
+)
+
 // Router 会话粘性路由器。
+//
+// ttl/gcInterval/enabled 用原子值持有（配置可热改）：热路径上的 TTL 读取（含
+// touch/Bind 镜像写入）不再直接读 cfg，避免与配置保存路径的写入竞争；
+// cfg 只保留装配期依赖（Store/Available 闭包）。
 type Router struct {
 	mu      sync.RWMutex
 	entries map[string]entry
 	cfg     Config
-	stop    chan struct{}
+
+	ttl         atomic.Int64 // time.Duration
+	gcInterval  atomic.Int64 // time.Duration
+	enabled     atomic.Bool
+	storeLoaded atomic.Bool
+
+	// gcStop 非 nil = GC goroutine 在跑（受 mu 保护，与旧 stop 语义一致）。
+	gcStop chan struct{}
 }
 
 // New 构建路由器。若 cfg.Store 为 nil 则用 Noop（纯内存）；cfg.Available 为 nil 视为空池。
 // TTL/GCInterval 非正取默认（30m / 5m）——main 从 config 解析后传入，这里兜底。
+// 构建后默认为**启用**态（保持历史调用方语义）；要通过配置控制启停请调 Reconfigure。
 func New(cfg Config) *Router {
 	if cfg.Store == nil {
 		cfg.Store = redisstore.Noop{}
 	}
 	if cfg.TTL <= 0 {
-		cfg.TTL = 30 * time.Minute
+		cfg.TTL = defaultTTL
 	}
 	if cfg.GCInterval <= 0 {
-		cfg.GCInterval = 5 * time.Minute
+		cfg.GCInterval = defaultGCInterval
 	}
-	return &Router{entries: map[string]entry{}, cfg: cfg}
+	r := &Router{entries: map[string]entry{}, cfg: cfg}
+	r.ttl.Store(int64(cfg.TTL))
+	r.gcInterval.Store(int64(cfg.GCInterval))
+	r.enabled.Store(true)
+	return r
+}
+
+// Reconfigure 应用会话粘性参数（config session_sticky.enabled/ttl/gc_interval）。
+//
+// 语义：
+//   - enabled=false：立即停止分配与 GC（已有绑定保留在内存，TTL 内重新启用即恢复）；
+//   - enabled=true：如尚未从 redisstore 恢复过则**同步**恢复一次（装配期语义：
+//     开服前把粘性映射装好）；
+//   - GC 周期变化时重启 GC goroutine（ticker 周期在启动时固定，只能重建）。
+//
+// 运行期热改请用 ReconfigureHot（restore 不阻塞配置保存路径）。
+func (r *Router) Reconfigure(ttl, gcInterval time.Duration, enabled bool) {
+	r.reconfigure(ttl, gcInterval, enabled, false)
+}
+
+// ReconfigureHot 同 Reconfigure，但把 Redis 恢复放后台执行。
+//
+// 为什么：Store.LoadBinds 是同步网络读取（Upstash 场景专用上限 30s），而配置保存
+// 路径持有 config.FileTx，同步等待会让保存请求与后续保存排队最多 30s。代价是刚重新
+// 启用粘性的头几个请求可能先自行分配绑定（随后恢复的旧绑定仍会写入，只是对该会话
+// 未必及时）——粘性只是上游前缀缓存的优化，可接受。
+func (r *Router) ReconfigureHot(ttl, gcInterval time.Duration, enabled bool) {
+	r.reconfigure(ttl, gcInterval, enabled, true)
+}
+
+func (r *Router) reconfigure(ttl, gcInterval time.Duration, enabled bool, asyncRestore bool) {
+	if r == nil {
+		return
+	}
+	if ttl <= 0 {
+		ttl = defaultTTL
+	}
+	if gcInterval <= 0 {
+		gcInterval = defaultGCInterval
+	}
+	prevInterval := time.Duration(r.gcInterval.Swap(int64(gcInterval)))
+	r.ttl.Store(int64(ttl))
+	r.enabled.Store(enabled)
+	if !enabled {
+		r.StopGC()
+		return
+	}
+	// 恢复一次即可（CAS 兼作单飞：并发 Reconfigure 不会重复拉取）。
+	if r.storeLoaded.CompareAndSwap(false, true) {
+		if asyncRestore {
+			go r.loadBinds()
+		} else {
+			r.loadBinds()
+		}
+	}
+	if prevInterval != gcInterval && r.gcRunning() {
+		r.StopGC()
+	}
+	r.StartGC()
+}
+
+// Enabled 报告粘性路由当前是否启用（/status 与测试观测）。
+func (r *Router) Enabled() bool { return r != nil && r.enabled.Load() }
+
+func (r *Router) ttlNow() time.Duration { return time.Duration(r.ttl.Load()) }
+
+func (r *Router) gcRunning() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.gcStop != nil
 }
 
 // StartGC 启动后台 GC goroutine（幂等）。进程退出时调 StopGC。
@@ -76,16 +164,17 @@ func New(cfg Config) *Router {
 // channel，StopGC 一定能让 goroutine 退出。
 func (r *Router) StartGC() {
 	r.mu.Lock()
-	if r.stop != nil {
+	if r.gcStop != nil {
 		r.mu.Unlock()
 		return
 	}
 	stop := make(chan struct{})
-	r.stop = stop
+	r.gcStop = stop
+	interval := time.Duration(r.gcInterval.Load())
 	r.mu.Unlock()
 
 	go func() {
-		t := time.NewTicker(r.cfg.GCInterval)
+		t := time.NewTicker(interval)
 		defer t.Stop()
 		for {
 			select {
@@ -101,16 +190,27 @@ func (r *Router) StartGC() {
 // StopGC 停止后台 GC（幂等）。
 func (r *Router) StopGC() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.stop != nil {
-		close(r.stop)
-		r.stop = nil
+	stop := r.gcStop
+	r.gcStop = nil
+	r.mu.Unlock()
+	if stop != nil {
+		close(stop)
 	}
 }
 
-// LoadFromStore 启动时从 redisstore 恢复绑定（内存覆盖本地，读操作仅此处发生）。
+// LoadFromStore 从 redisstore 恢复绑定（同步；装配期/测试用）。
 // 已有本地绑定被保留——Redis 仅为恢复备份，本地一旦建立即为权威。
+// 返回后 storeLoaded 置位（Reconfigure/ReconfigureHot 以此保证只恢复一次）。
 func (r *Router) LoadFromStore() {
+	if r == nil || !r.enabled.Load() {
+		return
+	}
+	r.storeLoaded.Store(true)
+	r.loadBinds()
+}
+
+// loadBinds 实际读取并合入绑定（同步网络调用；由 LoadFromStore / reconfigure 调用）。
+func (r *Router) loadBinds() {
 	binds := r.cfg.Store.LoadBinds()
 	if len(binds) == 0 {
 		return
@@ -145,14 +245,18 @@ func (r *Router) Resolve(key string) (string, bool) {
 // 对其他模型仍可用（见 pool.healthyForModel 的 softRateModel 豁免）。若只按账号级
 // 可用性校验，会话会被钉在一个"对当前模型不可用"的号上反复失败。
 func (r *Router) ResolveForModel(key, model string) (string, bool) {
+	if r == nil || !r.enabled.Load() {
+		return "", false
+	}
 	now := time.Now()
 	available := r.availableSet(model)
+	ttl := r.ttlNow()
 
 	// ── Fast path: RLock 快查 ──────────────────────────────
 	r.mu.RLock()
 	e, found := r.entries[key]
 	r.mu.RUnlock()
-	if found && !expired(e, now, r.cfg.TTL) {
+	if found && !expired(e, now, ttl) {
 		if available[e.uid] {
 			r.touch(key, e.uid, now)
 			return e.uid, true
@@ -165,7 +269,7 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	defer r.mu.Unlock()
 
 	// re-check：并发同 key 可能已被其他 goroutine 分配好。
-	if e2, found2 := r.entries[key]; found2 && !expired(e2, now, r.cfg.TTL) {
+	if e2, found2 := r.entries[key]; found2 && !expired(e2, now, ttl) {
 		if available[e2.uid] {
 			r.entries[key] = entry{uid: e2.uid, lastActive: now}
 			return e2.uid, true
@@ -200,7 +304,7 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	if existed && prev.uid != uid {
 		r.cfg.Store.DelBind(key)
 	}
-	r.cfg.Store.SetBind(key, uid, r.cfg.TTL)
+	r.cfg.Store.SetBind(key, uid, ttl)
 	return uid, true
 }
 
@@ -209,21 +313,21 @@ func (r *Router) touch(key, uid string, now time.Time) {
 	r.mu.Lock()
 	r.entries[key] = entry{uid: uid, lastActive: now}
 	r.mu.Unlock()
-	r.cfg.Store.SetBind(key, uid, r.cfg.TTL)
+	r.cfg.Store.SetBind(key, uid, r.ttlNow())
 }
 
 // Bind 显式把会话 key 绑定到 uid（幂等覆盖旧值），并异步镜像到 redisstore。
 // 供"粘性跟随最终成功号"用：请求成功返回前，把会话重绑到实际成功的账号，让多轮对话下一跳稳定
 // 收敛到"对该会话持续成功的号"（对齐 antigravity 语义）。空 key 直接返回（无会话则不绑）。
 func (r *Router) Bind(key, uid string) {
-	if key == "" || uid == "" {
+	if key == "" || uid == "" || !r.enabled.Load() {
 		return
 	}
 	now := time.Now()
 	r.mu.Lock()
 	r.entries[key] = entry{uid: uid, lastActive: now}
 	r.mu.Unlock()
-	r.cfg.Store.SetBind(key, uid, r.cfg.TTL)
+	r.cfg.Store.SetBind(key, uid, r.ttlNow())
 }
 
 // Unbind 解除会话绑定（请求失败时调用，让该会话下次重新分配）。返回是否存在。
@@ -240,8 +344,11 @@ func (r *Router) Unbind(key string) bool {
 	return found
 }
 
-// Count 返回当前绑定数（供 /status 观测）。
+// Count 返回当前绑定数（供 /status 观测）；未启用时报告 0（不参与路由）。
 func (r *Router) Count() int {
+	if r == nil || !r.enabled.Load() {
+		return 0
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return len(r.entries)
@@ -249,10 +356,11 @@ func (r *Router) Count() int {
 
 // gcOnce 清理 TTL 过期的绑定，并镜像删除。
 func (r *Router) gcOnce(now time.Time) int {
+	ttl := r.ttlNow()
 	r.mu.Lock()
 	var expiredKeys []string
 	for key, e := range r.entries {
-		if now.Sub(e.lastActive) > r.cfg.TTL {
+		if now.Sub(e.lastActive) > ttl {
 			expiredKeys = append(expiredKeys, key)
 		}
 	}

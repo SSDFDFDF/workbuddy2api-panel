@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 )
 
 // accountCtxKey 正向代理路径下，把账号标识从 Transport 传递到 Proxy 函数的 context 键。
@@ -83,23 +84,43 @@ func (c *Client) proxyFunc(req *http.Request) (*url.URL, error) {
 
 // RoundTrip 实现 http.RoundTripper。
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if t == nil || t.base == nil {
+	if t == nil {
 		return nil, errors.New("proxy: nil transport")
 	}
-	if t.client == nil || req == nil {
-		return t.base.RoundTrip(req)
+	return roundTripAs(t.client, t.base, req)
+}
+
+// roundTripAs 用给定代理实例转发一次请求（Transport 与 Dynamic 共用）。
+//
+// 安全细节：内部账号标记头（X-Wb2a-Proxy-Account）**任何情况下都不得出站**。
+// 代理实例为 nil（未接入/已热改取消）时，若请求还带着旧标记（例如与
+// SetProxy(nil) 擦肩的在途请求），这里也要把它剥掉再直连。
+func roundTripAs(c *Client, base http.RoundTripper, req *http.Request) (*http.Response, error) {
+	if base == nil {
+		return nil, errors.New("proxy: nil transport")
+	}
+	if req == nil {
+		return base.RoundTrip(req)
+	}
+	if c == nil {
+		if req.Header.Get(InternalAccountHeader) == "" {
+			return base.RoundTrip(req)
+		}
+		clone := req.Clone(req.Context())
+		clone.Header.Del(InternalAccountHeader)
+		return base.RoundTrip(clone)
 	}
 	account := strings.TrimSpace(req.Header.Get(InternalAccountHeader))
 	if account == "" {
 		// 未标记请求（如公开第三方 API）：直连，零改动。
-		return t.base.RoundTrip(req)
+		return base.RoundTrip(req)
 	}
 	// 删除内部标记头，避免泄漏给代理或目标服务。
 	clone := req.Clone(withAccount(req.Context(), account))
 	clone.Header.Del(InternalAccountHeader)
 
-	if t.client.mode == ModeReverse {
-		u, err := t.client.reverseURL(req.URL)
+	if c.mode == ModeReverse {
+		u, err := c.reverseURL(req.URL)
 		if err != nil {
 			return nil, err
 		}
@@ -109,7 +130,82 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		clone.Host = ""
 		clone.Header.Set("X-Resin-Account", account)
 	}
-	return t.base.RoundTrip(clone)
+	return base.RoundTrip(clone)
+}
+
+// Dynamic 可热替换的出站代理转发层。
+//
+// 背景：proxy_url / resin_* 原先在装配期把代理 Transport 包到底层 Transport 上，
+// 改配置必须重启。这里包一层**永不更换**的转发层，内部用原子指针指向当前代理
+// 实例：配置保存时只换指针，请求热路径 Load 一次拿一致视图。
+//
+// 两种模式的接线：
+//   - 反向代理（Resin reverse）：在 RoundTrip 内按当前实例改写 URL；
+//   - 正向/普通代理：构造时在底层 *http.Transport 上安装一个稳定的 Proxy 分发
+//     函数，每次选路时读当前实例（nil = 直连）。底层 Transport 与连接池因此
+//     始终不变，只换「选路策略」。
+//
+// 零值不可用；用 NewDynamic 构造。
+type Dynamic struct {
+	base http.RoundTripper
+	cur  atomic.Pointer[Client]
+}
+
+// NewDynamic 用底层 RoundTripper 构造动态代理层（base 为 nil 时用默认 Transport）。
+// 若 base 是 *http.Transport，会原位安装选路分发函数。
+func NewDynamic(base http.RoundTripper) *Dynamic {
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	d := &Dynamic{base: base}
+	if bt, ok := base.(*http.Transport); ok {
+		bt.Proxy = d.proxyFor
+	}
+	return d
+}
+
+// Set 替换当前代理实例（nil = 直连），并关闭底层空闲连接：旧代理设置下建立的
+// 连接不应复用到新路径上（在途请求仍用各自已开始的连接，不受影响）。
+func (d *Dynamic) Set(c *Client) {
+	if d == nil {
+		return
+	}
+	d.cur.Store(c)
+	d.CloseIdleConnections()
+}
+
+// Current 返回当前代理实例（nil = 直连）。
+func (d *Dynamic) Current() *Client {
+	if d == nil {
+		return nil
+	}
+	return d.cur.Load()
+}
+
+// proxyFor 安装在底层 *http.Transport 上的选路函数：按当前实例决定代理地址。
+func (d *Dynamic) proxyFor(req *http.Request) (*url.URL, error) {
+	if c := d.Current(); c != nil {
+		return c.proxyFunc(req)
+	}
+	return nil, nil
+}
+
+// RoundTrip 实现 http.RoundTripper。
+func (d *Dynamic) RoundTrip(req *http.Request) (*http.Response, error) {
+	if d == nil || d.base == nil {
+		return nil, errors.New("proxy: nil transport")
+	}
+	return roundTripAs(d.cur.Load(), d.base, req)
+}
+
+// CloseIdleConnections 透传到底层 Transport（若实现该接口）。
+func (d *Dynamic) CloseIdleConnections() {
+	if d == nil || d.base == nil {
+		return
+	}
+	if ci, ok := d.base.(interface{ CloseIdleConnections() }); ok {
+		ci.CloseIdleConnections()
+	}
 }
 
 // CloseIdleConnections 透传到底层 Transport（若实现该接口）。

@@ -489,7 +489,7 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	}
 	// debug 打印之后再打 Resin 账号标记，避免内部头出现在调试输出里。
 	c.tagProxy(req, a)
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.ShortClient().Do(req)
 	if err != nil {
 		return "", "", err
 	}

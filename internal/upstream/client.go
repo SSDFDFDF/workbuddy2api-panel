@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"workbuddy_manager/internal/auth"
@@ -615,7 +616,8 @@ type Client struct {
 	// 与 HTTP 共享同一个 *http.Transport 实例，连接池不重复。
 	ChatHTTP *http.Client
 
-	// HeaderTimeout 聊天 SSE 首字节前（响应头）超时；<=0 表示未设置（回落 HTTP.Timeout）。
+	// HeaderTimeout 聊天 SSE 首字节前（响应头）超时（观测用：真正的生效值写在
+	// 底层 Transport.ResponseHeaderTimeout 上）；<=0 表示未设置。
 	HeaderTimeout time.Duration
 	// IdleTimeout 聊天 SSE 流中空闲超时；<=0 表示禁用空闲监控。
 	IdleTimeout time.Duration
@@ -642,7 +644,10 @@ type Client struct {
 	cnModelsProbe     inflight
 	globalModelsProbe inflight
 
-	// Identity profiles are immutable after client construction.
+	// Profiles / ClientName / DeviceToken* / PassthroughIP / ChatBase* / GlobalEnabled /
+	// IdleTimeout / StreamTimeouts 等可热改字段已收敛到 opts 快照（见 options.go）；
+	// 下列导出字段只作装配期初值/测试直写（未 Configure 时由 staticOptions 读取）。
+	// 新代码读热路径请用 optsNow()/各访问器，不要再新增对导出字段的运行期写。
 	Profiles    map[string]IdentityProfile
 	CacheSecret []byte
 
@@ -693,9 +698,30 @@ type Client struct {
 	// chatBase/billingBase 返回 CN base，路径也走 CN（双保险，与 auth.Realm() 的开关闸呼应）。
 	GlobalEnabled bool
 
-	// proxy 已接入的出站代理（普通正向代理或 Resin；nil = 未接入）。路由改写与
-	// 凭证构造在 internal/proxy，账号相关请求经 tagProxy 打内部标记，见 proxy.go。
-	proxy *proxy.Client
+	// opts 热改配置快照（profiles/域名/开关/超时，见 options.go）。
+	// nil = 从未 Configure：读取回落下面的导出静态字段（测试/裸用路径）。
+	opts atomic.Pointer[Options]
+
+	// baseTransport 底层加固 Transport（连接池所在）；HTTP/ChatHTTP 共用同一个
+	// proxy.Dynamic 转发层指向它。改 header 超时时整体重建（见 SetHeaderTimeout）。
+	baseTransport *http.Transport
+	// headerMu 串行化 SetHeaderTimeout（配置保存已由 config.FileTx 串行，这里自包含）；
+	// headerApplied/headerAppliedTimeout 记住已应用的超时，配置保存反复提交同一值
+	// 时跳过重建（否则每次保存都换连接池，白白丢掉空闲连接）。
+	headerMu             sync.Mutex
+	headerApplied        bool
+	headerAppliedTimeout time.Duration
+	// hotHTTP/hotChat head 超时热改后的客户端（nil = 用下面的装配期字段）。
+	// 请求路径经 shortClientBase()/chatClientBase() 读取，因此换 Transport/连接池无需任何
+	// 并发请求配合。
+	hotHTTP atomic.Pointer[http.Client]
+	hotChat atomic.Pointer[http.Client]
+	// proxyMu 保护手工构造测试 Client 的首次 SetProxy 惰性建层（生产 New 已就绪）。
+	proxyMu sync.Mutex
+	// proxyDyn 当前出站代理转发层（配置热改只需换其内部指针）。
+	// 用 atomic.Pointer：header 超时热改会重建 Transport 与转发层，
+	// SetProxy 必须总能拿到最新的那个（否则代理改动落在旧层上，不生效）。
+	proxyDyn atomic.Pointer[proxy.Dynamic]
 }
 
 // StreamTimeoutConfig SSE 阶段上限（见 sse.go watchResponse）：首个模型事件、
@@ -711,9 +737,13 @@ type StreamTimeoutConfig struct {
 // kongjianguan 4 连击实测经验）。
 func New() *Client {
 	tr := newTransport()
+	// 出站代理转发层从构造起就常驻（内部当前实例默认 nil = 直连）：
+	// 之后配置热改只需换指针，不需要在请求并发时替换 http.Client.Transport。
+	dyn := proxy.NewDynamic(tr)
 	c := &Client{
-		HTTP:          &http.Client{Timeout: 120 * time.Second, Transport: tr},
-		ChatHTTP:      &http.Client{Timeout: 0, Transport: tr}, // 无总时长；首字节由 ResponseHeaderTimeout 管
+		HTTP:          &http.Client{Timeout: 120 * time.Second, Transport: dyn},
+		ChatHTTP:      &http.Client{Timeout: 0, Transport: dyn}, // 无总时长；首字节由 ResponseHeaderTimeout 管
+		baseTransport: tr,
 		ChatBaseCN:    "https://www.workbuddy.cn",
 		BillingBaseCN: "https://www.codebuddy.cn",
 		WebBaseCN:     "https://www.workbuddy.cn",
@@ -721,32 +751,102 @@ func New() *Client {
 		// CN 账号恒判 cn，global base 只在 realm=global 的账号上被使用）。
 		GlobalEnabled: true,
 	}
+	c.proxyDyn.Store(dyn)
 	return c
+}
+
+// SetHeaderTimeout 替换聊天 SSE 首字节（响应头）上限。
+//
+// ResponseHeaderTimeout 写在被连接池共享的 *http.Transport 上，无法原地替换（
+// 并发读）。因此热改 = 用同一套加固参数重建 Transport（新连接池）+ 新 proxy.Dynamic
+// 转发层 + 新 HTTP/ChatHTTP 客户端，原子换指针；在途请求继续用各自已加载的旧
+// 客户端完成，旧池的空闲连接随即关闭。配置保存会同时用到本方法（热项）。
+//
+// 手工构造的测试 Client（baseTransport 为 nil）无自有 Transport 可重建，只记字段。
+// 同一取值重复调用是空操作（配置保存路径每次都会调用，正常不应重置连接池）。
+func (c *Client) SetHeaderTimeout(d time.Duration) {
+	if c == nil {
+		return
+	}
+	c.headerMu.Lock()
+	defer c.headerMu.Unlock()
+	if c.baseTransport == nil {
+		// 手工构造的测试 Client：无自有 Transport 可重建，只记字段。
+		c.HeaderTimeout = d
+		return
+	}
+	if c.headerApplied && c.headerAppliedTimeout == d {
+		return // 值未变：不重建连接池
+	}
+	c.HeaderTimeout = d
+	ntr := newTransport()
+	ntr.ResponseHeaderTimeout = d
+	dyn := proxy.NewDynamic(ntr)
+	dyn.Set(c.Proxy()) // 继承当前出站代理（nil = 直连）
+	short := &http.Client{Timeout: c.shortTimeoutNow(), Transport: dyn}
+	chat := &http.Client{Timeout: 0, Transport: dyn}
+	oldShort := c.hotHTTP.Swap(short)
+	c.hotChat.Store(chat)
+	oldBase := c.baseTransport
+	c.baseTransport = ntr
+	c.proxyDyn.Store(dyn)
+	c.headerApplied = true
+	c.headerAppliedTimeout = d
+	// 旧池空闲连接不再可能被复用；在途请求各自持有旧 transport 完成。
+	if oldShort != nil {
+		if ci, ok := oldShort.Transport.(interface{ CloseIdleConnections() }); ok {
+			ci.CloseIdleConnections()
+		}
+	} else if oldBase != nil {
+		oldBase.CloseIdleConnections()
+	}
+}
+
+// shortClientBase/chatClientBase 返回当前生效的短 RPC / 聊天底层 client
+// （header 超时热改后指向新客户端，否则用装配期字段）。
+func (c *Client) shortClientBase() *http.Client {
+	if c == nil {
+		return nil
+	}
+	if v := c.hotHTTP.Load(); v != nil {
+		return v
+	}
+	return c.HTTP
+}
+
+func (c *Client) chatClientBase() *http.Client {
+	if c == nil {
+		return nil
+	}
+	if v := c.hotChat.Load(); v != nil {
+		return v
+	}
+	return c.ChatHTTP
 }
 
 // chatHTTP 返回聊天专用 client；未设置（如测试只注入 HTTP）时回落 HTTP。
 func (c *Client) chatHTTP() *http.Client {
-	if c.ChatHTTP != nil {
-		return c.ChatHTTP
+	if v := c.chatClientBase(); v != nil {
+		return v
 	}
-	return c.HTTP
+	return c.shortClientBase()
 }
 
 // defaultGlobalBase 缺省 global base（D5：config 未覆盖时默认 workbuddy.ai）。
 const defaultGlobalBase = "https://www.workbuddy.ai"
 
-// globalChatBase 生效的 global chat base：Client.ChatBaseGlobal 非空取之，否则默认。
+// globalChatBase 生效的 global chat base：热改快照的 ChatBaseGlobal 非空取之，否则默认。
 func (c *Client) globalChatBase() string {
-	if c.ChatBaseGlobal != "" {
-		return c.ChatBaseGlobal
+	if v := c.optsNow().ChatBaseGlobal; v != "" {
+		return v
 	}
 	return defaultGlobalBase
 }
 
-// globalBillingBase 生效的 global billing base：Client.BillingBaseGlobal 非空取之，否则默认。
+// globalBillingBase 生效的 global billing base：热改快照的 BillingBaseGlobal 非空取之，否则默认。
 func (c *Client) globalBillingBase() string {
-	if c.BillingBaseGlobal != "" {
-		return c.BillingBaseGlobal
+	if v := c.optsNow().BillingBaseGlobal; v != "" {
+		return v
 	}
 	return defaultGlobalBase
 }
@@ -754,7 +854,7 @@ func (c *Client) globalBillingBase() string {
 // globalOn 报告账号是否路由到 global 上游：GlobalEnabled 开且账号 Realm()==global。
 // 双保险：config 开关是第一道闸（上游侧），auth.Realm() 的开关闸是第二道（账号侧）。
 func (c *Client) globalOn(a *auth.Auth) bool {
-	return c.GlobalEnabled && a != nil && a.Realm() == "global"
+	return c.GlobalOn() && a != nil && a.Realm() == "global"
 }
 
 // 路径常量：CN 与 global 共用的 chat 出站路径（/v2 单路径）。
@@ -801,8 +901,8 @@ func (c *Client) chatBase(a *auth.Auth) string {
 	if c.globalOn(a) {
 		return c.globalChatBase()
 	}
-	if c.ChatBaseCN != "" {
-		return strings.TrimRight(c.ChatBaseCN, "/")
+	if v := c.optsNow().ChatBaseCN; v != "" {
+		return strings.TrimRight(v, "/")
 	}
 	return "https://www.workbuddy.cn"
 }
@@ -935,7 +1035,7 @@ func (c *Client) webBase(a *auth.Auth) string {
 // body 读失败（连接中断/空闲掐流/截断）返回普通错误（非 *Error）——半截 body 不进
 // Classify，不参与账号惩罚（传输层故障不该喂熔断误罚号）。
 func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
-	resp, err := noRedirectClient(c.HTTP).Do(req)
+	resp, err := noRedirectClient(c.ShortClient()).Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -987,7 +1087,7 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 
 func (c *Client) refreshTokenOnce(a *auth.Auth) error {
 	snapshot := a.Snapshot(true)
-	if snapshot.IsGlobal() && !c.GlobalEnabled {
+	if snapshot.IsGlobal() && !c.GlobalOn() {
 		return fmt.Errorf("global realm disabled")
 	}
 	rtSnapshot := snapshot.RefreshToken
@@ -1092,7 +1192,7 @@ func (c *Client) ChatStreamInput(ctx context.Context, a *auth.Auth, in ChatInput
 		ctx = context.Background()
 	}
 	a = a.Snapshot(false)
-	if a.IsGlobal() && !c.GlobalEnabled {
+	if a.IsGlobal() && !c.GlobalOn() {
 		return nil, 400, nil, &Error{Kind: ErrBadParams, Status: 400, Msg: "global realm disabled"}
 	}
 	prepared, prepErr := c.buildOutbound(in, a.Realm(), a.UID, meta.ConversationID, meta.PrincipalID)
@@ -1159,7 +1259,7 @@ func (c *Client) ChatStreamInput(ctx context.Context, a *auth.Auth, in ChatInput
 		// 成功分支：cancel 所有权交给 monitorBody（其 Close 会 cancel）；
 		// IdleTimeout<=0 时 monitorBody 原样返回底流、无人调 cancel——可接受：
 		// 取消传播由 http.Transport 在 body Close / 父 ctx 取消时处理，连接正常清理。
-		return monitorBody(resp.Body, c.IdleTimeout, cancel), resp.StatusCode, nil, nil
+		return monitorBody(resp.Body, c.optsNow().IdleTimeout, cancel), resp.StatusCode, nil, nil
 	}
 	panic("unreachable: chatPaths is never empty") // for range 空集时编译器仍要求兜底 return；chatPaths 恒非空（构造保证），永不触达
 }
@@ -1423,7 +1523,7 @@ func (c *Client) fetchEnterpriseModels(a *auth.Auth) ([]ModelInfo, error) {
 	c.CommonHeaders(req, a) // 复用共享请求头（Origin/Referer/UA/Accept/Content-Type）
 	// AccessToken 加锁快照（见 auth.AccessTokenValue：keepalive 刷新在 a.mu 内改写）。
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.ShortClient().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -1778,7 +1878,7 @@ func (c *Client) fetchV3ConfigModelMap(a *auth.Auth, ua string) (map[string]Mode
 	req.Header.Set("User-Agent", ua)
 	c.injectCodeBuddyRequest(req)
 	c.tagProxy(req, a)
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.ShortClient().Do(req)
 	if err != nil {
 		return nil, err
 	}

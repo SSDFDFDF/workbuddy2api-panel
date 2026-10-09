@@ -108,7 +108,7 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 			Domain:       acc.Domain,
 			UID:          uid,
 			Nickname:     nickname,
-			FilePath:     filepath.Join(p.cfg.AuthDir, fmt.Sprintf("workbuddy-%s.json", uid)),
+			FilePath:     filepath.Join(p.authDirPath(), fmt.Sprintf("workbuddy-%s.json", uid)),
 		}
 
 		if realm == "global" {

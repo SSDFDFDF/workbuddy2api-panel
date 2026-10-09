@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"workbuddy_manager/internal/auth"
@@ -39,7 +40,7 @@ type Config struct {
 	Pool      *pool.Pool
 	Upstream  *upstream.Client
 	Scheduler *scheduler.Scheduler // 手动触发签到/保活；nil 时对应接口返回 501
-	AuthDir   string               // OAuth 登录完成后凭证落盘目录
+	AuthDir   string               // OAuth 登录完成后凭证落盘目录（热改走 SetAuthDir）
 	APIKey    string               // 空 = 不鉴权（与主服务同语义）；与 Live 同时给出时 Live 优先
 	RedisMode string               // "upstash" / "noop"，仅观测透出
 	Version   string               // 面板版本号（展示用）
@@ -78,6 +79,16 @@ type Panel struct {
 	mux     *http.ServeMux
 	started time.Time
 	logs    *Ring
+
+	// authDir/proxy 运行期可变（配置保存时热替换）：请求路径经原子指针读取，
+	// 与配置保存（SetAuthDir/SetProxy）无数据竞争。cfg 中的同名字段只作装配期初值。
+	authDir atomic.Pointer[string]
+	proxy   atomic.Pointer[proxy.Client]
+	// loginHTTP 设备授权专用 client（Transport = 常驻 proxy.Dynamic，代理可热改）。
+	loginHTTP *http.Client
+	// proxyReady 报告 proxy 指针已由 SetProxy 初始化：nil 是**有意义**的取值
+	//（= 取消代理直连），不能与"从未设置"混为一谈，否则回落 cfg.Proxy 会让旧代理复活。
+	proxyReady atomic.Bool
 
 	// logins 进行中的 OAuth 设备授权会话（state → 会话信息）。
 	// poll 成功或超时（loginTTL）后剔除；面板常驻进程，容量天然有界。
@@ -146,15 +157,11 @@ func New(cfg Config) *Panel {
 	if cfg.RedisMode == "" {
 		cfg.RedisMode = "noop"
 	}
-	// 代理接入：登录链路出站 client 也走代理（登录前临时身份 + 登录后 inherit）。
-	// loginHTTP 是包级单例，仅首次接入时包一层；未接入保持默认 Transport。
-	// 用 DefaultTransport.Clone() 避免正代模式下污染进程级默认 Transport。
-	if cfg.Proxy.Enabled() && loginHTTP.Transport == nil {
-		base := http.DefaultTransport
-		if dt, ok := http.DefaultTransport.(*http.Transport); ok {
-			base = dt.Clone()
-		}
-		loginHTTP.Transport = cfg.Proxy.Wrap(base)
+	// 登录链路出站 client：Transport 用常驻的 proxy.Dynamic（出站代理可热改），
+	// 底层用 DefaultTransport.Clone() 避免正代模式下污染进程级默认 Transport。
+	base := http.DefaultTransport
+	if dt, ok := http.DefaultTransport.(*http.Transport); ok {
+		base = dt.Clone()
 	}
 	p := &Panel{
 		cfg:     cfg,
@@ -163,8 +170,53 @@ func New(cfg Config) *Panel {
 		logs:    NewRing(500),
 		logins:  map[string]loginSession{},
 	}
+	dir := cfg.AuthDir
+	p.authDir.Store(&dir)
+	p.loginHTTP = &http.Client{Timeout: loginHTTPTimeout, Transport: proxy.NewDynamic(base)}
+	p.SetProxy(cfg.Proxy)
 	p.routes()
 	return p
+}
+
+// SetAuthDir 热替换凭证落盘目录（config auth_dir 保存时调用）：面板此后登录/
+// 导入写入新目录；已有账号的池状态由 main 的 saveConfig 路径负责对齐。
+func (p *Panel) SetAuthDir(dir string) {
+	if p == nil {
+		return
+	}
+	p.authDir.Store(&dir)
+}
+
+// SetProxy 热替换出站代理实例（config proxy_url/resin_* 保存时调用）。
+func (p *Panel) SetProxy(pc *proxy.Client) {
+	if p == nil {
+		return
+	}
+	p.proxy.Store(pc)
+	p.proxyReady.Store(true)
+}
+
+// proxyClient 当前生效的出站代理（从未 SetProxy 时回落装配期 cfg 值；
+// SetProxy(nil) 之后恒为 nil = 直连）。
+func (p *Panel) proxyClient() *proxy.Client {
+	if p == nil {
+		return nil
+	}
+	if p.proxyReady.Load() {
+		return p.proxy.Load()
+	}
+	return p.cfg.Proxy
+}
+
+// authDirPath 当前生效的凭证落盘目录（未初始化时回落装配期 cfg 值）。
+func (p *Panel) authDirPath() string {
+	if p == nil {
+		return ""
+	}
+	if v := p.authDir.Load(); v != nil {
+		return *v
+	}
+	return p.cfg.AuthDir
 }
 
 // Logs 返回日志环形缓冲（main 经 MultiWriter 镜像 log 与 chat 表格日志进来）。
@@ -283,8 +335,8 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		"in_flight_full":  inFlightFull,
 		// proxy_configured 是否全局配置了出站代理（普通代理或 Resin）；前端据此决定
 		// 是否显示账号级「代理」开关。proxy_mode = plain/reverse/forward，未接入为空。
-		"proxy_configured": p.cfg.Proxy.Enabled(),
-		"proxy_mode":       p.cfg.Proxy.Mode(),
+		"proxy_configured": p.proxyClient().Enabled(),
+		"proxy_mode":       p.proxyClient().Mode(),
 		"accounts":         p.cfg.Pool.List(),
 		// model_locks 模型级限流全清单（哪些模型不能用、锁了几个号、还要锁多久）：
 		// 与 accounts 的账号池视图互补，前端「模型锁池」表直接渲染。无锁时为 null。
@@ -365,15 +417,15 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 				fetchErrs = append(fetchErrs, "cn: "+err.Error())
 			} else {
 				for _, mi := range infos {
-					out = append(out, panelModelEntry("cn", mi, mi.Efforts, mi.DefaultEffort, p.cfg.Upstream.HTTP))
+					out = append(out, panelModelEntry("cn", mi, mi.Efforts, mi.DefaultEffort, p.cfg.Upstream.ShortClient()))
 				}
 			}
 		}
 	}
 
 	// global 域：路由开关开且有可用 global 账号才查（独立目录端点，FetchGlobalModelInfos；
-	// Upstream.GlobalEnabled 是探测侧同一道闸，与 main 装配的 config global.enabled 一致）。
-	if p.cfg.Upstream.GlobalEnabled {
+	// GlobalOn() 读热改快照（config global.enabled 保存后即时生效），与 main 装配一致）。
+	if p.cfg.Upstream.GlobalOn() {
 		if uids := p.cfg.Pool.AvailableUIDsForRealm("global"); len(uids) > 0 {
 			if acct := p.cfg.Pool.AuthByUID(uids[0]); acct != nil {
 				infos := p.cfg.Upstream.FetchGlobalModelInfos(acct)
@@ -382,7 +434,7 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 				} else {
 					efforts, defaults := p.cfg.Upstream.GlobalEffortSnapshot()
 					for _, mi := range infos {
-						out = append(out, panelModelEntry("global", mi, efforts[mi.ID], defaults[mi.ID], p.cfg.Upstream.HTTP))
+						out = append(out, panelModelEntry("global", mi, efforts[mi.ID], defaults[mi.ID], p.cfg.Upstream.ShortClient()))
 					}
 				}
 			}

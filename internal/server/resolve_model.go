@@ -1,6 +1,9 @@
 package server
 
-import "strings"
+import (
+	"strings"
+	"sync/atomic"
+)
 
 // 裸模型名的默认域策略（config model_default_realm）。
 const (
@@ -28,11 +31,37 @@ const (
 // resolver**，否则粘性分配的账号域与请求实际路由域可能不一致。
 type RealmResolver struct {
 	// Default 裸名默认域：cn / global / auto / auto:global,cn（空/非法视为 cn）。
+	// **装配期初值**：运行期热改走 SetDefault（内部原子覆盖），热路径读 defaultPolicy。
 	Default string
 	// RealmReady 报告某域当前是否有可用账号（auto 判定用）。nil = 视为不可用，回落首选域。
 	RealmReady func(realm string) bool
 	// RealmReadyForModel 报告某域当前对指定模型是否有可用账号（可选，若提供则优先使用模型级判定）。
 	RealmReadyForModel func(realm, model string) bool
+
+	// defaultDyn 热改覆盖值（config model_default_realm 保存时写入）；nil = 用 Default。
+	defaultDyn atomic.Pointer[string]
+}
+
+// SetDefault 热替换裸名默认域策略（配置保存路径调用；值需已归一化）。
+// 实例被 handler 与会话粘性闭包共享，因此必须原地更新而不是替换 resolver 实例，
+// 否则两处会看到不同的域策略。
+func (r *RealmResolver) SetDefault(policy string) {
+	if r == nil {
+		return
+	}
+	n := NormalizeRealmPolicy(policy)
+	r.defaultDyn.Store(&n)
+}
+
+// defaultPolicy 返回当前生效的默认域策略（热改优先，回落装配期 Default）。
+func (r *RealmResolver) defaultPolicy() string {
+	if r == nil {
+		return RealmDefaultCN
+	}
+	if p := r.defaultDyn.Load(); p != nil {
+		return *p
+	}
+	return r.Default
 }
 
 // NormalizeRealmPolicy 归一化策略值：小写、去空格，接受 cn/global/auto/auto:global,cn 等。
@@ -60,7 +89,7 @@ func (r *RealmResolver) candidates() []string {
 	if r == nil {
 		return []string{RealmDefaultCN}
 	}
-	switch r.Default {
+	switch r.defaultPolicy() {
 	case RealmDefaultGlobal:
 		return []string{RealmDefaultGlobal}
 	case RealmDefaultAutoGlobalCN:

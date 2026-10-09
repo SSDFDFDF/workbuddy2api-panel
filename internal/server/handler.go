@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -63,9 +64,13 @@ type Config struct {
 	// nil 时回退静态字段（测试与裸用场景）。
 	Live *runtime.Holder
 
+	// PromptHold 分域提示词规则的运行期快照（可热改；nil 时回落到 PromptRules/
+	// PromptMode 历史字段，测试与裸用路径零改动）。装配期由 main/config 注入，
+	// 保存配置时整体 Store 新规则。
+	PromptHold *prompt.Holder
+
 	// PromptRules 各域提示词规则（键："" 默认、cn、global），键不存在时回落 ""。
-	// 由 config.PromptRules 传入（装配期构建、不可热改）。nil 时回落到下方
-	// PromptMode/PromptText 两个历史字段（测试与裸用路径）。
+	// 仅作 PromptHold 为 nil 时的静态回退（测试/历史调用方）；生产走 PromptHold。
 	PromptRules map[string]prompt.Rule
 
 	// PromptMode 历史字段：无 PromptRules 时的单一规则模式（none/replace/append/after）。
@@ -74,9 +79,10 @@ type Config struct {
 	PromptText string
 
 	// GlobalEnabled global realm 路由开关（config global.enabled，缺省 true）。
-	// handler 侧第三道闸（与 main 注入 auth 开关、upstream.GlobalEnabled 呼应）：
+	// handler 侧第三道闸（与 main 注入 auth 开关、upstream 热改快照呼应）：
 	// false（显式逃生门）时即便 auth realm=global 也不提供 global: 模型名
-	// （modelList 不列 global 名单）。
+	// （modelList 不列 global 名单）。热改走 SetGlobalEnabled（内部原子值），
+	// 本字段只作装配期初值。
 	GlobalEnabled bool
 
 	// RealmResolver 裸模型名的域策略解析器（config model_default_realm）。
@@ -124,17 +130,27 @@ func (h *Handler) realmResolver() *RealmResolver {
 	return &RealmResolver{Default: RealmDefaultCN}
 }
 
+// SetGlobalEnabled 热替换 global 域路由开关（配置保存路径调用）。
+func (h *Handler) SetGlobalEnabled(enabled bool) {
+	if h == nil {
+		return
+	}
+	h.globalEnabled.Store(enabled)
+}
+
 // promptRuleFor 返回本次请求（指定 realm）生效的提示词规则。
 //
 // 查找顺序：精确 realm（cn/global）→ "" 默认规则。两者都不存在或规则为
 // none/正文空时 ok=false（调用方直接跳过组合，与历史 passthrough 行为一致）。
+// 规则从 PromptHold 原子快照读取，配置热改即时生效。
 func (h *Handler) promptRuleFor(realm string) (prompt.Rule, bool) {
-	if len(h.cfg.PromptRules) == 0 {
+	rules := h.promptHold.Load()
+	if len(rules) == 0 {
 		return prompt.Rule{}, false
 	}
-	r, ok := h.cfg.PromptRules[realm]
+	r, ok := rules[realm]
 	if !ok {
-		r, ok = h.cfg.PromptRules[""]
+		r, ok = rules[""]
 	}
 	if !ok {
 		return prompt.Rule{}, false
@@ -178,6 +194,10 @@ type Handler struct {
 	mux *http.ServeMux
 	// ingress 服务级入站准入（读 + 解析阶段的并发/字节预算）。见 ingress.go。
 	ingress *ingressLimiter
+	// promptHold 提示词规则原子快照（配置可热改；总是非 nil）。
+	promptHold *prompt.Holder
+	// globalEnabled global 域路由开关的运行期值（config global.enabled 热改）。
+	globalEnabled atomic.Bool
 }
 
 // NewHandler 构建 handler。
@@ -194,18 +214,24 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.PromptMode == "" {
 		cfg.PromptMode = prompt.ModeInject
 	}
-	// 兼容：只给了历史字段（PromptMode/PromptText）时合成单规则映射，
-	// 让热路径只有一个查表分支（测试与裸用路径零改动）。
-	if len(cfg.PromptRules) == 0 {
-		cfg.PromptRules = map[string]prompt.Rule{
-			"": {Mode: cfg.PromptMode, Text: cfg.PromptText},
+	// 提示词规则：优先用注入的热改 holder；没有时用静态字段合成一份（兼容
+	// 测试/裸用路径）。两种情况热路径都只查 holder，分支唯一。
+	if cfg.PromptHold == nil {
+		rules := cfg.PromptRules
+		if len(rules) == 0 {
+			rules = map[string]prompt.Rule{
+				"": {Mode: cfg.PromptMode, Text: cfg.PromptText},
+			}
 		}
+		cfg.PromptHold = prompt.NewHolder(rules)
 	}
 	h := &Handler{
-		cfg:     cfg,
-		mux:     http.NewServeMux(),
-		ingress: newIngressLimiter(cfg.MaxInflightRequests, cfg.MaxInflightBytesMB, cfg.IngressWait),
+		cfg:        cfg,
+		mux:        http.NewServeMux(),
+		ingress:    newIngressLimiter(cfg.MaxInflightRequests, cfg.MaxInflightBytesMB, cfg.IngressWait),
+		promptHold: cfg.PromptHold,
 	}
+	h.globalEnabled.Store(cfg.GlobalEnabled)
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responses))
 	h.mux.HandleFunc("POST /v1/messages", h.withMessagesAuth(h.messages))
@@ -455,8 +481,8 @@ func (h *Handler) modelList() []map[string]any {
 		// 写 model.json 供下次命中）→ 1M 兜底 / max_output_tokens 省略。
 		// 上游零值不再透出假 131072（误导 Codex/ZCode 等按 context_length 提前
 		// 截断、白白丢上下文）。
-		entry["context_length"] = upstream.ContextWindowListingV4(mi.ID, mi.ContextWindow, h.cfg.Upstream.HTTP)
-		if mo, ok := upstream.MaxOutputTokensListingV4(mi.ID, mi.MaxTokens, h.cfg.Upstream.HTTP); ok {
+		entry["context_length"] = upstream.ContextWindowListingV4(mi.ID, mi.ContextWindow, h.cfg.Upstream.ShortClient())
+		if mo, ok := upstream.MaxOutputTokensListingV4(mi.ID, mi.MaxTokens, h.cfg.Upstream.ShortClient()); ok {
 			entry["max_output_tokens"] = mo
 		}
 		// 上游模型对象全字段透出（name/描述/标签/倍率/能力旗标等，空值省略）。
@@ -473,7 +499,7 @@ func (h *Handler) modelList() []map[string]any {
 	}
 	// global 模型名单：仅 GlobalEnabled=true 时列出（逃生门）。
 	// 名单 = 纯动态探测结果（fetchGlobalModels，失败/无号 → 空）。
-	if h.cfg.GlobalEnabled {
+	if h.globalEnabled.Load() {
 		// global 域 effort 能力三级查找：探测下发桶（权威）→ 静态兜底表 → 省略。
 		// 先 fetchGlobalModels（内部探测并落 effort 桶），再按 id 取快照。
 		globalIDs, globalAccount := h.fetchGlobalModels()
@@ -498,8 +524,8 @@ func (h *Handler) modelList() []map[string]any {
 				entry = applyModelInfoFields(entry, mi)
 				remoteCtx, remoteOut = mi.ContextWindow, mi.MaxTokens
 			}
-			entry["context_length"] = upstream.ContextWindowListingV4(id, remoteCtx, h.cfg.Upstream.HTTP)
-			if mo, ok := upstream.MaxOutputTokensListingV4(id, remoteOut, h.cfg.Upstream.HTTP); ok {
+			entry["context_length"] = upstream.ContextWindowListingV4(id, remoteCtx, h.cfg.Upstream.ShortClient())
+			if mo, ok := upstream.MaxOutputTokensListingV4(id, remoteOut, h.cfg.Upstream.ShortClient()); ok {
 				entry["max_output_tokens"] = mo
 			}
 			if efforts, def := upstream.EffortListing("global", id, globalEfforts[id], globalDefaults[id]); efforts != nil {
@@ -667,11 +693,11 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 		return
 	}
 	// 显式 global: 前缀在 global 禁用时必须报错（非静默跨域）
-	if len(candidateRealms) == 1 && candidateRealms[0] == RealmDefaultGlobal && !h.cfg.GlobalEnabled {
+	if len(candidateRealms) == 1 && candidateRealms[0] == RealmDefaultGlobal && !h.globalEnabled.Load() {
 		out.Error(w, http.StatusBadRequest, "invalid_model", "model realm is disabled or model is empty")
 		return
 	}
-	if !h.cfg.GlobalEnabled {
+	if !h.globalEnabled.Load() {
 		filtered := make([]string, 0, len(candidateRealms))
 		for _, cr := range candidateRealms {
 			if cr != RealmDefaultGlobal {
@@ -1132,7 +1158,7 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 			// 流式：透传结束后立即关闭上游 body，避免 defer 在轮转场景下堆积 fd。
 			st.status = http.StatusOK
 			stats := &chatStatsReader{start: st.start}
-			timeouts := h.cfg.Upstream.StreamTimeouts
+			timeouts := h.cfg.Upstream.StreamTimeoutsNow()
 			// gateway_hint（SSE）：成功状态 200 已开流，中途 error 帧透传时附加
 			// hint 字段（hintFn 惰性求值——正常流零开销，只有真撞到 error 帧才
 			// 组装请求上下文做判定）。
@@ -1221,7 +1247,7 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 			return
 		}
 		observed := &chatStatsReader{start: st.start}
-		timeouts := h.cfg.Upstream.StreamTimeouts
+		timeouts := h.cfg.Upstream.StreamTimeoutsNow()
 		completion, err := out.Aggregate(rc, upstream.WithExpectedChoices(peek.N), upstream.WithFrameObserver(observed.Observe), upstream.WithResponseTimeouts(timeouts.FirstModelEvent, timeouts.FirstGeneration, timeouts.Tail))
 		rc.Close()
 		var formatted map[string]any

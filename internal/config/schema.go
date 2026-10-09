@@ -27,10 +27,12 @@ type Config struct {
 	// ConfigVersion 配置结构版本（见 migrate.go：一次性版本迁移，不是长期归一化）。
 	// 由 Migrate 写入/校验，用户无需手工维护；缺省视为 VersionUnversioned。
 	ConfigVersion int    `json:"config_version"`
-	Listen        string `json:"listen"`     // ":7863"
-	APIKey        string `json:"api_key"`    // 空 = 不鉴权
-	AuthDir       string `json:"auth_dir"`   // ./auths
-	StateFile     string `json:"state_file"` // ./data/state.json
+	Listen        string `json:"listen"`  // ":7863"
+	APIKey        string `json:"api_key"` // 空 = 不鉴权
+	// AuthDir 账号凭证目录（./auths）。保存后热生效：重扫目录 + 账号池对齐
+	//（auth.LoadDir / pool.SyncToDir），面板登录与导入随之写入新目录。
+	AuthDir   string `json:"auth_dir"`   // ./auths
+	StateFile string `json:"state_file"` // ./data/state.json
 
 	// FingerprintRewrite 出站请求体指纹改写（默认 false = 严格逐字透传）。
 	//
@@ -263,7 +265,8 @@ type Config struct {
 	PromptText string `json:"-"`
 
 	// PromptRules 各域生效的提示词规则（键："" 默认、"cn"、"global"）。
-	// 装配期构建，不可热改（改 prompt 需重启）；handler 按请求 realm 选规则。
+	// normalize 阶段构建；保存配置时整体 Store 进 handler 的 prompt.Holder（热生效），
+	// handler 按请求 realm 从快照选规则。
 	PromptRules map[string]prompt.Rule `json:"-"`
 
 	// Warnings 载入期的配置告警（未知键、被忽略的已知非法项）。运行期元数据：

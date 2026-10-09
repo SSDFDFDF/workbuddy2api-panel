@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"workbuddy_manager/internal/auth"
+	"workbuddy_manager/internal/proxy"
 )
 
 func TestClassify(t *testing.T) {
@@ -482,12 +483,13 @@ func TestNewChatClientNoTotalTimeoutAndSharedTransport(t *testing.T) {
 	if c.ChatHTTP.Transport != c.HTTP.Transport {
 		t.Errorf("ChatHTTP and HTTP must share the same *http.Transport")
 	}
-	htr, ok := c.ChatHTTP.Transport.(*http.Transport)
-	if !ok {
-		t.Fatalf("Transport type=%T", c.ChatHTTP.Transport)
+	// Transport 是常驻的 proxy.Dynamic 转发层（为出站代理热改而包），
+	// 底层加固 Transport 由 baseTransport 持有。
+	if _, ok := c.ChatHTTP.Transport.(*proxy.Dynamic); !ok {
+		t.Fatalf("Transport type=%T want *proxy.Dynamic", c.ChatHTTP.Transport)
 	}
-	if htr.ResponseHeaderTimeout != 60*time.Second { // 连接层加固：响应头上限从 120s 收到 60s（慢冷启动留 3.75× 余量）
-		t.Errorf("ResponseHeaderTimeout=%v want 60s", htr.ResponseHeaderTimeout)
+	if c.baseTransport.ResponseHeaderTimeout != 60*time.Second { // 连接层加固：响应头上限从 120s 收到 60s（慢冷启动留 3.75× 余量）
+		t.Errorf("ResponseHeaderTimeout=%v want 60s", c.baseTransport.ResponseHeaderTimeout)
 	}
 }
 

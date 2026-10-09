@@ -388,3 +388,106 @@ func TestPlainProxyInheritLeaseNoop(t *testing.T) {
 		t.Fatalf("plain proxy inherit-lease must no-op: %v", err)
 	}
 }
+
+// TestDynamicHotSwap 动态转发层：换实例后下一次请求按新代理路由；Set(nil) 恢复直连。
+func TestDynamicHotSwap(t *testing.T) {
+	cap := &captureRT{}
+	d := NewDynamic(cap)
+
+	route := func(account string) string {
+		t.Helper()
+		cap.req = nil
+		req, _ := http.NewRequest(http.MethodGet, "https://api.example.com/x", nil)
+		if account != "" {
+			SetAccountHeader(req, account)
+		}
+		if _, err := d.RoundTrip(req); err != nil {
+			t.Fatal(err)
+		}
+		if cap.req == nil {
+			t.Fatal("base not called")
+		}
+		return cap.req.URL.String()
+	}
+
+	// 未接入：直连（未标记请求不改写）。
+	if got := route(""); got != "https://api.example.com/x" {
+		t.Fatalf("直连 URL=%s", got)
+	}
+
+	a, err := New(Config{URL: "http://127.0.0.1:2260/tokA", Platform: "PA"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Set(a)
+	if got := route("u1"); got != "http://127.0.0.1:2260/tokA/PA/https/api.example.com/x" {
+		t.Fatalf("代理 A URL=%s", got)
+	}
+
+	b, err := New(Config{URL: "http://127.0.0.1:2260/tokB", Platform: "PB"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Set(b)
+	if got := route("u2"); got != "http://127.0.0.1:2260/tokB/PB/https/api.example.com/x" {
+		t.Fatalf("代理 B URL=%s", got)
+	}
+	if d.Current() != b {
+		t.Fatal("Current 应返回最新实例")
+	}
+
+	d.Set(nil)
+	if d.Current() != nil {
+		t.Fatal("Set(nil) 后 Current 应为 nil")
+	}
+	if got := route("u3"); got != "https://api.example.com/x" {
+		t.Fatalf("取消代理后应直连，URL=%s", got)
+	}
+}
+
+// TestDynamicForwardDispatch 正向/普通代理模式：底层 *http.Transport 上安装的
+// 选路分发函数必须读当前实例（nil = 直连，换实例即换代理地址）。
+func TestDynamicForwardDispatch(t *testing.T) {
+	base := &http.Transport{}
+	d := NewDynamic(base)
+	if base.Proxy == nil {
+		t.Fatal("NewDynamic 应在 *http.Transport 上安装 Proxy 分发函数")
+	}
+	req, _ := http.NewRequest(http.MethodGet, "https://api.example.com/x", nil)
+	req = req.WithContext(withAccount(req.Context(), "u1"))
+
+	if u, err := base.Proxy(req); err != nil || u != nil {
+		t.Fatalf("未接入应直连：u=%v err=%v", u, err)
+	}
+	pc, err := New(Config{ProxyURL: "http://127.0.0.1:8080"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Set(pc)
+	u, err := base.Proxy(req)
+	if err != nil || u == nil || u.Host != "127.0.0.1:8080" {
+		t.Fatalf("普通代理选路失败：u=%v err=%v", u, err)
+	}
+	d.Set(nil)
+	if u, err := base.Proxy(req); err != nil || u != nil {
+		t.Fatalf("取消代理后应直连：u=%v err=%v", u, err)
+	}
+}
+
+// TestDynamicStripsAccountHeaderWhenDirect 热改取消代理后：即便请求还带着旧标记
+// （与 SetProxy(nil) 擦肩的在途请求），内部头也绝不能泄漏到直连上游。
+func TestDynamicStripsAccountHeaderWhenDirect(t *testing.T) {
+	cap := &captureRT{}
+	d := NewDynamic(cap)
+	req, _ := http.NewRequest(http.MethodGet, "https://api.example.com/x", nil)
+	SetAccountHeader(req, "u1") // 模拟已标记的在途请求
+	if _, err := d.RoundTrip(req); err != nil {
+		t.Fatal(err)
+	}
+	if cap.req == nil {
+		t.Fatal("base not called")
+	}
+	if got := cap.req.Header.Get(InternalAccountHeader); got != "" {
+		t.Fatalf("内部标记头泄漏到直连上游：%q", got)
+	}
+}

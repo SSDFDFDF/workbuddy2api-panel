@@ -50,11 +50,14 @@ func (c *Client) resolveDeviceToken(a *auth.Auth) string {
 	if a != nil && a.DeviceToken != "" {
 		return a.DeviceToken
 	}
-	if c != nil && c.DeviceToken != "" {
-		return c.DeviceToken
-	}
-	if c != nil && c.DeviceTokenFile != "" {
-		return readDeviceTokenFile(c.DeviceTokenFile)
+	if c != nil {
+		o := c.optsNow()
+		if o.DeviceToken != "" {
+			return o.DeviceToken
+		}
+		if o.DeviceTokenFile != "" {
+			return readDeviceTokenFile(o.DeviceTokenFile)
+		}
 	}
 	return ""
 }
@@ -335,8 +338,8 @@ func validTraceID(s string) bool {
 // attributionClientName 生效的用量归属名：ClientName 非空取之；
 // 空默认 "WorkBuddy"（伪造官方桌面端指纹；显式配 "SaaS" 可还原旧行为）。
 func (c *Client) attributionClientName() string {
-	if c != nil && c.ClientName != "" {
-		return c.ClientName
+	if v := c.optsNow().ClientName; v != "" {
+		return v
 	}
 	return "WorkBuddy"
 }
@@ -363,7 +366,7 @@ func (c *Client) injectAttribution(req *http.Request, a *auth.Auth) {
 
 // injectClientIP 在 PassthroughIP 开启时把 clientIP 参数透传给上游（三等价头）。
 func (c *Client) injectClientIP(req *http.Request, clientIP string) {
-	if c == nil || !c.PassthroughIP || clientIP == "" {
+	if c == nil || !c.optsNow().PassthroughIP || clientIP == "" {
 		return
 	}
 	req.Header.Set("X-Forwarded-For", clientIP)

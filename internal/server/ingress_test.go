@@ -366,3 +366,137 @@ func TestIngressReleasedOnDecodeError(t *testing.T) {
 		t.Fatalf("413 路径泄漏了名额: %+v", s)
 	}
 }
+
+// TestIngressSetLimitsHot 热改限额：
+//   - 上限放宽后，已在等待的请求立即被唤醒并成功（不需要等释放）；
+//   - 关闭限额（全 0）后立即不再拒绝，且不再新增计数；
+//   - 收紧上限后新请求按新值拒绝，已持有名额的请求不受影响。
+func TestIngressSetLimitsHot(t *testing.T) {
+	l := newIngressLimiter(1, 0, 5*time.Second)
+	r1, ok := l.Acquire(context.Background(), 0)
+	if !ok {
+		t.Fatal("第一个名额应成功")
+	}
+
+	// 等待者：满载（上限 1）时进入等待。
+	done := make(chan bool, 1)
+	go func() {
+		_, ok := l.Acquire(context.Background(), 0)
+		done <- ok
+	}()
+	waitForIngressWaiters(t, l, 1)
+
+	// 放宽上限到 2：等待者应立即被唤醒，而不是等到 r1 释放或 5s 超时。
+	l.SetLimits(2, 0, 5*time.Second)
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("放宽上限后等待者应成功")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("放宽上限后等待者未被唤醒（缺少广播）")
+	}
+	r1()
+
+	if s := l.Stats(); s.MaxCount != 2 || s.WaitMillis != 5000 {
+		t.Fatalf("Stats 应反映新限额: %+v", s)
+	}
+
+	// 收紧到 1：当前在途 1 个，新的应被拒。
+	r2, ok := l.Acquire(context.Background(), 0)
+	if !ok {
+		t.Fatal("第二个名额应成功")
+	}
+	l.SetLimits(1, 0, 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, ok := l.Acquire(ctx, 0); ok {
+		t.Fatal("收紧后（在途 2 > 上限 1）新请求应被拒")
+	}
+	r2()
+
+	// 关闭限额：立即放行且不再计数（Acquire 直接返回空操作）。
+	l.SetLimits(0, 0, time.Second)
+	if _, ok := l.Acquire(context.Background(), 1<<30); !ok {
+		t.Fatal("关闭限额后应放行任意请求")
+	}
+	if s := l.Stats(); s.MaxCount != 0 || s.MaxBytes != 0 {
+		t.Fatalf("关闭后 Stats 上限应为 0: %+v", s)
+	}
+}
+
+// waitForIngressWaiters 等到 limiter 观测到 n 个等待者（waited 计数）。
+func waitForIngressWaiters(t *testing.T, l *ingressLimiter, n uint64) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if l.Stats().Waited >= n {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("等待者未进入等待：stats=%+v", l.Stats())
+}
+
+// TestSetLimitsConcurrentAcquire 限额热改与请求准入并发：不得数据竞争或 panic。
+func TestSetLimitsConcurrentAcquire(t *testing.T) {
+	l := newIngressLimiter(4, 4, 10*time.Millisecond)
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if rel, ok := l.Acquire(context.Background(), 1<<20); ok {
+					rel()
+				}
+				l.Stats()
+			}
+		}()
+	}
+	for i := 0; i < 200; i++ {
+		l.SetLimits(1+i%8, 1+i%8, time.Duration(i%3)*time.Millisecond)
+	}
+	close(stop)
+	wg.Wait()
+}
+
+// TestIngressSetLimitsUnchangedDoesNotWake 同值 SetLimits 不广播：
+// 配置保存路径每次都会调用，无谓广播会让全部等待者惊群（重新判定后仍需等待）。
+func TestIngressSetLimitsUnchangedDoesNotWake(t *testing.T) {
+	l := newIngressLimiter(1, 0, 3*time.Second)
+	held, ok := l.Acquire(context.Background(), 0)
+	if !ok {
+		t.Fatal("第一个名额应成功")
+	}
+	done := make(chan bool, 1)
+	go func() {
+		_, ok := l.Acquire(context.Background(), 0)
+		done <- ok
+	}()
+	waitForIngressWaiters(t, l, 1)
+
+	l.SetLimits(1, 0, 3*time.Second) // 同值
+	select {
+	case <-done:
+		t.Fatal("同值 SetLimits 不应唤醒等待者")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	l.SetLimits(2, 0, 3*time.Second) // 放宽 → 立即唤醒
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("放宽上限后等待者应成功")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("放宽上限后等待者未被唤醒")
+	}
+	held()
+}

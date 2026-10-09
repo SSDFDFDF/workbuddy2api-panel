@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"workbuddy_manager/internal/auth"
-	"workbuddy_manager/internal/proxy"
 )
 
 const (
@@ -51,9 +50,9 @@ func loginEndpoints(realm string) (state, token, account, origin string) {
 		originRefererCN
 }
 
-// loginHTTP 设备授权专用 client：短超时、无 cookie（每请求携带 state，无会话态）。
-// 接入代理时其 Transport 在 panel.New 中包上代理路由（反代/正代/普通代理，见 panel.go）。
-var loginHTTP = &http.Client{Timeout: 30 * time.Second}
+// loginHTTPTimeout 设备授权专用 client 的超时（每 Panel 自建实例，见 panel.New；
+// Transport 是常驻的 proxy.Dynamic，出站代理可热改）。
+const loginHTTPTimeout = 30 * time.Second
 
 // newTempIdentity 生成一次 OAuth 登录流程的临时代理身份：登录前没有 uid 可用，
 // 先用随机临时身份路由；登录成功后（仅 Resin）inherit-lease 给稳定 uid。随机而非
@@ -100,9 +99,10 @@ type apiEnvelope struct {
 }
 
 // doJSON 发一次 JSON 请求并解信封。origin 为 Origin/Referer 基础域（随 realm 切）。
-// account 为本次请求的代理账号标识（空 = 不打标记）；rc 为代理接入实例，
-// nil/未启用时账号标记为空操作（不接入的部署不会多出内部头）。
-func doJSON(method, fullURL, bearer string, body io.Reader, origin, account string, rc *proxy.Client) (json.RawMessage, int, error) {
+// account 为本次请求的代理账号标识（空 = 不打标记）；代理实例每请求现读
+// （p.proxyClient），未接入时为 nil（SetAccountHeader 空操作，不接入的部署不会多出
+// 内部头），proxy_url/resin_* 热改后下一次登录请求即走新代理。
+func (p *Panel) doJSON(method, fullURL, bearer string, body io.Reader, origin, account string) (json.RawMessage, int, error) {
 	req, err := http.NewRequest(method, fullURL, body)
 	if err != nil {
 		return nil, 0, err
@@ -111,8 +111,8 @@ func doJSON(method, fullURL, bearer string, body io.Reader, origin, account stri
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
-	rc.SetAccountHeader(req, account)
-	resp, err := loginHTTP.Do(req)
+	p.proxyClient().SetAccountHeader(req, account)
+	resp, err := p.loginHTTP.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -147,7 +147,7 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 	}
 	epState, _, _, origin := loginEndpoints(realm)
 	tempIdentity := newTempIdentity()
-	data, status, err := doJSON(http.MethodPost, epState, "", bytes.NewReader([]byte("{}")), origin, tempIdentity, p.cfg.Proxy)
+	data, status, err := p.doJSON(http.MethodPost, epState, "", bytes.NewReader([]byte("{}")), origin, tempIdentity)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, fmt.Sprintf("auth state (upstream %d): %v", status, err))
 		return
@@ -207,7 +207,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	_, epToken, epAcct, origin := loginEndpoints(sess.realm)
 
 	// auth/token 是权威登录状态端点：pending 时业务 code 非 0（"login ing"）。
-	tokRaw, _, err := doJSON(http.MethodGet, epToken+state, "", nil, origin, sess.tempIdentity, p.cfg.Proxy)
+	tokRaw, _, err := p.doJSON(http.MethodGet, epToken+state, "", nil, origin, sess.tempIdentity)
 	if err != nil {
 		// pending / 未完成：面板前端继续轮询。
 		writeJSON(w, http.StatusOK, map[string]any{"done": false, "message": err.Error()})
@@ -230,7 +230,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		EnterpriseID string `json:"enterpriseId"`
 		Nickname     string `json:"nickname"`
 	}
-	if acctRaw, _, err := doJSON(http.MethodGet, epAcct+state, tok.AccessToken, nil, origin, sess.tempIdentity, p.cfg.Proxy); err == nil {
+	if acctRaw, _, err := p.doJSON(http.MethodGet, epAcct+state, tok.AccessToken, nil, origin, sess.tempIdentity); err == nil {
 		_ = json.Unmarshal(acctRaw, &acct)
 	}
 	if acct.UID == "" {
@@ -246,7 +246,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 凭证落盘（嵌套形，与 auths/ 目录既有格式一致）→ 热加载进池。
-	if err := os.MkdirAll(p.cfg.AuthDir, 0o755); err != nil {
+	if err := os.MkdirAll(p.authDirPath(), 0o755); err != nil {
 		writeErr(w, http.StatusInternalServerError, "mkdir auth dir: "+err.Error())
 		return
 	}
@@ -258,7 +258,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		UID:          acct.UID,
 		EnterpriseID: acct.EnterpriseID,
 		Nickname:     acct.Nickname,
-		FilePath:     filepath.Join(p.cfg.AuthDir, fmt.Sprintf("workbuddy-%s.json", acct.UID)),
+		FilePath:     filepath.Join(p.authDirPath(), fmt.Sprintf("workbuddy-%s.json", acct.UID)),
 	}
 	// global 登录：落盘 auth.realm=global（Realm() 按此判域；不写则依赖 domain 后缀回落）。
 	if sess.realm == "global" {
@@ -280,8 +280,8 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	// Resin：把登录临时身份的 IP 租约继承给稳定 uid，保证后续账号请求与登录链路
 	// 出同一出口 IP。普通代理/未接入时 InheritLease 为空操作。best-effort：失败只记
 	// 日志，不阻断登录（凭证已落盘）。
-	if p.cfg.Proxy.Enabled() && sess.tempIdentity != "" {
-		if err := p.cfg.Proxy.InheritLease(r.Context(), sess.tempIdentity, acct.UID); err != nil {
+	if pc := p.proxyClient(); pc.Enabled() && sess.tempIdentity != "" {
+		if err := pc.InheritLease(r.Context(), sess.tempIdentity, acct.UID); err != nil {
 			log.Printf("panel: proxy inherit-lease temp=%s uid=%s: %v", sess.tempIdentity, acct.UID, err)
 		}
 	}

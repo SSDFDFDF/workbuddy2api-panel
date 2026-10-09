@@ -28,10 +28,12 @@ func TestConcurrentConfigSaveSerialized(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"api_key":"init"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	live := runtime.New(runtime.Snapshot{})
-	p := pool.New("")
-	up := &upstream.Client{}
-	sch := scheduler.New(scheduler.Config{})
+	hot := &hotTargets{
+		live:     runtime.New(runtime.Snapshot{}),
+		pool:     pool.New(""),
+		upstream: &upstream.Client{},
+		schedule: scheduler.New(scheduler.Config{}),
+	}
 
 	const n = 32
 	var wg sync.WaitGroup
@@ -45,7 +47,7 @@ func TestConcurrentConfigSaveSerialized(t *testing.T) {
 				errCh <- err
 				return
 			}
-			if _, err := saveConfig(payload, path, live, p, up, sch); err != nil {
+			if _, err := saveConfig(payload, path, hot); err != nil {
 				errCh <- err
 			}
 		}(i)
