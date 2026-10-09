@@ -72,7 +72,12 @@ const CFG_MAP = {
  * 通用循环若碰它们，会把数组 join 成字符串、或把文本当字符串下发（类型不符）。 */
 const MANUAL_CFG = new Set(['fingerprint_rules_text']);
 
+// CLEARABLE_CFG：空串也必须下发的覆盖型字段。后端保存是「基线 + 增量合并」
+// （MergeConfigMaps），**键缺失 = 保留旧值**，所以「把下拉选回默认/继承」这类清空动作
+// 必须显式送空串才能落盘。覆盖型字段（文件/正文/路径/版本串）与「可回默认的下拉」
+// （组合位置、预设、首行动态值）都在列。
 const CLEARABLE_CFG = new Set(['prompt_file', 'prompt_text', 'prompt_cn_text', 'prompt_global_text',
+  'prompt_cn_mode', 'prompt_global_mode', 'prompt_cn_preset', 'prompt_global_preset',
   'proxy_url', 'resin_url', 'resin_platform_name',
   'cn_client_version', 'cn_cli_version', 'global_client_version', 'global_cli_version']);
 
@@ -349,13 +354,14 @@ function collectConfig() {
   // 这样"清空输入框"等于明确要求清空规则，而不是"没改"。
   const rulesEl = f.elements['fingerprint_rules_text'];
   if (rulesEl) out.fingerprint_rules = parseRules(rulesEl.value);
-  // 提示词分域：整体覆盖语义（见 docs）——该域三个字段全空时不下发该域键。
+  // 提示词分域：整体覆盖语义（见 docs）——该域各字段全空时不下发该域键。
   // 空串视为"未设置"：分域覆盖里空值就是继承的意思（顶层素材同理：空 = 回落
   // 文件/预设），所以不能让空串把"继承"变成"该域有自己的空配置"。
   for (const realm of ['cn', 'global']) {
     const g = out.prompt && out.prompt.profiles && out.prompt.profiles[realm];
     if (!g) continue;
-    const set = ['mode', 'preset', 'text'].some(k => g[k] !== undefined && g[k] !== '');
+    const set = ['mode', 'preset', 'text']
+      .some(k => g[k] !== undefined && g[k] !== '');
     if (!set) {
       delete out.prompt.profiles[realm];
       if (Object.keys(out.prompt.profiles).length === 0) delete out.prompt.profiles;

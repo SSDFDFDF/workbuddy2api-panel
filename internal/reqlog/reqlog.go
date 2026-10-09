@@ -84,6 +84,18 @@ type Event struct {
 	CacheMissTokens int64  `json:"cache_miss_tokens,omitempty"`
 	ClientIP        string `json:"client_ip,omitempty"`
 	UserAgent       string `json:"user_agent,omitempty"`
+
+	// 出站提示词指纹（仅在 prompt.mode 非 none 时填）。
+	//
+	// 为什么需要：11128/内容审核类问题复盘时必须能回答"这次到底发出去的是什么形状"。
+	// 正文本身不入档（体积 + 隐私：正文里可能含用户业务内容），但**指纹可复现**——
+	// 相同 mode/preset/首行/sha256 即"发出去的是同一份内容"，配合面板预览即可还原逐字全文。
+	PromptMode   string `json:"prompt_mode,omitempty"`
+	PromptPreset string `json:"prompt_preset,omitempty"`
+	// PromptSHA 渲染后出站 system 正文的 sha256 前 12 位（含首行改写结果）。
+	PromptSHA string `json:"prompt_sha256,omitempty"`
+	// PromptChars 渲染后正文的字符数（rune，与面板预览同口径）。
+	PromptChars int `json:"prompt_chars,omitempty"`
 }
 
 // Filter 用于从归档中筛选最近记录。字符串字段一律「包含」匹配（大小写不敏感），

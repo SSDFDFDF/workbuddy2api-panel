@@ -221,7 +221,7 @@ func (c *Config) normalize() error {
 }
 
 // normalizePrompt / buildPromptRule / normalizePromptMode 等见 prompt_config.go：
-// 校验 prompt.mode（none/replace/append/after，历史别名迁移并告警）、按域覆盖
+// 校验 prompt.mode（none/replace/append/after/inject，历史别名迁移并告警）、按域覆盖
 // 构建 c.PromptRules（键 "" / cn / global），并在需要正文时解析 preset/file/text
 // （素材优先级 text > file > preset，file 不可读 → fail fast）。
 

@@ -70,6 +70,14 @@ type chatStat struct {
 	clientIP  string
 	userAgent string
 
+	// 出站提示词指纹（仅 prompt.mode 非 none 时填，见 reqlog.Event 同名字段）。
+	// 为什么记它们：11128 复盘必须能回答"这次到底发出去的是什么形状"——提示词是唯一
+	// 既不能从入站字节推出（已被改写）、又不该在日志里存正文（体积/隐私）的东西。
+	promptMode   string
+	promptPreset string
+	promptSHA    string
+	promptChars  int
+
 	logged bool
 }
 
@@ -363,6 +371,10 @@ func (t *requestTrace) event(status int) reqlog.Event {
 		e.HasCredit = s.hasCredit
 		e.CacheHitTokens = s.cacheHit
 		e.CacheMissTokens = s.cacheMiss
+		e.PromptMode = s.promptMode
+		e.PromptPreset = s.promptPreset
+		e.PromptSHA = s.promptSHA
+		e.PromptChars = s.promptChars
 	}
 	e.ClientIP = t.clientIP
 	e.UserAgent = t.userAgent

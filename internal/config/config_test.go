@@ -871,27 +871,30 @@ func TestPromptRealmProfiles(t *testing.T) {
 	    "mode": "after",
 	    "preset": "default",
 	    "profiles": {
-	      "cn": {"preset": "minimal", "text": "CN 内联"},
-	      "global": {"mode": "replace", "preset": "minimal"}
+	      "cn": {"preset": "official-quick", "text": "CN 内联"},
+	      "global": {"mode": "replace", "preset": "official-quick"}
 	    }
 	  }
 	}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 默认域：顶层素材（default 预设）。
-	if r := c.PromptRules[""]; r.Mode != prompt.ModeAfter || r.Text != prompt.Builtin("default", "cn") {
+	// 默认域：顶层素材（default 预设）；mode=after 非 inject → 注入锚点在配置期剔除。
+	if r := c.PromptRules[""]; r.Mode != prompt.ModeAfter || r.Text != prompt.StripSlot(prompt.Builtin("default", "cn")) {
 		t.Errorf("default rule=%+v", r)
+	}
+	if strings.Contains(c.PromptRules[""].Text, prompt.ClientSlot) {
+		t.Error("after 模式下锚点标记不得出现在规则正文里")
 	}
 	// CN：素材被 realm 整体覆盖（text 胜过 preset），mode 回落顶层。
 	if r := c.PromptRules["cn"]; r.Mode != prompt.ModeAfter || r.Text != "CN 内联" {
 		t.Errorf("cn rule=%+v", r)
 	}
-	// Global：mode 被覆盖，素材取 global 的 minimal（英文）。
-	if r := c.PromptRules["global"]; r.Mode != prompt.ModeReplace || r.Text != prompt.Builtin("minimal", "global") {
+	// Global：mode 被覆盖，素材取 global 的 official-quick（mode=replace → 锚点剥离）。
+	if r := c.PromptRules["global"]; r.Mode != prompt.ModeReplace || r.Text != prompt.StripSlot(prompt.Builtin("official-quick", "global")) {
 		t.Errorf("global rule=%+v", r)
 	}
-	if c.PromptText != prompt.Builtin("default", "cn") {
+	if c.PromptText != prompt.StripSlot(prompt.Builtin("default", "cn")) {
 		t.Errorf("PromptText(legacy)=%d bytes", len(c.PromptText))
 	}
 }
@@ -1315,4 +1318,164 @@ func TestConcurrentWarnings(t *testing.T) {
 	}
 	close(start)
 	wg.Wait()
+}
+
+// ---- inject 包装合并 ----
+
+// loadPromptConfig 写临时配置并 Load（prompt 测试共用小工具）。
+func loadPromptConfig(t *testing.T, promptJSON string) (*Config, error) {
+	t.Helper()
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	body := `{"prompt":` + promptJSON + `}`
+	if err := os.WriteFile(fp, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return Load(fp)
+}
+
+// hasPromptWarning 报告告警列表里是否有包含 sub 的项。
+func hasPromptWarning(c *Config, sub string) bool {
+	for _, w := range c.Warnings {
+		if strings.Contains(w, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestPromptInjectAllBuiltinPresets inject 与任一内置预设都可组合，且素材逐字进规则。
+func TestPromptInjectAllBuiltinPresets(t *testing.T) {
+	for _, name := range prompt.PresetNames() {
+		c, err := loadPromptConfig(t, `{"mode":"inject","preset":"`+name+`"}`)
+		if err != nil {
+			t.Fatalf("preset=%s: %v", name, err)
+		}
+		for _, realm := range []string{"cn", "global"} {
+			r := c.PromptRules[realm]
+			if r.Mode != prompt.ModeInject {
+				t.Errorf("preset=%s realm=%s: mode=%q", name, realm, r.Mode)
+			}
+			// 素材逐字进规则（不做任何改写）。
+			if want := prompt.Builtin(name, realm); r.Text != want {
+				t.Errorf("preset=%s realm=%s: rule text must be verbatim (%d vs %d bytes)",
+					name, realm, len(r.Text), len(want))
+			}
+		}
+	}
+}
+
+// TestPromptMaterialsVerbatim 三种素材（预设/文件/内联）在 replace/append/after/inject
+// 下都逐字进规则正文，配置层不做任何拼接或剔除。
+func TestPromptMaterialsVerbatim(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "p.md")
+	if err := os.WriteFile(fp, []byte("FROM-FILE\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"replace", "append", "after", "inject"} {
+		// 预设
+		c, err := loadPromptConfig(t, `{"mode":"`+mode+`","preset":"official-quick"}`)
+		if err != nil {
+			t.Fatalf("mode=%s preset: %v", mode, err)
+		}
+		want := prompt.Builtin("official-quick", "cn")
+		if mode != prompt.ModeInject {
+			want = prompt.StripSlot(want)
+		}
+		if got := c.PromptRules["cn"].Text; got != want {
+			t.Errorf("mode=%s: preset text not verbatim", mode)
+		}
+		// 内联（优先于文件与预设）
+		c, err = loadPromptConfig(t, `{"mode":"`+mode+`","text":"INLINE-1\nINLINE-2\n"}`)
+		if err != nil {
+			t.Fatalf("mode=%s text: %v", mode, err)
+		}
+		if got := c.PromptRules["cn"].Text; got != "INLINE-1\nINLINE-2\n" {
+			t.Errorf("mode=%s: inline text=%q", mode, got)
+		}
+		// 文件
+		c, err = loadPromptConfig(t, `{"mode":"`+mode+`","file":"`+fp+`"}`)
+		if err != nil {
+			t.Fatalf("mode=%s file: %v", mode, err)
+		}
+		if got := c.PromptRules["cn"].Text; got != "FROM-FILE\n" {
+			t.Errorf("mode=%s: file text=%q", mode, got)
+		}
+	}
+}
+
+// TestPromptInjectProfileOverrides 分域覆盖：cn 用 inject、其余 append——
+// 组合位置按各域自己的 mode 与素材逐域判定。
+func TestPromptInjectProfileOverrides(t *testing.T) {
+	dir := t.TempDir()
+	cf := filepath.Join(dir, "c.json")
+	body := `{"prompt":{"mode":"append","preset":"official-quick",
+		"profiles":{"cn":{"mode":"inject"}}}}`
+	if err := os.WriteFile(cf, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(cf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.PromptRules["cn"].Mode != prompt.ModeInject {
+		t.Errorf("cn mode=%q", c.PromptRules["cn"].Mode)
+	}
+	if c.PromptRules["global"].Mode != prompt.ModeAppend {
+		t.Errorf("global mode=%q", c.PromptRules["global"].Mode)
+	}
+	// 两域素材各自逐字（cn 用顶层素材，global 同）。
+	if got, want := c.PromptRules["cn"].Text, prompt.Builtin("official-quick", "cn"); got != want {
+		t.Error("cn text not verbatim")
+	}
+	wantGlobal := prompt.Builtin("official-quick", "global")
+	if c.PromptRules["global"].Mode != prompt.ModeInject {
+		wantGlobal = prompt.StripSlot(wantGlobal)
+	}
+	if got := c.PromptRules["global"].Text; got != wantGlobal {
+		t.Error("global text not verbatim")
+	}
+}
+
+// TestPromptPreviewVerbatim 预览与实际出站同口径：预览正文就是规则正文。
+func TestPromptPreviewVerbatim(t *testing.T) {
+	raw := []byte(`{"prompt":{"mode":"replace","preset":"official-quick"}}`)
+	pv, err := PreviewPromptConfig(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := prompt.StripSlot(prompt.Builtin("official-quick", "cn"))
+	if pv.CN.Chars != len([]rune(want)) {
+		t.Errorf("preview cn chars=%d want %d", pv.CN.Chars, len([]rune(want)))
+	}
+	if !pv.CN.Inherited || !pv.Global.Inherited {
+		t.Error("no per-realm override: both realms must inherit top-level")
+	}
+	// 预览正文 = 规则正文前缀（未超限时全等）。
+	if pv.CN.Truncated {
+		if !strings.HasPrefix(want, pv.CN.Text) {
+			t.Error("truncated preview must be a prefix of the preset text")
+		}
+	} else if pv.CN.Text != want {
+		t.Error("preview text must equal the preset text")
+	}
+
+	// 分域覆盖：本域不再"继承顶层"。
+	pv, err = PreviewPromptConfig([]byte(`{"prompt":{"mode":"replace","preset":"default","profiles":{"global":{"preset":"official-quick"}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pv.Global.Inherited {
+		t.Error("global with preset override must not be marked inherited")
+	}
+	if !pv.CN.Inherited {
+		t.Error("cn must inherit top-level")
+	}
+	if pv.Global.Preset != "official-quick" {
+		t.Errorf("global preview preset=%q", pv.Global.Preset)
+	}
+	if pv.CN.Preset != "default" {
+		t.Errorf("cn preview preset=%q", pv.CN.Preset)
+	}
 }

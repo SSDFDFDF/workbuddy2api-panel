@@ -19,7 +19,7 @@ const previewTextLimit = 16 << 10
 // 就是保存后生效的内容；与保存的唯一差别是不落盘、不校验配置其余字段。
 //
 // 输入形状与 config.json 的 prompt 段一致（顶层四项 + profiles），
-// 例如 {"prompt":{"mode":"after","preset":"minimal"}}。
+// 例如 {"prompt":{"mode":"after","preset":"official-quick"}}。
 type PromptPreview struct {
 	// Default/CN/Global 各域解析结果（键名即域名；default 是未知域兜底）。
 	Default PromptPreviewRule `json:"default"`
@@ -68,7 +68,7 @@ func PreviewPromptConfig(raw []byte) (*PromptPreview, error) {
 	out := &PromptPreview{
 		Warnings: draft.Warnings,
 		Presets:  prompt.Presets(),
-		Modes:    []string{prompt.ModeNone, prompt.ModeReplace, prompt.ModeAppend, prompt.ModeAfter},
+		Modes:    []string{prompt.ModeNone, prompt.ModeReplace, prompt.ModeAppend, prompt.ModeAfter, prompt.ModeInject},
 		Note:     promptPreviewNote(),
 	}
 	out.Default = previewRule(draft, "")
@@ -115,6 +115,12 @@ func previewRule(c *Config, realm string) PromptPreviewRule {
 		out.Error = err.Error()
 		return out
 	}
+	// 槽位标记永不出站：inject 把它替换为客户端正文（见 prompt.injectText），
+	// 其余模式配置期剔除（prompt.StripSlot）——预览与 buildPromptRule 同口径，
+	// 所见即出站所得。
+	if rule.Mode != prompt.ModeInject {
+		text = prompt.StripSlot(text)
+	}
 	out.Bytes = len(text)
 	out.Chars = len([]rune(text))
 	if len(text) > previewTextLimit {
@@ -130,7 +136,8 @@ func previewRule(c *Config, realm string) PromptPreviewRule {
 func promptPreviewNote() string {
 	return strings.Join([]string{
 		"素材优先级：内联正文 > 文件 > 预设",
-		"mode：replace 只留网关提示词；after 网关在前、客户端在后；append 反之",
+		"mode：replace 只留网关提示词；after 网关在前、客户端在后；append 反之；inject 把客户端 system 套官方 <user_custom_instructions> 包装后追加到正文末尾",
+		"预设是官方渲染产物逐字（无模板标记、无运行期变量），加载即使用",
 		"改提示词需重启进程生效",
 	}, "；")
 }

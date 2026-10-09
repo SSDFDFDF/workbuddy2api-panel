@@ -3,25 +3,28 @@
 // 配置形状（顶层 + 分域覆盖）：
 //
 //	"prompt": {
-//	  "mode":   "after",       // none | replace | append | after | inject（历史别名照收）
-//	  "preset": "minimal",     // default | minimal（minimal 按 realm 取中/英文；尾部自带 inject 槽位标记）
-//	  "file":   "",            // 素材：文件路径
-//	  "text":   "",            // 素材：内联正文（优先级最高）
+//	  "mode":   "after",            // none | replace | append | after | inject
+//	  "preset": "official-craft",   // 见 preset.go 注册表（官方渲染产物逐字）
+//	  "file":   "",                 // 素材：文件路径
+//	  "text":   "",                 // 素材：内联正文（优先级最高）
 //	  "profiles": {
 //	    "cn":     { "mode": "replace", "text": "…" },
-//	    "global": { "preset": "minimal" }
+//	    "global": { "preset": "official-quick" }
 //	  }
 //	}
 //
 // 两层语义刻意不同（避免"素材半继承"这类难解释的组合）：
 //
-//	mode   —— 逐项回落：realm 未设 mode 时用顶层 mode（行为开关通常两域一致）。
-//	素材   —— 整体覆盖：realm 只要显式设置了 preset/file/text 中任意一项，
-//	          该域素材就完全由自己的三项决定，不再回落顶层。
+//	mode —— 逐项回落：realm 未设时用顶层（行为开关通常两域一致）。
+//	素材 —— 整体覆盖：realm 只要显式设置了 preset/file/text 中任意一项，
+//	        该域素材就完全由自己的三项决定，不再回落顶层。
 //
-// 为什么素材不逐项回落：若顶层设了 text、realm 只设 preset=minimal，逐项回落会
-// 让 realm 实际拿到顶层的 text（minimal 被静默忽略），用户以为切换了却没有——
+// 为什么素材不逐项回落：若顶层设了 text、realm 只设 preset=official-quick，逐项回落会
+// 让 realm 实际拿到顶层的 text（preset 被静默忽略），用户以为切换了却没有——
 // 整体覆盖让"我设了素材"这件事本身就有确定含义。
+//
+// 预设正文是官方渲染产物的**逐字拷贝**，没有任何运行期占位：加载即使用，
+// 既不改写也不拼接（见 preset.go 目录说明与 prompt.Rule.EffectiveText）。
 package config
 
 import (
@@ -46,9 +49,9 @@ func (p PromptProfile) hasSource() bool {
 }
 
 // normalizePrompt 归一化 prompt 段并构建各域生效规则：
-//   - 归一 mode/preset（历史别名 + 大小写容错），非法值报错（fail fast）；
+//   - 归一 mode/preset，非法值报错（fail fast）；
 //   - 未知 realm 键告警并剔除（与 upstream.profiles 同口径，不阻断启动）；
-//   - 为 cn / global 各解析一份已定文本的规则（minimal 预设据此选语言）；
+//   - 为 cn / global 各解析一份已定文本的规则（预设据此选分域文件）；
 //   - 仅当该域 mode 需要正文时才解析素材（none 不读盘，零回归，且与
 //     "none 不加载 PromptText" 的既有约定一致）。
 func (c *Config) normalizePrompt() error {
@@ -108,7 +111,7 @@ func (c *Config) normalizePrompt() error {
 		rules[realm] = r
 	}
 	c.PromptRules = rules
-	// 历史字段：默认域文本（none 模式为空，保持既有语义）。
+	// 历史字段：默认域文本（none 模式为空）。
 	c.PromptText = def.Text
 	return nil
 }
@@ -137,31 +140,46 @@ func (c *Config) normalizePromptPreset(path string, v *string) error {
 	return nil
 }
 
-// normalizePromptMode 校验并归一 mode。只认当前取值（none/replace/append/after）；
+// normalizePromptMode 校验并归一 mode。只认当前取值（none/replace/append/after/inject）；
 // 旧取值（custom/passthrough）由 migrate.go 在读文件时一次性改名，因此走到这里
 // 仍是非法的取值就是用户手写的错值，直接报错（不静默降级）。
 func (c *Config) normalizePromptMode(v, path string) (string, error) {
 	m, ok := prompt.NormalizeMode(v)
 	if !ok {
-		return "", fmt.Errorf("%s: %q 不是合法值（none / replace / append / after）", path, v)
+		return "", fmt.Errorf("%s: %q 不是合法值（none / replace / append / after / inject）", path, v)
 	}
 	return m, nil
 }
 
 // buildPromptRule 组装某域生效规则。mode 为 none（或空）时不读盘、不解析素材——
 // 没有正文需求就没有失败面（与 TestPromptExplicitPassthrough 的既有约定一致）。
+//
+// 槽位标记（prompt.ClientSlot）按模式处置：
+//   - inject：保留标记——组合期就地在标记处写入客户端正文（见 prompt.injectText）；
+//     `default` 预设自带标记；`official-*` 与自定义素材没有标记也合法（组合期
+//     追加到正文末尾）。
+//   - 其余组合模式：标记在规则文本里剔除（prompt.StripSlot）——replace/append/after
+//     下标记字面量永不出站。
 func (c *Config) buildPromptRule(realm string, spec prompt.Spec, mode string) (prompt.Rule, error) {
-	r := prompt.Rule{Mode: mode}
+	r := prompt.Rule{Mode: mode, Source: prompt.Source(spec)}
 	if mode == prompt.ModeNone || mode == "" {
 		return r, nil
 	}
+	where := "prompt"
+	if realm != "" {
+		where = "prompt.profiles." + realm
+	}
 	text, err := prompt.Resolve(spec, prompt.NormalizeRealm(realm))
 	if err != nil {
-		where := "prompt"
-		if realm != "" {
-			where = "prompt.profiles." + realm
-		}
 		return prompt.Rule{}, fmt.Errorf("%s: %w", where, err)
+	}
+	if mode != prompt.ModeInject {
+		text = prompt.StripSlot(text)
+	} else if (spec.Text != "" || spec.File != "") && !strings.Contains(text, prompt.ClientSlot) {
+		// 用户自带素材没写槽位：合法（组合期追加到末尾），但提一句，
+		// 因为“注入位置”是靠 MD 里的标记决定的（不是代码写死的）。
+		c.addWarning(where + "：inject 素材未含槽位标记 " + prompt.ClientSlot +
+			"——客户端指令将套 <user_custom_instructions> 包装追加到正文末尾")
 	}
 	r.Text = text
 	return r, nil

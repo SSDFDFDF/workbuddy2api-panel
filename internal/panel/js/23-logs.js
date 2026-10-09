@@ -84,7 +84,8 @@ function reqMatch(e, f) {
   f = f || reqFilter;
   if (f.outcome && String(e && e.outcome || '') !== f.outcome) return false;
   if (f.q) {
-    const text = [e && e.client_ip, e && e.user_agent, e && e.model, e && e.account, e && e.request_id]
+    const text = [e && e.client_ip, e && e.user_agent, e && e.model, e && e.account, e && e.request_id,
+      e && e.prompt_preset, e && e.prompt_mode, e && e.prompt_sha256]
       .filter(Boolean).join(' ').toLowerCase();
     for (const kw of f.q.toLowerCase().split(/\s+/).filter(Boolean)) {
       if (!text.includes(kw)) return false;
@@ -190,7 +191,20 @@ function requestLogText(e) {
     credit,
     cacheRateText(e && e.cache_hit_tokens, e && e.cache_miss_tokens) === '—' ? '' : '命中 ' + cacheRateText(e && e.cache_hit_tokens, e && e.cache_miss_tokens),
     e && e.request_id || '—',
+    promptFingerprintText(e),
   ].filter(Boolean).join(' | ');
+}
+
+/* promptFingerprintText 出站提示词指纹的一行文本（无内部规则 → 空串）。
+   为什么显示它：11128/审核类问题只有两个抓手——"发了什么形状"与"正文是什么"；
+   正文在面板预览里能复现，这里给出可检索、可对比的指纹（同 sha 即同一份内容）。 */
+function promptFingerprintText(e) {
+  if (!e || !e.prompt_mode) return '';
+  const bits = ['prompt=' + e.prompt_mode];
+  if (e.prompt_preset) bits.push(e.prompt_preset);
+  if (e.prompt_chars) bits.push(e.prompt_chars + ' 字');
+  if (e.prompt_sha256) bits.push('sha ' + e.prompt_sha256);
+  return bits.join(' ');
 }
 
 /* 缓存命中率纯文本（issue #92）：requestLogText 与积分表/kpi 卡共用。

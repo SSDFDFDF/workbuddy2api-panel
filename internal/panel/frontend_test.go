@@ -1010,7 +1010,7 @@ const cfgForm = { elements: {
   prompt_file: mk(''),
   prompt_text: mk(''),
   prompt_cn_mode: mk('replace'),
-  prompt_cn_preset: mk('minimal'),
+  prompt_cn_preset: mk('official-quick'),
   prompt_cn_text: mk('CN 覆盖'),
   prompt_global_mode: mk(''),
   prompt_global_preset: mk(''),
@@ -1053,7 +1053,7 @@ process.stdout.write(JSON.stringify([
 	// [user_agent 已发, 其值, prompt.file 已发, 其值, listen 未发, checkin_hours 未发, api_key,
 	//  cn 覆盖齐发, cn.mode, cn.preset, cn.text, global 未发, 顶层 preset 未发,
 	//  顶层 text 已发（覆盖型字段：空串照发，见 CLEARABLE_CFG）]
-	const want = `[false,null,true,"",false,false,"secret",true,true,"minimal","CN 覆盖",false,false,true]`
+	const want = `[false,null,true,"",false,false,"secret",true,true,"official-quick","CN 覆盖",false,false,true]`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("collectConfig=%s want %s", strings.TrimSpace(string(out)), want)
 	}

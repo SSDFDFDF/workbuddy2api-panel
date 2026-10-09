@@ -58,7 +58,7 @@ git log --oneline <已同步基线>..upstream/main     # 列出待判定提交�
 | 1 | **转发契约（严格、不改写）** | 出站只做校验与编码：未知字段与大整数完整保留，无法表达的输入直接 400；删除系统提示词清洗、内容拦截降级重试、思考自动补档、effort 降抬档、GPT `max_tokens` 抬升、工具历史重排 | 生效（无开关） |
 | 2 | **响应统一管线** | 流式与非流式共用同一 SSE 解析与完成判定；HTTP 错误与 `error` 帧同一分类；按 choice index 独立聚合；错误帧/截断不再伪装成功；新增首模型事件/首生成/尾部阶段超时 | 生效 |
 | 3 | **重试与账号策略** | 仅「明确未受理」才换号；已生成/已提交一律不重放；限流与配额不跨账号绕过 | 生效 |
-| 4 | **系统提示词体系** | 组合位置 `none`/`replace`/`after`/`append` + 七种内置预设（`default` / `official` / `official-compact` / `official-quick` / `official-ask` / `official-plan` / `minimal`）+ 按账号域覆盖 + 面板预览；官方明文模板原件归档见 [docs/official-templates/README.md](docs/official-templates/README.md) | `none` |
+| 4 | **系统提示词体系** | 组合位置 `none`/`replace`/`after`/`append`/`inject`（inject 对全部预设可用：客户端 system 套官方 `<user_custom_instructions>` 包装追加到网关正文末尾）+ 六种内置预设（`official-craft` / `official-ask` / `official-plan` / `official-quick` / `official-expert` 为**官方渲染产物逐字**——条件已按抓包解掉、变量已字面化或删除，`official-craft` 两份与实物抓包逐行核对；`default` 为自设计位，空 preset 回落它）+ 按账号域覆盖 + 面板预览；预设是**静态 MD 加载即用**，无模板标记、无运行期变量改写；导出工具见 [scripts/render-official-presets.py](scripts/render-official-presets.py)，官方明文模板原件归档见 [docs/official-templates/README.md](docs/official-templates/README.md) | `none` |
 | 5 | **出站指纹改写层** | 改写 user/assistant/tool/推理/工具入参里的已知指纹串（内置 7 类 + 自定义规则） | `false` |
 | 6 | **分域身份与 UA** | 按 `realm × 用途` 生成版本、产品名、Origin、语言与 UA；不随代理域名变化 | CN `5.7.6`/Global `5.6.2` |
 | 7 | **缓存键** | `prompt_cache_key` 改 HMAC 派生（持久化 secret）；无显式会话则不生成 | 生效 |
@@ -69,7 +69,7 @@ git log --oneline <已同步基线>..upstream/main     # 列出待判定提交�
 | 12 | **裸模型名默认域** | `model_default_realm = cn / global / auto(:cn,global) / auto:global,cn` | `cn` |
 | 13 | **客户端特征对齐** | 稳定设备/会话指纹、硬件特征离散化、`/v2/report` 桌面指纹、版本自检 | 启用 |
 | 14 | **面板版本配置** | 占位符来自后端内置基线（不硬编码）；「一键填入已拉取版本」；CLI 版本需人工核对 | 生效 |
-| 15 | **Responses / Anthropic 桥接** | `/v1/responses` 无状态文本 / function tools；`/v1/messages` 文本 / client tools。复用原有执行、重试、用量与日志；跨协议未知字段拒绝，原生 Chat 保留扩展。见 [兼容说明](README.md#protocol-compatibility) | 生效（限定子集） |
+| 15 | **Responses / Anthropic 桥接** | `/v1/responses` 无状态文本 / function tools；`/v1/messages` 文本 / client tools。复用原有执行、重试、用量与日志；跨协议未知字段拒绝，原生 Chat 保留扩展。见 [兼容说明](docs/PROTOCOL_COMPATIBILITY.md) | 生效（限定子集） |
 
 ---
 

@@ -18,6 +18,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/redisstore"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/scrub"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
@@ -1764,5 +1765,120 @@ func TestFingerprintRewriteEndToEnd(t *testing.T) {
 	}
 	if strings.Contains(both, "11128") {
 		t.Errorf("自定义规则不应顶掉内置层: %s", both)
+	}
+}
+
+// TestPromptTextVerbatimOnWire 出站链路上正文逐字：无任何运行期改写
+// （预设是官方渲染产物，首行就是官方当时的取值）。
+func TestPromptTextVerbatimOnWire(t *testing.T) {
+	text := "This conversation is powered by 快速\n\n<content_policy>x</content_policy>"
+	msgs := promptModeHarness(t, Config{
+		PromptRules: map[string]prompt.Rule{
+			"": {Mode: prompt.ModeReplace, Text: text},
+		},
+	}, promptModeBody)
+	if got := msgs[0]["content"].(string); got != text {
+		t.Fatalf("system text must be verbatim:\nwant %q\ngot  %q", text, got)
+	}
+}
+
+// TestPromptInjectOnWire inject 出站：单条 system，正文逐字在前、
+// 客户端规则进官方包装块（末尾）。
+func TestPromptInjectOnWire(t *testing.T) {
+	text := "This conversation is powered by 快速\n\n<content_policy>x</content_policy>"
+	msgs := promptModeHarness(t, Config{
+		PromptRules: map[string]prompt.Rule{
+			"": {Mode: prompt.ModeInject, Text: text},
+		},
+	}, promptModeBody)
+	if len(msgs) != 2 {
+		t.Fatalf("inject 应合成单条 system + user，got %d: %v", len(msgs), msgs)
+	}
+	content, _ := msgs[0]["content"].(string)
+	if !strings.HasPrefix(content, text+"\n") {
+		t.Errorf("正文必须逐字前置:\n%s", content)
+	}
+	for _, want := range []string{
+		"<user_custom_instructions>",
+		"CLIENT-SYSTEM", "CLIENT-DEV",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("missing %q:\n%s", want, content)
+		}
+	}
+	if strings.Index(content, text) > strings.Index(content, "<user_custom_instructions>") {
+		t.Error("包装块必须在正文之后")
+	}
+	if msgs[1]["content"] != "hi" {
+		t.Errorf("user 消息被改动: %v", msgs[1])
+	}
+}
+
+// TestPromptFingerprintHelpers 指纹取值口径（首行提取 + sha 截断）。
+func TestPromptFingerprintHelpers(t *testing.T) {
+	text := "This conversation is powered by 快速\nbody"
+	if got := prompt.FirstLineValue(text); got != "快速" {
+		t.Errorf("FirstLineValue=%q", got)
+	}
+	if got := prompt.FirstLineValue("no first line"); got != "" {
+		t.Errorf("non-official first line must yield empty, got %q", got)
+	}
+	a, b := prompt.TextSHA("x"), prompt.TextSHA("x")
+	if a == "" || a != b || len(a) != 12 {
+		t.Errorf("TextSHA unstable: %q %q", a, b)
+	}
+	if prompt.TextSHA("x") == prompt.TextSHA("y") {
+		t.Error("different text must have different sha")
+	}
+	if prompt.TextSHA("") != "" {
+		t.Error("empty text must yield empty sha")
+	}
+}
+
+// TestPromptFingerprintRecorded 出站提示词指纹随请求入账（真实跑通出站链路）：
+// 组合生效时 mode/来源/sha/字符数齐备且自洽；none 时全部留空。
+func TestPromptFingerprintRecorded(t *testing.T) {
+	text := "This conversation is powered by 快速\n\n<content_policy>x</content_policy>"
+	rec := reqlog.New(reqlog.Config{}) // 仅内存指标（无归档目录）
+	cfg := Config{
+		RequestLog: rec,
+		PromptRules: map[string]prompt.Rule{
+			"": {Mode: prompt.ModeReplace, Text: text, Source: "official-craft"},
+		},
+	}
+	promptModeHarness(t, cfg, promptModeBody)
+
+	snap := rec.Snapshot()
+	if len(snap.Recent) == 0 {
+		t.Fatal("no request recorded")
+	}
+	e := snap.Recent[len(snap.Recent)-1]
+	if e.PromptMode != prompt.ModeReplace {
+		t.Errorf("prompt_mode=%q want replace", e.PromptMode)
+	}
+	if e.PromptPreset != "official-craft" {
+		t.Errorf("prompt_preset=%q want official-craft", e.PromptPreset)
+	}
+	if e.PromptSHA != prompt.TextSHA(text) {
+		t.Errorf("prompt_sha256=%q does not match the text", e.PromptSHA)
+	}
+	if e.PromptChars == 0 || e.PromptChars != len([]rune(text)) {
+		t.Errorf("prompt_chars=%d want %d", e.PromptChars, len([]rune(text)))
+	}
+
+	// none：不改写 → 指纹留空（不制造"以为注入了"的假象）。
+	rec2 := reqlog.New(reqlog.Config{})
+	promptModeHarness(t, Config{
+		RequestLog:  rec2,
+		PromptRules: map[string]prompt.Rule{"": {Mode: prompt.ModeNone, Text: text}},
+	}, promptModeBody)
+	e2 := rec2.Snapshot().Recent
+	if len(e2) == 0 {
+		t.Fatal("no request recorded (none mode)")
+	}
+	last := e2[len(e2)-1]
+	if last.PromptMode != "" || last.PromptSHA != "" || last.PromptChars != 0 {
+		t.Errorf("none mode must not record a fingerprint: mode=%q sha=%q chars=%d",
+			last.PromptMode, last.PromptSHA, last.PromptChars)
 	}
 }

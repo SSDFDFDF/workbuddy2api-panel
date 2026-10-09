@@ -1,5 +1,6 @@
 {
-  "config_version": 3,  "listen": ":7863",
+  "config_version": 3,
+  "listen": ":7863",
   "api_key": "test_key",
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
@@ -23,12 +24,26 @@
     "soft_rate_max": "2h"
   },
   "schedule": {
-    "checkin_hours": [9, 21],
-    "growth_hours": [1],
-    "travel_hours": [9, 21],
-    "activity_hours": [10],
-    "keepalive_hours": [22],
-    "blackcat_hours": [23],
+    "checkin_hours": [
+      9,
+      21
+    ],
+    "growth_hours": [
+      1
+    ],
+    "travel_hours": [
+      9,
+      21
+    ],
+    "activity_hours": [
+      10
+    ],
+    "keepalive_hours": [
+      22
+    ],
+    "blackcat_hours": [
+      23
+    ],
     "checkin_enabled": true,
     "growth_enabled": true,
     "travel_enabled": true,
@@ -61,8 +76,14 @@
     "tail_seconds": 10,
     "chat_base_cn": "https://www.workbuddy.cn",
     "profiles": {
-      "cn": {"client_version": "5.7.6", "cli_version": "2.156.0"},
-      "global": {"client_version": "5.6.2", "cli_version": "2.147.0"}
+      "cn": {
+        "client_version": "5.7.6",
+        "cli_version": "2.156.0"
+      },
+      "global": {
+        "client_version": "5.6.2",
+        "cli_version": "2.147.0"
+      }
     },
     "client_name": "",
     "device_token": "",
@@ -70,7 +91,7 @@
     "passthrough_ip": false
   },
   "prompt": {
-    "mode": "none",
+    "mode": "inject",
     "preset": "default",
     "file": "",
     "text": "",

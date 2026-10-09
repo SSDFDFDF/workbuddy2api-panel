@@ -2,8 +2,8 @@
 //
 // 背景：客户端（Claude Code/Codex 等 CLI）在 system prompt 注入固定模板句，
 // 上游内容审核按逐字精确匹配误杀合法流量（issue #36/PR39 的 11128）。
-// 方案：网关在出站前对 system/developer 消息做一次组合（替换 / 前置追加 / 后置组合），
-// 从源头消灭 system 来源的指纹误报。
+// 方案：网关在出站前对 system/developer 消息做一次组合（替换 / 前置追加 / 后置组合 /
+// 槽位合并），从源头消灭 system 来源的指纹误报。
 //
 // 素材优先级（见 Resolve）：内联 text > file > preset（按 realm 取正文）。
 // 预设库与分域文件命名见 preset.go（presets/<name>[.<realm>].md）。
@@ -20,7 +20,8 @@ import (
 
 // 组合位置（config prompt.mode / prompt.profiles.<realm>.mode 取值）。
 const (
-	// ModeNone 不改写请求体（透传客户端原始 system）。
+	// ModeNone **显式**透传：不改写请求体（原样保留客户端 system/developer）。
+	// 注意它不再是缺省值——空串现在归 ModeInject（见 NormalizeMode）。
 	ModeNone = "none"
 	// ModeReplace 删除全部 system/developer，只留网关提示词（指纹面最小）。
 	ModeReplace = "replace"
@@ -29,31 +30,60 @@ const (
 	// ModeAfter 网关提示词置首，客户端开头连续 system/developer 块紧随其后（后组合）。
 	// 与 ModeAppend 互为镜像：两者都逐字保留客户端内容，只差先后顺序。
 	ModeAfter = "after"
+	// ModeInject 包装合并：客户端开头连续 system/developer 块的正文套官方
+	// <user_custom_instructions> 包装（clientInstructionsShell），追加到网关正文末尾，
+	// 原开头块移除，单条 system 出站。客户端规则由此进入官方"用户自定义指令"位：
+	// 模型按官方语义 MUST follow，唯一压得住它的是 <content_policy> 护栏
+	// （官方包装语 "unless they conflict with safety rules"）。
+	ModeInject = "inject"
 )
 
 // 内置预设名（config prompt.preset / prompt.profiles.<realm>.preset 取值）。
+// 全部为**官方渲染产物逐字**：条件已按抓包实证解掉、变量已删除，无模板标记。
 // 完整清单与说明见 preset.go 的 presetCatalog（Presets() 对面板输出）。
 const (
-	// PresetDefault 官方默认：抓包首屏前缀（presets/default.<realm>.md，官方逐字）。
+	// PresetDefault 自设计位（**待设计**）：当前内容是抓包首屏前缀（身份 + 能力 + 护栏 +
+	// 区域/语言段），仅作占位；正文由维护者自行重写，不要求与官方逐字。
+	// 它是空 preset 的回落值，因此改动它等于改动"未配置时发什么"。
 	PresetDefault = "default"
-	// PresetMinimal 官方最小：仅官方 content_policy 护栏 + 语言段（presets/minimal.<realm>.md）。
-	PresetMinimal = "minimal"
-	// PresetOfficial 官方骨架：实机抓包 craft 模式 26 模块的全量形态（presets/official.<realm>.md）。
-	PresetOfficial = "official"
-	// PresetOfficialCompact 官方骨架缩略版（presets/official-compact.<realm>.md）。
-	PresetOfficialCompact = "official-compact"
-	// PresetOfficialQuick 官方 Quick 模式：无工具纯问答（presets/official-quick.<realm>.md）。
-	PresetOfficialQuick = "official-quick"
-	// PresetOfficialAsk 官方 Ask 模式：只读分析与问答（presets/official-ask.<realm>.md）。
+	// PresetOfficialCraft 官方 craft（默认）：5.6.2/5.7.6 实物抓包逐字。
+	PresetOfficialCraft = "official-craft"
+	// PresetOfficialAsk 官方 Ask 模式：只读分析与问答。
 	PresetOfficialAsk = "official-ask"
-	// PresetOfficialPlan 官方 Plan 模式：计划先行、逐步验证（presets/official-plan.<realm>.md）。
+	// PresetOfficialPlan 官方 Plan 模式：计划先行、逐步验证。
 	PresetOfficialPlan = "official-plan"
+	// PresetOfficialQuick 官方 Quick 模式：无工具纯问答（官方本体仅 2.3KB）。
+	PresetOfficialQuick = "official-quick"
+	// PresetOfficialExpert 官方 Expert 模式：专家人格由客户端 PluginAgentPrompt 槽注入。
+	PresetOfficialExpert = "official-expert"
 )
+
+// ClientSlot 客户端 system 的注入锚点。
+//
+// 预设正文里出现这个标记时，inject 把客户端开头 system/developer 块的正文套官方
+// <user_custom_instructions> 包装、**就地在标记处**写入；标记不存在则追加到正文末尾。
+// 非 inject 模式一律剔除标记（StripSlot）——标记字面量永不出站。
+//
+// 内置 `default` 预设与 `official-*` 预设均可按需携带本标记（显式指定注入位置）；
+// 未含标记时则默认追加到正文末尾。
+const ClientSlot = "{{client_system}}"
+
+// clientInstructionsShell 客户端正文的官方包装，逐字取自官方客户端
+// user-context-identity.tpl 的 <user_custom_instructions> 块（cn/global 两域一致）。
+// "MUST follow ... unless they conflict with safety rules" 是官方对用户自定义指令
+// 的优先级声明：唯一压得住它的是 <content_policy> 护栏，其余官方样板皆居其下。
+//
+// 仅供 ModeInject 使用（见 ClientSlot / injectText）。
+const clientInstructionsShell = `<user_custom_instructions>
+The user has provided the following custom instructions. You MUST follow them in all responses unless they conflict with safety rules.
+
+%s
+</user_custom_instructions>`
 
 // Spec 一段提示词的来源声明（未解析）。三个字段按优先级取用：Text > File > Preset。
 // 零值合法：全部为空时 Resolve 回落 PresetDefault。
 type Spec struct {
-	Preset string // "" | default | minimal
+	Preset string // "" | 内置预设名（见 presetCatalog）
 	File   string // 文件路径（非空且不可读 → Resolve 报错，调用方 fail fast）
 	Text   string // 内联正文（非空优先，不再读盘）
 }
@@ -62,21 +92,33 @@ type Spec struct {
 type Rule struct {
 	Mode string `json:"mode"`
 	Text string `json:"text"`
+	// Source 素材来源标签（预设名 / "inline" / "file"），仅用于观测与面板显示，
+	// 不参与组合。由配置层在构建规则时给出（见 config.buildPromptRule）。
+	Source string `json:"source,omitempty"`
 }
 
-// NormalizeMode 归一化组合位置：小写去空白。只认 none/replace/append/after；
-// 空串视为 none（零值即不缺省改写）。旧取值（custom/passthrough/...）刻意不兼容：
-// 它们会直接报错，由用户显式改成新名——避免“配了 custom 却没有生效”这类静默降级。
+// EffectiveText 返回本次出站实际使用的正文。
+//
+// 预设是官方渲染产物的逐字拷贝，正文里**没有任何运行期变量**（首行模型名在
+// official-craft 里就是官方自己在那次会话里的取值），因此这里只做一件事：
+// 原样返回。保留此方法是为了让调用点语义清晰、便于日后需要时再引入加工。
+func (r Rule) EffectiveText() string { return r.Text }
+
+// NormalizeMode 归一化组合位置：小写去空白。只认 none/replace/append/after/inject。
+//
+// **空串 = inject**（缺省行为）：网关默认把客户端 system 套官方
+// <user_custom_instructions> 包装并入网关正文（见 ModeInject），因为“不动客户端
+// 指令”会让第三方 CLI 的指纹原样上流——那正是 11128 的成因。要回到逐字透传，
+// 显式配 prompt.mode="none"。
+//
+// 旧取值（custom/passthrough/...）刻意不兼容：它们会直接报错，由用户显式改成新名——
+// 避免“配了 custom 却没有生效”这类静默降级。
 func NormalizeMode(v string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "", ModeNone:
-		return ModeNone, true
-	case ModeReplace:
-		return ModeReplace, true
-	case ModeAppend:
-		return ModeAppend, true
-	case ModeAfter:
-		return ModeAfter, true
+	case "":
+		return ModeInject, true
+	case ModeNone, ModeReplace, ModeAppend, ModeAfter, ModeInject:
+		return strings.ToLower(strings.TrimSpace(v)), true
 	default:
 		return "", false
 	}
@@ -111,7 +153,7 @@ func Builtin(preset, realm string) string {
 }
 
 // DefaultText 返回默认预设的 CN 正文——供测试与“未配置时用哪份”
-// 这类断言使用，避免测试硬编码正文长度。default 已分域，global 侧请用 Builtin(PresetDefault, "global")。
+// 这类断言使用，避免测试硬编码正文长度。
 func DefaultText() string { return Builtin(PresetDefault, "cn") }
 
 // NormalizeRealm 归一化 realm 键：只认 cn / global，其余（含空）归 cn。
@@ -123,7 +165,7 @@ func NormalizeRealm(realm string) string {
 }
 
 // Resolve 解析提示词正文。优先级：Text > File > 内置预设（默认 defaultpreset）。
-// realm 决定 minimal 预设的语言与自定义文件的默认语义（不参与路径拼接）。
+// realm 决定分域预设取哪份正文（cn / global），不参与自定义文件的路径拼接。
 // File 非空但不可读 → 报错（调用方 fail fast，不静默回落）。
 func Resolve(s Spec, realm string) (string, error) {
 	if s.Text != "" {
@@ -160,6 +202,7 @@ func Source(s Spec) string {
 //   - ModeReplace → Rewrite（删全部 system/developer，只留网关提示词）；
 //   - ModeAppend  → Append（客户端开头块在前，网关提示词其后）；
 //   - ModeAfter   → ComposeAfter（网关提示词在前，客户端开头块其后）；
+//   - ModeInject  → 客户端开头块正文并入网关正文槽位（素材无槽位则追加末尾），单条 system 出站；
 //   - 其它（含 none）或 systemPrompt 空 → 原样返回。
 //
 // 所有分支均为"绝不失败"：坏 JSON / 空 body → 原样返回。
@@ -196,11 +239,13 @@ func composeBytes(body []byte, systemPrompt, mode string) []byte {
 	return out
 }
 
-// composeObject 三条组合规则的共用实现（就地修改 obj）。
+// composeObject 三条组合规则 + 槽位合并的共用实现（就地修改 obj）。
 //
 //   - ModeReplace：删全部 system/developer，网关提示词置于首位；
 //   - ModeAppend ：[客户端开头 system 块] [网关] [其余]；
-//   - ModeAfter  ：[网关] [客户端开头 system 块] [其余]。
+//   - ModeAfter  ：[网关] [客户端开头 system 块] [其余]；
+//   - ModeInject ：客户端开头块正文并入网关正文槽位（见 injectText）；素材无槽位时
+//     包装块追加正文末尾。出站形态为单条 system + [其余]。
 //
 // "开头连续块"只认 messages 头部连续的 system/developer，遇第一条其它角色即停；
 // 中途的 system 消息位置不变、不重排（避免扰动 tool 结果与文本的相邻性）。
@@ -209,14 +254,20 @@ func composeObject(obj map[string]any, systemPrompt, mode string) bool {
 		return false
 	}
 	switch mode {
-	case ModeReplace, ModeAppend, ModeAfter:
+	case ModeReplace, ModeAppend, ModeAfter, ModeInject:
 	default:
 		return false // none / 未知：不改写
 	}
 	msgs, ok := obj["messages"].([]any)
 	if !ok {
 		// 无 messages 字段或类型不符 → 插入单条 system 后原样保留其余字段。
-		obj["messages"] = []any{systemMessage(systemPrompt)}
+		text := systemPrompt
+		if mode == ModeInject {
+			// 无客户端块可并入：槽位整体移除（官方该块本就是条件渲染，
+			// 无用户指令时不出块，不发出空包装语）。
+			text = injectText(systemPrompt, "")
+		}
+		obj["messages"] = []any{systemMessage(text)}
 		return true
 	}
 	// 开头连续 system/developer 块长度（ModeReplace 不需要，但计算成本可忽略）。
@@ -257,12 +308,86 @@ func composeObject(obj map[string]any, systemPrompt, mode string) bool {
 		out = append(out, msgs[:prefix]...)
 		out = append(out, msgs[prefix:]...)
 		obj["messages"] = out
+	case ModeInject:
+		// 客户端开头块正文并入槽位后成为首条 system；原开头块移除
+		// （内容已在包装内逐字保留，与 replace 的差别即"不丢客户端规则"）。
+		client := clientSystemText(msgs, prefix)
+		obj["messages"] = append([]any{systemMessage(injectText(systemPrompt, client))}, msgs[prefix:]...)
 	}
 	return true
 }
 
 func systemMessage(text string) map[string]any {
 	return map[string]any{"role": "system", "content": text}
+}
+
+// clientSystemText 提取 messages 前 n 条（开头连续 system/developer 块）的正文。
+// content 兼容 string 与 parts 数组两种形态（parts 取各段 text，跳过非文本段）；
+// 多块/多段之间以空行连接。任何形态解析不出正文都不报错（组合绝不失败）。
+func clientSystemText(msgs []any, n int) string {
+	var b strings.Builder
+	for i := 0; i < n && i < len(msgs); i++ {
+		mm, ok := msgs[i].(map[string]any)
+		if !ok {
+			continue
+		}
+		switch c := mm["content"].(type) {
+		case string:
+			if c != "" {
+				if b.Len() > 0 {
+					b.WriteString("\n\n")
+				}
+				b.WriteString(c)
+			}
+		case []any:
+			for _, p := range c {
+				pm, ok := p.(map[string]any)
+				if !ok {
+					continue
+				}
+				if t, _ := pm["text"].(string); t != "" {
+					if b.Len() > 0 {
+						b.WriteString("\n\n")
+					}
+					b.WriteString(t)
+				}
+			}
+		}
+	}
+	return b.String()
+}
+
+// StripSlot 剔除正文中的槽位标记（非 inject 模式用）：标记行连同前导空行一起
+// 删，不残留悬挂空行；标记不存在 → 原样返回。配置期（buildPromptRule）与
+// 预览期（previewRule）对 replace/append/after 均已剔除，因此 `default`
+// 预设里的标记不会在那些模式下泄漏到出站正文。
+func StripSlot(text string) string {
+	if !strings.Contains(text, ClientSlot) {
+		return text
+	}
+	text = strings.Replace(text, "\n\n"+ClientSlot, "", 1)
+	text = strings.Replace(text, "\n"+ClientSlot, "", 1)
+	return strings.Replace(text, ClientSlot, "", 1)
+}
+
+// injectText 把客户端正文并入网关正文：
+//   - 素材自带槽位（`default` 预设）→ **就地在槽位处**写入包装块；客户端无正文时
+//     槽位整体移除（官方该块本就是条件渲染，不发出空包装语）；
+//   - 素材无槽位（`official-*` / 自定义素材）→ 包装块追加到正文末尾。
+//
+// 两种落点都保持“已有的首行不动、结尾恰好一个换行”的约定。
+func injectText(gatewayText, clientText string) string {
+	if strings.Contains(gatewayText, ClientSlot) {
+		if clientText == "" {
+			return strings.TrimRight(StripSlot(gatewayText), "\n") + "\n"
+		}
+		return strings.Replace(gatewayText, ClientSlot, fmt.Sprintf(clientInstructionsShell, clientText), 1)
+	}
+	text := strings.TrimRight(gatewayText, "\n")
+	if clientText == "" {
+		return text + "\n"
+	}
+	return text + "\n\n" + fmt.Sprintf(clientInstructionsShell, clientText) + "\n"
 }
 
 // Rewrite 解析 OpenAI 请求体并替换系统提示词：

@@ -769,7 +769,8 @@
               <div class="modemap" id="modeMap" aria-live="polite"></div>
               <label class="fld"><span class="lb">组合位置</span>
                 <select name="prompt_mode" id="promptMode">
-                  <option value="none">none — 不改写客户端指令（默认）</option>
+                  <option value="inject">inject — 客户端指令并入网关正文（默认）</option>
+                  <option value="none">none — 不改写客户端指令（透传）</option>
                   <option value="replace">replace — 只留网关提示词（指纹面最小）</option>
                   <option value="after">after — 网关在前 + 客户端在后（后组合）</option>
                   <option value="append">append — 客户端在前 + 网关在后</option>
@@ -808,6 +809,7 @@
                     <option value="replace">replace</option>
                     <option value="after">after</option>
                     <option value="append">append</option>
+                    <option value="inject">inject</option>
                   </select></label>
                 <label class="fld"><span class="lb">Global 账号 · 组合位置</span>
                   <select name="prompt_global_mode">
@@ -816,6 +818,7 @@
                     <option value="replace">replace</option>
                     <option value="after">after</option>
                     <option value="append">append</option>
+                    <option value="inject">inject</option>
                   </select></label>
               </div>
               <div class="grid2">
@@ -838,7 +841,7 @@
             </div>
 
             <div class="grp">
-              <div class="gh"><span class="n">4</span><span class="t">预览生效正文</span>
+              <div class="gh"><span class="n">5</span><span class="t">预览生效正文</span>
                 <span class="grow"></span>
                 <button type="button" id="btnPromptPreview">立即预览</button></div>
               <div class="hint" id="promptPreviewHint" style="margin-bottom:10px">保存前先看 CN / Global 实际会发出去的内容、来源与字数。</div>

@@ -17,6 +17,7 @@ import (
 
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/config/runtime"
@@ -139,7 +140,7 @@ func (h *Handler) promptRuleFor(realm string) (prompt.Rule, bool) {
 		return prompt.Rule{}, false
 	}
 	switch r.Mode {
-	case prompt.ModeReplace, prompt.ModeAppend, prompt.ModeAfter:
+	case prompt.ModeReplace, prompt.ModeAppend, prompt.ModeAfter, prompt.ModeInject:
 	default:
 		return prompt.Rule{}, false // none / 空 / 未知：不改写
 	}
@@ -191,7 +192,7 @@ func NewHandler(cfg Config) *Handler {
 		cfg.RefreshSkew = 10 * time.Minute
 	}
 	if cfg.PromptMode == "" {
-		cfg.PromptMode = prompt.ModeNone
+		cfg.PromptMode = prompt.ModeInject
 	}
 	// 兼容：只给了历史字段（PromptMode/PromptText）时合成单规则映射，
 	// 让热路径只有一个查表分支（测试与裸用路径零改动）。
@@ -951,11 +952,20 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 		// 系统提示词组合：按实际选中账号所属域应用（同一网关对 CN 与 Global 可配不同规则）。
 		// 组合在**深拷贝**上进行（baseObj 在整个轮转循环里只读），避免一次「字节解析 +
 		// 重新序列化」的往返；未启用规则时零拷贝直接复用基线对象。
+		//
+		// 正文是官方渲染产物的逐字拷贝（无运行期变量），直接取用即可。
 		attemptObj := baseObj
 		attemptRaw := sentinelRaw
 		if rule, ok := h.promptRuleFor(acct.Realm()); ok {
 			attemptObj = jsondoc.CopyObject(baseObj)
-			prompt.ComposeObject(attemptObj, rule.Text, rule.Mode)
+			text := rule.EffectiveText()
+			prompt.ComposeObject(attemptObj, text, rule.Mode)
+			// 出站提示词指纹（仅内部规则生效时）：11128 复盘要能回答"这次发出去的是什么形状"。
+			// 正文不入档（体积/隐私），但指纹可复现——同 mode/source/sha256 即同一份内容。
+			st.promptMode = rule.Mode
+			st.promptPreset = rule.Source
+			st.promptSHA = prompt.TextSHA(text)
+			st.promptChars = utf8.RuneCountInString(text)
 			// 组合后的文档与入站字节不同源：哨兵预检不再适用于本对象（见上）。
 			attemptRaw = nil
 		}

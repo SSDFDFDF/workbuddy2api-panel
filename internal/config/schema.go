@@ -230,18 +230,21 @@ type Config struct {
 	} `json:"upstream"`
 
 	Prompt struct {
-		// Mode 组合位置（默认 none = 不改写，零回归）：
+		// Mode 组合位置（**默认 inject**）：
 		//
-		//	none    透传客户端原始 system/developer（不改一个字节）
+		//	inject  客户端 system 套官方 <user_custom_instructions> 包装并入网关正文
+		//	        （缺省；保留客户端规则，同时不让第三方 CLI 指纹原样上流）
+		//	none    显式透传：不改写客户端 system/developer（需手动选）
 		//	replace 删除全部 system/developer，只留网关提示词（指纹面最小）
 		//	append  客户端开头 system/developer 块之后插网关提示词（客户端在前）
 		//	after   网关提示词置首，客户端开头块紧随其后（后组合，客户端内容不丢）
 		//
-		// 历史别名照收（custom→replace、passthrough→none）。
+		// 空串 = inject（不是 none）。历史别名照收（custom→replace、passthrough→none）。
 		Mode string `json:"mode"`
-		// Preset 内置预设：default（defaultprompt.md，约 2 KB，分域共用）/
-		// minimal（按 realm 取 minimal_cn / minimal_global，约 10 行，量级对齐
-		// 官方 Quick 模式模板）。空 = default。
+		// Preset 内置预设名（面板下拉由 prompt.Presets() 生成，前端不硬编码）：
+		// official-craft / official-ask / official-plan / official-quick / official-expert，
+		// 分域取 <name>.<realm>.md（缺失回落 <name>.md）。
+		// 空 = official-craft。预设正文是**官方渲染产物逐字**（无模板标记、无变量）。
 		Preset string `json:"preset"`
 		// File 提示词文件路径；非空且不可读 → 启动/保存报错（fail fast）。
 		// 优先级低于 Text、高于 Preset。
@@ -249,9 +252,9 @@ type Config struct {
 		// Text 内联提示词正文（面板可直编）。非空优先于 File/Preset——
 		// “直接把内容写进配置”的入口，无需额外落盘文件。
 		Text string `json:"text"`
-		// Profiles 按账号域覆盖上列四项（键：cn / global）。未设置的字段
-		// 逐项回落到顶层（含 mode 本身）；顶层未设 → 内置缺省。
-		// 用于“同一网关同时对 CN 与 Global 账号使用不同提示词”。
+		// Profiles 按账号域覆盖上列各项（键：cn / global）。mode 逐项回落到顶层；
+		// 素材（preset/file/text）为整体覆盖（任一非空则本域完全
+		// 用自己那三项）。用于“同一网关同时对 CN 与 Global 账号使用不同提示词”。
 		Profiles map[string]PromptProfile `json:"profiles"`
 	} `json:"prompt"`
 

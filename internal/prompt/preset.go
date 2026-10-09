@@ -2,20 +2,28 @@
 //
 // 目录约定（`presets/`）：
 //
-//	<name>.md           分域共用（当前仅保留给未来的中性预设）
+//	<name>.md           分域共用（保留给未来的中性预设）
 //	<name>.<realm>.md   分域文件（cn / global），缺失的 realm 回落共用文件
 //
-// 当前库内所有预设都是分域文件（cn + global）：CN 与 Global 不是翻译关系，
-// 而是发布分支差异（产品名 / 数据目录 / 区域段 / 语言段），因此必须两份。
+// 库内预设都是分域文件（cn + global）：CN 与 Global 不是翻译关系，而是发布分支差异
+// （产品名 / 数据目录 / 区域段 / 语言段），必须两份。
 //
-// 新增预设只需放文件 + 在 catalog 里登记一行，面板会自动列出（列表由
-// Presets() 生成，前端不硬编码）。
+// # 预设口径：官方渲染产物的逐字拷贝
 //
-// 素材来源：官方 Windows 安装包里的明文 Nunjucks 模板（`resources/templates/*.tpl`、
-// `resources/plugins/workbuddy-builtin/{welcomemode,interactionmode,prompt-common}/**`）。
-// 原件归档、变量表、两阶段装配管线与重新导出方法见 `docs/official-templates/README.md`
-// （注意 `docs/` 被 .gitignore 忽略，属于本地参考资料）。本目录的预设是**从抓包渲染产物
-// 蒸馏的网关闭环正文**，不是模板原件的复制。
+// 每个预设是一份**静态 MD 正文**：直接 `go:embed` 读文件，**不做任何运行期渲染**。
+// 内容源自官方安装包里的明文 Nunjucks 模板与实物抓包，但落到本目录时已经：
+//
+//   - 条件已解（`{% if %}` 按实物抓包取值内联，仅保留命中分支的原文）；
+//   - 变量已删/已字面化（域常量 productName / dataFolderName / ResponseLanguage
+//     写成字面值；客户端本地变量如 BinaryContext / WorkbuddyMemoryDir 所在整段删除）；
+//   - 无 `{{ }}`、无 `{% %}`、无绝对路径、无机器名。
+//
+// 因此阅读本目录不需要理解官方的两阶段装配管线：官方跑完那套机器后
+// 得到什么字节，这里就是什么字节。导出方式见
+// `scripts/render-official-presets.py`（构建期工具，不参与编译）。
+//
+// craft 两份是**逐字节校验过**的：`--verify` 与实物抓包对比，差异仅限上方
+// 列出的两类故意删除；ask/plan/quick/expert 无实物抓包，来自模板渲染。
 package prompt
 
 import (
@@ -45,50 +53,47 @@ type PresetInfo struct {
 }
 
 // presetCatalog 预设注册表（顺序即面板展示顺序）。
+//
+// `default` 是**自设计位**（不要求官方逐字，正文待维护者重写）；
+// `official-*` 是官方渲染产物逐字（详见 prompt.go 的预设名常量）。
 var presetCatalog = []struct {
 	name, label, desc string
 	realms            []string
 }{
 	{
 		name:   PresetDefault,
-		label:  "官方默认",
-		desc:   "全文官方英文原文（CN 5.8K / Global 5.5K 字符）：抓包首屏前缀——身份 + 能力介绍 + 完整官方 content_policy + personal_files_safety + 区域与语言段",
+		label:  "默认（自设计）",
+		desc:   "空 preset 的回落值；正文由维护者自行设计（当前为抓包首屏前缀占位）",
 		realms: []string{"cn", "global"},
 	},
 	{
-		name:   PresetOfficial,
-		label:  "官方骨架",
-		desc:   "全文官方英文原文（CN 9.4K / Global 9.0K 字符）：实机抓包 26 模块形态，仅换产品名/数据目录/区域/语言等域差异",
-		realms: []string{"cn", "global"},
-	},
-	{
-		name:   PresetOfficialCompact,
-		label:  "官方精简",
-		desc:   "全文官方英文原文（CN/Global 1.6K 字符）：完整官方 content_policy + 身份 + 工具纪律，省略其余模块",
-		realms: []string{"cn", "global"},
-	},
-	{
-		name:   PresetOfficialQuick,
-		label:  "官方快速",
-		desc:   "全文官方英文原文（CN 2.4K / Global 2.6K 字符）：无工具纯问答，对应官方 Quick 模式模板",
+		name:   PresetOfficialCraft,
+		label:  "官方 Craft",
+		desc:   "官方 craft 模式渲染产物逐字（实物抓包校验）：身份 + 能力 + 全部 26 模块 + 护栏；免封信号最强",
 		realms: []string{"cn", "global"},
 	},
 	{
 		name:   PresetOfficialAsk,
-		label:  "官方只读",
-		desc:   "全文官方英文原文（CN 5.8K / Global 5.5K 字符）：只读分析与问答，不落盘、不执行；对应官方 Ask 模式片段",
+		label:  "官方 Ask",
+		desc:   "官方 ask 模式逐字：只读模式说明 + 只读工具契约（无写作/执行块；护栏同 craft，因为路径 B 的 content_policy 不分模式）",
 		realms: []string{"cn", "global"},
 	},
 	{
 		name:   PresetOfficialPlan,
-		label:  "官方计划",
-		desc:   "全文官方英文原文（CN 7.2K / Global 6.9K 字符）：计划先行、逐步验证；对应官方 Plan 模式片段",
+		label:  "官方 Plan",
+		desc:   "官方 plan 模式逐字：计划先行 + 逐步验证，任务管理段强度高于 craft",
 		realms: []string{"cn", "global"},
 	},
 	{
-		name:   PresetMinimal,
-		label:  "官方最小",
-		desc:   "全文官方英文原文（CN 1.2K / Global 1.4K 字符）：只留官方 content_policy 护栏 + 语言段，Token 开销最低",
+		name:   PresetOfficialQuick,
+		label:  "官方 Quick",
+		desc:   "官方 quick 模式逐字：无工具、无工作区的纯问答形态（官方本体仅 2.3KB）",
+		realms: []string{"cn", "global"},
+	},
+	{
+		name:   PresetOfficialExpert,
+		label:  "官方 Expert",
+		desc:   "官方 expert 模式逐字：专家人格由客户端 PluginAgentPrompt 槽注入（网关侧该槽为空）",
 		realms: []string{"cn", "global"},
 	},
 }

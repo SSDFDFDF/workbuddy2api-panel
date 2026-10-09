@@ -43,3 +43,5 @@ Your output language MUST be English by default.
 If the user's message (<user_query>) is written in Chinese, respond in Chinese instead.
 IMPORTANT: Base your language decision solely on the natural language of the user's message, not on technical content like code, paths, or logs.
 </response_language>
+
+{{client_system}}
