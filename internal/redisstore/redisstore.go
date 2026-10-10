@@ -49,8 +49,8 @@ type Store interface {
 }
 
 const (
-	bindPrefix  = "wb2api:bind:"
-	stateKey    = "wb2api:state"
+	bindPrefix  = "workbuddy_manager:bind:"
+	stateKey    = "workbuddy_manager:state"
 	readTimeout = 3 * time.Second
 )
 

@@ -4,7 +4,7 @@
 #   make help        # 列出全部目标
 #   make run         # 本机跑服务（缺 config.json 时自动从 example 复制）
 #   make test        # 完整测试套件（装有 node 时含前端 JS 冒烟）
-#   make build       # 构建 wb2api（命令后加 GOOS/GOARCH 可交叉编译）
+#   make build       # 构建 workbuddy_manager（命令后加 GOOS/GOARCH 可交叉编译）
 #   make release     # 五平台二进制 + 打包（对齐 CI 发布口径）
 #
 # 说明：本仓库不使用构建期 ldflags 注入版本号，版本串来自源码
@@ -30,7 +30,7 @@ EXE         := $(if $(filter windows,$(GOOS)),.exe,)
 APP_VERSION := $(shell sed -n 's/.*appVersion = "\([^"]*\)".*/\1/p' cmd/server/main.go | head -1)
 
 # 全部命令入口 → 输出名
-CMDS := server:wb2api signin:signin_bin login:login credit:credit
+CMDS := server:workbuddy_manager signin:signin_bin login:login credit:credit
 
 export GOOS GOARCH CGO_ENABLED
 
@@ -63,9 +63,9 @@ frontend: ## 构建前端（npm run build → internal/panel/web/）
 
 # ---- 构建 ----------------------------------------------------------------
 .PHONY: build
-build: frontend ## 构建服务端 wb2api（当前平台；先构建前端）
-	$(GO) build $(BUILD_FLAGS) -o wb2api$(EXE) ./cmd/server
-	@echo "→ wb2api$(EXE) (版本 $(APP_VERSION))"
+build: frontend ## 构建服务端 workbuddy_manager（当前平台；先构建前端）
+	$(GO) build $(BUILD_FLAGS) -o workbuddy_manager$(EXE) ./cmd/server
+	@echo "→ workbuddy_manager$(EXE) (版本 $(APP_VERSION))"
 
 .PHONY: build-all
 build-all: frontend ## 构建全部二进制（server/signin/login/credit；先构建前端）
@@ -76,11 +76,11 @@ build-all: frontend ## 构建全部二进制（server/signin/login/credit；先�
 	done
 
 .PHONY: build-windows
-build-windows: ## 交叉编译 Windows amd64（wb2api.exe）
+build-windows: ## 交叉编译 Windows amd64（workbuddy_manager.exe）
 	@$(MAKE) --no-print-directory build GOOS=windows GOARCH=amd64
 
 .PHONY: build-linux
-build-linux: ## 交叉编译 Linux amd64（wb2api）
+build-linux: ## 交叉编译 Linux amd64（workbuddy_manager）
 	@$(MAKE) --no-print-directory build GOOS=linux GOARCH=amd64
 
 .PHONY: release
@@ -94,15 +94,15 @@ release: ## 五平台二进制 + zip/tar.gz + checksums（输出到 dist/）
 	for p in $(PLATFORMS); do \
 	  os="$${p%%/*}"; arch="$${p##*/}"; ext=""; [ "$$os" = windows ] && ext=".exe"; \
 	  echo "==> $$os/$$arch"; \
-	  CGO_ENABLED=0 GOOS="$$os" GOARCH="$$arch" $(GO) build $(BUILD_FLAGS) -o "$(DIST_DIR)/wb2api$$ext" ./cmd/server; \
-	  grep -qa "$(APP_VERSION)" "$(DIST_DIR)/wb2api$$ext" || { echo "二进制缺少版本串 $(APP_VERSION)"; exit 1; }; \
+	  CGO_ENABLED=0 GOOS="$$os" GOARCH="$$arch" $(GO) build $(BUILD_FLAGS) -o "$(DIST_DIR)/workbuddy_manager$$ext" ./cmd/server; \
+	  grep -qa "$(APP_VERSION)" "$(DIST_DIR)/workbuddy_manager$$ext" || { echo "二进制缺少版本串 $(APP_VERSION)"; exit 1; }; \
 	  cp config.example.json README.md $(DIST_DIR)/; \
 	  if [ "$$os" = windows ]; then \
-	    (cd $(DIST_DIR) && zip -q "wb2api-panel-v$$V-windows-$$arch.zip" wb2api.exe config.example.json README.md); \
+	    (cd $(DIST_DIR) && zip -q "workbuddy_manager-v$$V-windows-$$arch.zip" workbuddy_manager.exe config.example.json README.md); \
 	  else \
-	    tar -czf "$(DIST_DIR)/wb2api-panel-v$$V-$$os-$$arch.tar.gz" -C $(DIST_DIR) wb2api config.example.json README.md; \
+	    tar -czf "$(DIST_DIR)/workbuddy_manager-v$$V-$$os-$$arch.tar.gz" -C $(DIST_DIR) workbuddy_manager config.example.json README.md; \
 	  fi; \
-	  rm -f "$(DIST_DIR)/wb2api$$ext" $(DIST_DIR)/config.example.json $(DIST_DIR)/README.md; \
+	  rm -f "$(DIST_DIR)/workbuddy_manager$$ext" $(DIST_DIR)/config.example.json $(DIST_DIR)/README.md; \
 	done
 	@cd $(DIST_DIR) && find . -maxdepth 1 -type f \( -name '*.zip' -o -name '*.tar.gz' \) \
 	  | sed 's|^\./||' | sort | while read -r f; do \
@@ -202,7 +202,7 @@ health: ## 健康检查（默认 http://localhost:7863/healthz）
 # ---- 清理 ----------------------------------------------------------------
 .PHONY: clean
 clean: ## 删除构建产物（二进制、dist/、coverage.out）
-	rm -f wb2api wb2api.exe signin_bin signin_bin.exe login login.exe credit credit.exe coverage.out
+	rm -f workbuddy_manager workbuddy_manager.exe signin_bin signin_bin.exe login login.exe credit credit.exe coverage.out
 	rm -rf $(DIST_DIR) $(WEB_DIR)
 
 .PHONY: clean-dist

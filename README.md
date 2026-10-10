@@ -43,7 +43,7 @@ WorkBuddy Manager 是一个自托管的 **OpenAI / Anthropic 协议桥接网关*
 cp config.example.json config.json && docker compose up -d --build
 
 # 或单文件二进制（Windows / macOS / Linux），首次启动自动生成含随机 api_key 的 config.json
-./wb2api
+./workbuddy_manager
 ```
 
 从源码构建需 Go ≥ 1.22（`make build`）；配置字段见 [config.example.json](config.example.json)。协议兼容边界与客户端特征分析见 [docs/](docs/)。

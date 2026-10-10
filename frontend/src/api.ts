@@ -1,7 +1,7 @@
 /* fetch 封装：Bearer 鉴权 + 401 时弹出密钥门。
    密钥存 localStorage；所有视图统一经 api() 走 /panel/api/*。 */
 
-export const LS_KEY = 'wb2api.key';
+export const LS_KEY = 'workbuddy_manager.key';
 
 let onUnauthorized: (() => void) | null = null;
 

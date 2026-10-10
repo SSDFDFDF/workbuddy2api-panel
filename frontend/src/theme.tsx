@@ -1,7 +1,7 @@
 /* 明暗主题：两态切换（浅/深），首次访问跟随系统；选择持久化 localStorage。 */
 import { createContext, useContext, useEffect, useState } from 'react';
 
-const LS_THEME = 'wb2api.theme';
+const LS_THEME = 'workbuddy_manager.theme';
 
 export type Theme = 'light' | 'dark';
 
