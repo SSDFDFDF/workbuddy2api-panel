@@ -55,7 +55,7 @@ git log --oneline <已同步基线>..upstream/main     # 列出待判定提交�
 
 | # | 能力 | 行为差异 | 默认 |
 | --- | --- | --- | --- |
-| 1 | **转发契约（严格、不改写）** | 出站只做校验与编码：未知字段与大整数完整保留，无法表达的输入直接 400（跨协议入口的提示/状态字段另有「接受即丢」，见第 15 条）；删除系统提示词清洗、内容拦截降级重试、思考自动补档、effort 降抬档、GPT `max_tokens` 抬升、工具历史重排 | 生效（无开关） |
+| 1 | **转发契约（严格、不改写）** | 出站只做校验与编码：未知字段与大整数完整保留，无法表达的输入直接 400（跨协议入口的提示/状态字段另有「接受即丢」，见第 15 条）；删除系统提示词清洗、内容拦截降级重试、思考自动补档、GPT `max_tokens` 抬升、工具历史重排。**例外（唯一一处仍会改写出站参数的地方）**：越界 `reasoning_effort` 按实际选中账号所属域的模型档位能力归一（≤请求档位的最高支持档），改写进归档 `dropped` 列可见，绝不再用字面量白名单直接 400 | 生效（无开关） |
 | 2 | **响应统一管线** | 流式与非流式共用同一 SSE 解析与完成判定；HTTP 错误与 `error` 帧同一分类；按 choice index 独立聚合；错误帧/截断不再伪装成功；新增首模型事件/首生成/尾部阶段超时 | 生效 |
 | 3 | **重试与账号策略** | 仅「明确未受理」才换号；已生成/已提交一律不重放；限流与配额不跨账号绕过 | 生效 |
 | 4 | **系统提示词体系** | 组合位置 `none`/`replace`/`after`/`append`/`inject`（inject 对全部预设可用：客户端 system 套官方 `<user_custom_instructions>` 包装追加到网关正文末尾）+ 六种内置预设（`official-craft` / `official-ask` / `official-plan` / `official-quick` / `official-expert` 为**官方渲染产物逐字**——条件已按抓包解掉、变量已字面化或删除，`official-craft` 两份与实物抓包逐行核对；`default` 为自设计位，空 preset 回落它）+ 按账号域覆盖 + 面板预览；预设是**静态 MD 加载即用**，无模板标记、无运行期变量改写；导出工具见 [scripts/render-official-presets.py](scripts/render-official-presets.py)，官方明文模板原件归档见 [docs/official-templates/README.md](docs/official-templates/README.md) | `none` |
@@ -194,8 +194,25 @@ git log --oneline <已同步基线>..upstream/main     # 列出待判定提交�
 （Chat 无工具失败标志）；`stop_sequences` 透传 Chat `stop`，但响应只能给
 `stop_reason:end_turn` 与 `stop_sequence:null`（上游不回报命中了哪个序列）；
 `reasoning.effort` 透传 Chat `reasoning_effort`，但响应不回推理文本。
-被丢弃字段统一进 `protocol.Request.Dropped` → `reqlog.Event.dropped`（去重、数组下标折叠为
-`input[]`、上限 8 项，只写归档不打 stdout）→ 面板「丢弃字段」列与搜索。
+
+**越界档位的归一（唯一一处仍会改写出站生成参数的路径）**：模型的合法档位集随 realm 变化
+（同一模型名 CN 与 global 可以不同，如 deepseek-v4.1-flash：CN `[low high max]` / global
+`[high]`），因此桥接层不再用字面量白名单断言档位（曾有白名单漏掉 `max`、而 `/v1/models`
+正是靠同一份静态表宣告 `max` 的自我矛盾），改由出站层按**实际选中账号所属域**的
+`model.supportedEfforts`（探测下发权威 ∪ 产品静态兜底表）归一：
+
+- 请求档位受支持 → 原样透传；
+- 越界 → 取 ≤请求档位的最高支持档（降级优先、偏离最小）；支持档全高于请求档 → 取最低支持档；
+- `off`/`none`（关闭思考）不是档位，**永不被归一**（把 off 改成某个真实档位等于把用户关掉的思考又打开）；
+- 模型档位未知（未收录 / 探测未命中）→ 透传，绝不编造集合。
+
+归一结果与原因都可见：写入 `reqlog.Event.rewritten`（key:原值→实际值，去重、上限 4），
+面板「丢弃 / 改写」列以蓝色标签与「丢弃」（黄色）区分——改写与丢弃不共用一个列表：
+语义不同（换了值执行了 vs 没执行），且 `dropped` 会被客户端遥测字段占满上限（Codex 一次发
+6~7 个），共用时最需要被看见的改写会被静默截断。Responses 响应体的 `reasoning` 回显
+钳位后的实际生效值。被丢弃字段统一进
+`protocol.Request.Dropped` → `reqlog.Event.dropped`（去重、数组下标折叠为
+`input[]`、上限 8 项，只写归档不打 stdout）→ 面板「丢弃 / 改写」列与搜索。
 仍拒绝：`previous_response_id`/`conversation`、`background:true`、`text.format` 非 `text`、
 `strict:true`、非空 namespace `description`、白名单外的未知字段——丢失它们会改变请求、
 对话或能力语义。
@@ -209,6 +226,13 @@ git log --oneline <已同步基线>..upstream/main     # 列出待判定提交�
 未完成工具作为诊断数据；只在最终 incomplete envelope 携带，不发工具生命周期事件。
 参数前缀验证不修复 JSON，错误语法/重复键/过深嵌套仍拒绝；无 finish 的 EOF 仍失败。
 Anthropic 不能表达半截 input 对象，继续拒绝截断工具。原生 Chat 完成语义不变。
+
+`thinking` 的客户端形状按「能映射的映射、不能映射的记账」处理（真实客户端都会带）：
+`type` 接受 `disabled`/`enabled`/`adaptive`（`adaptive` 与 `enabled` 同口径：校验预算形态、丢弃
+签名状态）；`display`（推理展示档）与 `block_binding`（多轮块绑定）接受即丢，记入 `dropped`；
+顶层 `output_config.effort` 是真正的生成参数，映射为 Chat `reasoning_effort`（与 Responses 的
+`reasoning.effort` 同源、同归一），而 `output_config` 的其余子字段（如 `format` 结构化输出）
+仍明确 400——丢掉它们会假装支持一个没有的能力。
 
 提示词默认不变（none + fingerprint_rewrite:false）。三协议端到端夹具锁定四种组合模式
 不改变工具声明、选择、历史参数、大整数和工具结果；replace 仍明确删除全部 system/developer。
@@ -250,7 +274,7 @@ content:[]。空数组保持原形，不作为 null、缺失结果或虚构文�
 | cc-switch：Moonshot `$ref` 兄弟字段改为 `allOf` | 不采用：原补丁限定直连 Moonshot 的 Responses→Chat，不能套用到 WorkBuddy |
 | CLIProxyAPI / cc-switch：namespace 展平与身份恢复 | 借鉴请求级双向身份索引；采用长度前缀 / 稳定摘要别名并检查声明与历史碰撞，历史身份不增加本轮权限；不采用 first-wins 去重、截短名称、猜测 namespace 或丢弃分组说明 |
 | CLIProxyAPI / cc-switch：块状态、工具项 incomplete | 借鉴状态与终止分类；不补工具名、不修复 JSON、不在 EOF 上猜测 length；截断工具只在 Responses 终帧提供诊断信息 |
-| CLIProxyAPI / cc-switch：budget→effort、档位钳位；Kimi / DeepSeek 工具历史 reasoning 补全 | 不采用：不自动升降档、不补造推理；新协议接受 `thinking:{type:"enabled"}` 与历史 reasoning 但丢弃状态（不补造思维链），原 Chat 保留已有字段 |
+| CLIProxyAPI / cc-switch：budget→effort、档位钳位；Kimi / DeepSeek 工具历史 reasoning 补全 | 档位钳位**采用**（越界 `reasoning_effort` 按 realm 的模型能力归一，见第 15 条；上游对越界档位回 400 code=11133 而换号无用）；budget→effort 与档位自动升降到默认档不采用（不猜预算与档位的换算，只做「降到最近支持档」）；工具历史 reasoning 补全不采用（不补造推理）；新协议接受 `thinking:{type:"enabled"|"adaptive"}`、`thinking.display`、`output_config.effort` 与历史 reasoning，但丢弃状态（不补造思维链），原 Chat 保留已有字段 |
 
 厂商直连补丁不等于 WorkBuddy 能力；后续采用补丁须提供真实上游脱敏请求 / 原始帧依据与回归测试。
 

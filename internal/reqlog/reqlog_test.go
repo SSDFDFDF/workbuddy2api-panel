@@ -393,3 +393,40 @@ func TestRecorderReconfigureAfterCloseIsNoop(t *testing.T) {
 		t.Fatal("Close 之后不得再新建 writer")
 	}
 }
+
+// 改写在归档里必须与丢弃一样可往返（面板「丢弃 / 改写」列与搜索直接读归档 JSONL）。
+// 这两个字段语义不同且上限独立，所以序列化契约要各自锁一条。
+func TestArchiveRoundTripsRewrittenAndPath(t *testing.T) {
+	dir := t.TempDir()
+	r := New(Config{Dir: dir, Enabled: true})
+	defer r.Close()
+	r.Record(Event{
+		RequestID: "req-1", Path: "/v1/responses", Status: 200, OK: true,
+		Dropped:   []string{"include", "reasoning.summary"},
+		Rewritten: []string{"reasoning.effort:max→xhigh"},
+	})
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		rows, err := r.ReadArchive(10, Filter{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) == 1 {
+			e := rows[0]
+			if e.Path != "/v1/responses" {
+				t.Fatalf("path=%q", e.Path)
+			}
+			if len(e.Rewritten) != 1 || e.Rewritten[0] != "reasoning.effort:max→xhigh" {
+				t.Fatalf("rewritten=%v", e.Rewritten)
+			}
+			if len(e.Dropped) != 2 {
+				t.Fatalf("dropped=%v", e.Dropped)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("归档未在期限内落盘")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}

@@ -132,16 +132,19 @@ func responsesRequest(src map[string]any, tools *toolIndex, dropped *[]string) (
 			}
 		}
 		if v := m["effort"]; v != nil {
-			s, err := stringValue(v, "reasoning.effort")
+			// 合法档位集是 realm/模型相关的（同一模型名 CN 与 global 档位可以不同，
+			// 见 upstream/effort_catalog.go），桥接层没有这份信息，因此**不在这里**
+			// 用字面量白名单断言：只要求非空字符串，越界/未知档位交给出站钳位
+			// （upstream.ClampEffort）归一，未知模型则透传由上游裁决。
+			//
+			// 历史教训：这里的白名单曾漏掉 max，而 /v1/models 正是靠同一份静态表
+			// 宣告 glm-5.3-flash 支持 [low high max]，客户端选 max 必 400——网关
+			// 自相矛盾；原生 Chat 入口（forwarding.reasoning）从未拒过任何非空档位。
+			s, err := nonempty(v, "reasoning.effort")
 			if err != nil {
 				return nil, err
 			}
-			switch s {
-			case "none", "off", "minimal", "low", "medium", "high", "xhigh":
-				dst["reasoning_effort"] = s
-			default:
-				return nil, invalid("reasoning.effort", "none, off, minimal, low, medium, high or xhigh expected")
-			}
+			dst["reasoning_effort"] = s
 		}
 	}
 	if v := src["max_output_tokens"]; v != nil {

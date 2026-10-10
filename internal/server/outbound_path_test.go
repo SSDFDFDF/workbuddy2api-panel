@@ -173,3 +173,68 @@ func TestOutboundPromptComposeMatchesBytePath(t *testing.T) {
 		}
 	}
 }
+
+// TestOutboundEffortClampReachesUpstream 守护档位归一真正落到**出站字节**，并把
+// 「原生 Chat 也会被归一」这一决定写成可执行契约（不是只写在注释里）：
+//
+//   - cn:glm-5.2 的档位能力（静态兜底表）= [high xhigh]，客户端要 medium/max 时必须
+//     在发送前归一到 ≤请求档位的最高支持档，否则上游 400 code=11133（换号无用）；
+//   - 模型档位未知（未收录）时**绝不改写**：编造一个集合去改用户请求比透传更糟。
+func TestOutboundEffortClampReachesUpstream(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, body, wantEffort string
+	}{
+		{"原生 Chat 降级", "/v1/chat/completions",
+			`{"model":"cn:glm-5.2","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"max"}`, "xhigh"},
+		{"原生 Chat 升到最低支持档", "/v1/chat/completions",
+			`{"model":"cn:glm-5.2","messages":[{"role":"user","content":"hi"}],"reasoning":{"effort":"low"}}`, "high"},
+		{"原生 Chat 大小写归一", "/v1/chat/completions",
+			`{"model":"cn:glm-5.2","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"XHIGH"}`, "xhigh"},
+		{"Responses 降级", "/v1/responses",
+			`{"model":"cn:glm-5.2","store":false,"input":"hi","reasoning":{"effort":"max"}}`, "xhigh"},
+		{"关闭思考的 off 永不被归一", "/v1/chat/completions",
+			`{"model":"cn:glm-5.2","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"off"}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cap := &outboundCapture{}
+			h := captureHandler(t, Config{
+				Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
+				Upstream: &upstream.Client{},
+			}, cap)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("POST", tc.path, strings.NewReader(tc.body)))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+			}
+			var sent map[string]any
+			if err := json.Unmarshal([]byte(cap.body), &sent); err != nil {
+				t.Fatalf("出站不是合法 JSON: %v", err)
+			}
+			if got, _ := sent["reasoning_effort"].(string); got != tc.wantEffort {
+				t.Fatalf("reasoning_effort=%q want %q (out=%s)", got, tc.wantEffort, cap.body)
+			}
+			// off 走 EncodeObject 的关闭分支：effort 消失 + thinking.disabled。
+			if tc.wantEffort == "" {
+				if th, _ := sent["thinking"].(map[string]any); th["type"] != "disabled" {
+					t.Fatalf("off 未转成 thinking.disabled: %s", cap.body)
+				}
+			}
+		})
+	}
+	// 未收录模型：没有能力依据 → 透传（不改写、不编造）。
+	cap := &outboundCapture{}
+	h := captureHandler(t, Config{
+		Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
+		Upstream: &upstream.Client{},
+	}, cap)
+	body := `{"model":"cn:no-such-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"max"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+	var sent map[string]any
+	if err := json.Unmarshal([]byte(cap.body), &sent); err != nil {
+		t.Fatalf("出站不是合法 JSON: %v", err)
+	}
+	if got, _ := sent["reasoning_effort"].(string); got != "max" {
+		t.Fatalf("未知模型被改写了: reasoning_effort=%q (out=%s)", got, cap.body)
+	}
+}

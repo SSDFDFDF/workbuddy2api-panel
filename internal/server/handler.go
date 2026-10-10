@@ -953,8 +953,12 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 		// 正文是官方渲染产物的逐字拷贝（无运行期变量），直接取用即可。
 		attemptObj := baseObj
 		attemptRaw := sentinelRaw
+		// attemptCopied 标记 attemptObj 已是 baseObj 的私有副本：提示词组合与档位归一
+		// 各自都可能需要写时拷贝，不能各拷一次（大 body 上是双倍分配）。
+		attemptCopied := false
 		if rule, ok := h.promptRuleFor(acct.Realm()); ok {
 			attemptObj = jsondoc.CopyObject(baseObj)
+			attemptCopied = true
 			text := rule.EffectiveText()
 			prompt.ComposeObject(attemptObj, text, rule.Mode)
 			// 出站提示词指纹（仅内部规则生效时）：11128 复盘要能回答"这次发出去的是什么形状"。
@@ -970,6 +974,35 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 		attempt.Object = attemptObj
 		attempt.Model = bareModel
 
+		// 档位归一（reasoning effort 钳位）：放在**按实际选中账号所属域**的位置，
+		// 因为同一模型名在 CN 与 global 的合法档位可以不同（deepseek-v4.1-flash：
+		// CN [low high max] / global [high]），笼统钳在解析层会拿错域的集合。
+		// 上游对越界档位回 400 code=11133（账号与 body 无关，换号无用），所以只能在
+		// 发送前归一到≤请求档位的最高支持档；没有归一依据（未知模型/未知档位）
+		// 一律透传，交给上游裁决。
+		//
+		// 与提示词组合同样在所有 attempt 共享的 baseObj 上做写时拷贝：改写后的文档
+		// 与入站字节不再同源，哨兵预检必须失效（attemptRaw=nil）。
+		if effortKey, from, to := h.cfg.Upstream.RequestEffortClamp(attemptObj, acct.Realm(), bareModel); from != "" && from != to {
+			if !attemptCopied {
+				attemptObj = jsondoc.CopyObject(baseObj)
+				attempt.Object = attemptObj
+				attemptCopied = true
+			}
+			upstream.SetRequestEffort(attemptObj, effortKey, to)
+			attemptRaw = nil
+			// 客户端可见性：近似变换必须能回答「我选的档位到底被判成了什么」。写入归档的
+			// **改写** 列表（不是 dropped：这里是换了个值执行了，不是丢弃），面板与搜索
+			// 都能按 key:原值→实际值 定位。
+			st.noteRewrite("reasoning.effort:" + from + "→" + to)
+			// Responses 响应体会回显请求侧 reasoning（responseEnvelope）：回显钳位后的
+			// 实际生效值，避免「回显一个没被执行的档位」。跨 attempt 重试时以最后一次
+			// 实际发出的域为准。
+			if m, ok := request.Source["reasoning"].(map[string]any); ok {
+				m["effort"] = to
+			}
+			log.Printf("[effort] 档位归一 realm=%s model=%s %s -> %s", acct.Realm(), bareModel, from, to)
+		}
 		// 客户端 IP 按请求传递（PassthroughIP 开启时注入；消除共享字段竞态）。
 		attemptStarted := time.Now()
 		rc, status, respBody, terr := h.cfg.Upstream.ChatStreamInput(r.Context(), acct,

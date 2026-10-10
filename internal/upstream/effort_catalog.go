@@ -14,6 +14,8 @@
 // 但其档位是「可枚举单档」而非「无选择器」，照抄参考仓库如实暴露。
 package upstream
 
+import "strings"
+
 // effortCap 一个模型的档位能力（对齐产品兜底表条目 reasoningEfforts + defaultReasoningEffort）。
 type effortCap struct {
 	efforts       []string
@@ -113,33 +115,141 @@ func containsEffort(efforts []string, want string) bool {
 	return false
 }
 
-// globalEffortMap global 域降级用的 effort 能力表：静态兜底表为基，远端桶覆盖（权威优先）。
+// effortRank 档位从低到高。none/off 是「关闭思考」的开关值而不是档位，排在最低但
+// **不参与钳位**：把 off 归一到某个真实档位等于把用户关闭掉的思考又打开。
+var effortRank = map[string]int{"none": 0, "off": 0, "minimal": 1, "low": 2, "medium": 3, "high": 4, "xhigh": 5, "max": 6}
+
+// isEffortOff 判定关闭思考的开关值（与 forwarding.EncodeObject 的 off/none 口径一致）。
+// 不导出：合法档位集与归一都在本包内闭环，外部不需要知道这个判据。
+func isEffortOff(effort string) bool {
+	return effort == "off" || effort == "none"
+}
+
+// ClampEffort 把请求档位归一到模型支持的档位集，返回 (出站值, 是否发生改写)。
 //
-// prepareBody 对 global 请求调此函数（而非直接用远端桶），因为 global 上游可能不下发
-// supportedEfforts——此时也必须按产品静态表降级（issue #84：deepseek-v4.1-flash 国际版
-// 只认 high，客户端传 low/max 必降级到 high，否则上游 400 毁掉请求）。
-// 语义对齐参考仓库 effortsFor（remoteMeta → productFallback → 静态表），只取前两级：
-// 远端桶（探测已解析）→ 本产品静态表（本文件），缺档位即无（不再到通用静态表）。
-func globalEffortMap(remoteEfforts map[string][]string, remoteDefaults map[string]string) (map[string][]string, map[string]string) {
-	efforts := make(map[string][]string, len(globalEffortFallback)+len(remoteEfforts))
-	defs := make(map[string]string, len(globalEffortFallback)+len(remoteDefaults))
-	// 静态兜底为基。
-	for id, cap := range globalEffortFallback {
-		efforts[id] = append([]string(nil), cap.efforts...)
-		if cap.defaultEffort != "" {
-			defs[id] = cap.defaultEffort
+// 语义（继承 fork 前 payload.go:normalizeReasoningEffort，见 FORK_CHANGES §15）：
+//   - 请求档位 ∈ supported（忽略大小写/首尾空白）→ 若书写形态与声明不一致则按**声明
+//     形态**回写（上游可能大小写敏感），否则不改写；
+//   - 否则取 ≤请求档位的最高支持档（真正降级，偏离最小）；
+//   - 支持档全部高于请求档 → 取最低支持档（升档，但比 400 更接近用户意图）；
+//   - 请求档位未知 / supported 空 / 关闭思考值 → 不改写（透传，由上游裁决）。
+//     supported 里的关闭值同样只被跳过（它不能充当降级目标，否则 "high" 会被改成 "off"）。
+//
+// 为什么不再直接 400：客户端可发现档位来自本网关自己输出的 reasoning_supported_efforts
+// （effort_catalog.go 的静态表 ∪ 探测下发），断言「不可能被拒」；同一档位打原生 Chat
+// 入口本来也只会透传。上游对越界档位返回 400 code=11133 会白白消耗一次轮转并污染账号
+// 健康度（issue #84：deepseek-v4.1-flash 国际版只认 high）。
+func ClampEffort(requested string, supported []string) (string, bool) {
+	req := strings.ToLower(strings.TrimSpace(requested))
+	if req == "" || len(supported) == 0 || isEffortOff(req) {
+		return "", false
+	}
+	reqRank, known := effortRank[req]
+	if !known {
+		return "", false
+	}
+	best, bestRank := "", -1
+	lowest, lowestRank := "", 1<<30
+	for _, s := range supported {
+		sn := strings.ToLower(strings.TrimSpace(s))
+		if sn == "" || isEffortOff(sn) {
+			continue
+		}
+		r, ok := effortRank[sn]
+		if !ok {
+			continue
+		}
+		if sn == req {
+			if s != requested {
+				return s, true // 受支持，但按声明形态统一书写
+			}
+			return "", false
+		}
+		if r <= reqRank && r > bestRank {
+			best, bestRank = s, r
+		}
+		if r < lowestRank {
+			lowest, lowestRank = s, r
 		}
 	}
-	// 远端权威覆盖（仅当远端确实下发了该模型档位）。
-	for id, v := range remoteEfforts {
-		if len(v) > 0 {
-			efforts[id] = v
+	if best != "" {
+		return best, true
+	}
+	if lowest != "" {
+		return lowest, true
+	}
+	return "", false
+}
+
+// EffortSupport 返回 realm+model 的可用档位与默认档：远端探测桶（权威）→ 本 realm 的
+// 产品级静态兜底表 → 无（nil = 未知，调用方必须透传不降级）。
+//
+// 与 /v1/models 的 EffortListing 同一函数、同一优先级，保证「宣告的档位」与
+// 「可被钳位的档位」永不漂移（两处若各写一份，客户端就会选到一个会被改写的档位）。
+//
+// 只取本模型的条目，不整桶拷贝：本方法在每个请求的每个 attempt 上都会调
+// （handler 的档位归一），走 effortsSnapshot 会把同域的模型档位表整个复制一遍。
+func (c *Client) EffortSupport(realm, model string) ([]string, string) {
+	if c == nil {
+		return nil, ""
+	}
+	k := realmKey(realm)
+	c.effortsMu.RLock()
+	// 桶的值是「整体替换」（storeEfforts 换 map，从不原地改 slice），但仍按约定在锁内
+	// 复制本模型的切片，避免把可变数据结构带出临界区。
+	remote := append([]string(nil), c.efforts[k][model]...)
+	def := c.defaultEfforts[k][model]
+	c.effortsMu.RUnlock()
+	return EffortListing(realm, model, remote, def)
+}
+
+// requestEffortKey 定位 obj 上的档位字段，返回 (key, value)。三种别名都认：跨协议桥
+// 写 reasoning_effort、原生 OpenAI 系客户端可能写 camel 别名或 reasoning.effort 对象，
+// 与 forwarding.reasoning 的读取口径一致（那里两者同读并判冲突）。
+func requestEffortKey(obj map[string]any) (string, string) {
+	if v, ok := obj["reasoning_effort"].(string); ok && v != "" {
+		return "reasoning_effort", v
+	}
+	if v, ok := obj["reasoningEffort"].(string); ok && v != "" {
+		return "reasoningEffort", v
+	}
+	if m, ok := obj["reasoning"].(map[string]any); ok {
+		if v, ok := m["effort"].(string); ok && v != "" {
+			return "reasoning.effort", v
 		}
 	}
-	for id, v := range remoteDefaults {
-		if v != "" {
-			defs[id] = v
-		}
+	return "", ""
+}
+
+// RequestEffortClamp 按 realm+model 的档位能力归一请求档位，**只读不写**：返回
+// (字段名, 原值, 出站值)，出站值等于原值（或字段缺失 / 无法归一）时无需改写。
+//
+// 只读的原因由调用方决定是否可以先拷贝再改写：出站文档在轮转循环里被多个 attempt
+// 共享（提示词组合 / 指纹改写都遵守同一「深拷贝后再改」的约定），在这里就地改会污染
+// 后续 attempt 与降级判定。
+func (c *Client) RequestEffortClamp(obj map[string]any, realm, model string) (key, from, to string) {
+	key, from = requestEffortKey(obj)
+	if from == "" {
+		return "", "", ""
 	}
-	return efforts, defs
+	supported, _ := c.EffortSupport(realm, model)
+	to, changed := ClampEffort(from, supported)
+	if !changed {
+		return key, from, from
+	}
+	return key, from, to
+}
+
+// SetRequestEffort 按 RequestEffortClamp 返回的字段名写回档位（reasoning.effort 走嵌套）。
+func SetRequestEffort(obj map[string]any, key, effort string) {
+	if key == "reasoning.effort" {
+		m, _ := obj["reasoning"].(map[string]any)
+		if m == nil {
+			m = map[string]any{}
+			obj["reasoning"] = m
+		}
+		m["effort"] = effort
+		return
+	}
+	obj[key] = effort
 }

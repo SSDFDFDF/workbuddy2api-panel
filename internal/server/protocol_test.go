@@ -191,8 +191,11 @@ func TestCodexStyleResponsesRequestAccepted(t *testing.T) {
 		if err := json.Unmarshal(body, &obj); err != nil {
 			t.Fatal(err)
 		}
-		if obj["reasoning_effort"] != "medium" {
-			t.Fatalf("effort not forwarded: %s", body)
+		// cn:glm-5.2 的档位能力是 [high xhigh]（静态兜底表），客户端要的 medium 会被
+		// 归一到 ≤medium 的最高支持档 high：上游对越界档位回 400 code=11133，而换号无用
+		// （账号与 body 无关），只能在发送前归一。
+		if obj["reasoning_effort"] != "high" {
+			t.Fatalf("effort not clamped to model capability: %s", body)
 		}
 		msgs, _ := obj["messages"].([]any)
 		if len(msgs) != 1 || msgs[0].(map[string]any)["role"] != "user" {
@@ -242,6 +245,12 @@ func TestCodexStyleResponsesRequestAccepted(t *testing.T) {
 	want := []string{"client_metadata", "service_tier", "stream_options", "include", "text.verbosity", "reasoning.summary", "input[]"}
 	if !reflect.DeepEqual(s.Recent[0].Dropped, want) {
 		t.Fatalf("dropped=%v want %v", s.Recent[0].Dropped, want)
+	}
+	// 改写与丢弃分开记（换了个值执行了 vs 没执行）：上面这串遥测字段就有 7 项，
+	// 共用列表时第 9 项会被 maxDroppedFields 静默截断，最需要被看见的改写会消失。
+	wantRewritten := []string{"reasoning.effort:medium→high"}
+	if !reflect.DeepEqual(s.Recent[0].Rewritten, wantRewritten) {
+		t.Fatalf("rewritten=%v want %v", s.Recent[0].Rewritten, wantRewritten)
 	}
 }
 

@@ -136,7 +136,8 @@ func (c *Client) fetchGlobalModelsOnce(a *auth.Auth) (names []string, infos []Mo
 	pr, _ := pv.(globalProbeResult)
 	names, infos, efforts, defaults, err := pr.names, pr.infos, pr.efforts, pr.defaults, pr.err
 	if err != nil || len(names) == 0 {
-		// 探测失败：负缓存 + 返回 nil（effort 桶不写，prepareBody 走 globalEffortMap 静态兜底）。
+		// 探测失败：负缓存 + 返回 nil（effort 桶不写，钳位与 /v1/models 都回落到
+		// globalEffortFallback 静态表，见 EffortListing）。
 		c.globalModels.Lock()
 		c.globalModels.lastFail = time.Now()
 		c.globalModels.names = nil
@@ -145,8 +146,8 @@ func (c *Client) fetchGlobalModelsOnce(a *auth.Auth) (names []string, infos []Mo
 		return nil, nil
 	}
 	// global 域 effort 能力：探测下发的 supportedEfforts/defaultEffort 权威写入 global 桶
-	// （raw remote，不并入静态表——静态兜底在 prepareBody 的 globalEffortMap 与
-	// /v1/models 的 EffortListing 里按需 fallback）。空探测不写（防清既有桶）。
+	// （raw remote，不并入静态表——静态兜底在 EffortSupport/EffortListing 里按需 fallback）。
+	// 空探测不写（防清既有桶）。
 	if len(efforts) > 0 || len(defaults) > 0 {
 		c.storeEfforts("global", efforts, defaults)
 	}

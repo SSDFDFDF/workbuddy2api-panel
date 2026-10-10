@@ -89,6 +89,13 @@ type Event struct {
 	// 客户端字段，已去重与限长。用途是真实客户端排障：回答“它发了什么被我们丢了”。
 	Dropped []string `json:"dropped,omitempty"`
 
+	// Rewritten 是网关**主动改写**的生成参数（key:原值→出站值），当前只有越界
+	// reasoning effort 归一一条。与 Dropped 分开的原因：
+	//   - 语义不同：Dropped 是“没执行”，Rewritten 是“按能力换了值执行了”；
+	//   - 优先级不同：Dropped 会被客户端的遥测字段（Codex 一次发 6~7 个）占满上限，
+	//     若共用一个列表，最需要被看见的改写会静默消失。
+	Rewritten []string `json:"rewritten,omitempty"`
+
 	// 出站提示词指纹（仅在 prompt.mode 非 none 时填）。
 	//
 	// 为什么需要：11128/内容审核类问题复盘时必须能回答"这次到底发出去的是什么形状"。

@@ -622,13 +622,16 @@ type Client struct {
 	// IdleTimeout 聊天 SSE 流中空闲超时；<=0 表示禁用空闲监控。
 	IdleTimeout time.Duration
 
-	// effortsMu/efforts 缓存各模型 supportedEfforts（FetchModels 刷新），供请求体 effort 降级。
+	// effortsMu/efforts 缓存各模型 supportedEfforts（FetchModels/global 探测刷新），
+	// 供出站请求的档位钳位（EffortSupport → ClampEffort）与 /v1/models 宣告共用。
 	// 按 realm 分层桶（cn/global）：同模型名跨域探测的 effort 集合可能不同，
 	// 混桶会互相污染（C-2）。
 	effortsMu sync.RWMutex
 	efforts   map[string]map[string][]string
-	// defaultEfforts 缓存各模型 reasoning.defaultEffort（FetchModels 刷新），供
-	// thinking.go 补档：缺显式 effort 时优先用模型声明默认档，空串回退硬编码 high。
+	// defaultEfforts 缓存各模型 reasoning.defaultEffort（FetchModels/global 探测刷新）：
+	// 仅作为 EffortListing 的「默认档」输出（面板与 /v1/models 的
+	// reasoning_default_effort 提示）。档位钳位不依赖它——钳位按档位序取最近支持档，
+	// 默认档不参与改写决策（避免「同一个越界档位在不同模型上被改成不同档位」）。
 	// 与 efforts 同 realm 分层桶（同 C-2 隔离原则），共用 effortsMu。
 	defaultEfforts map[string]map[string]string
 	// modelRates 缓存各模型当前生效积分倍率（规范化数值，如 "0.5"）。
@@ -978,6 +981,7 @@ func (c *Client) scrubObject(obj map[string]any, raw []byte) {
 }
 
 // effortsSnapshot 返回 effort 能力缓存副本；nil 表示未知（透传不降级）。
+// 调用方应优先用 EffortSupport（它把副本与静态兜底表合成同一份答案）。
 func (c *Client) effortsSnapshot(realm string) map[string][]string {
 	c.effortsMu.RLock()
 	defer c.effortsMu.RUnlock()
@@ -1748,9 +1752,9 @@ func applyModelPromotions(out map[string]ModelInfo, promos []v3ModelPromotion) {
 }
 
 // storeEfforts 按 realm 写入 effort 能力缓存桶（efforts + defaultEfforts），并发安全。
-// 供 CN FetchModels 与 global 探测共用：拉取到的模型档位落桶后，出站请求体
-// normalizeReasoningEffort 才能按域降级。efforts 与 defs 均空时删除该 realm 桶
-// （等价「该域无可降级档位」）。调用方负责在「无新数据」时跳过写。
+// 供 CN FetchModels 与 global 探测共用：拉取到的模型档位落桶后，出站请求体的
+// EffortSupport/ClampEffort 才能按域钳位。efforts 与 defs 均空时删除该 realm 桶
+// （等价「该域无可钳位档位」）。调用方负责在「无新数据」时跳过写。
 func (c *Client) storeEfforts(realm string, efforts map[string][]string, defs map[string]string) {
 	c.effortsMu.Lock()
 	defer c.effortsMu.Unlock()

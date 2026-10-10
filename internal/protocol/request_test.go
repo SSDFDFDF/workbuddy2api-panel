@@ -64,7 +64,8 @@ func TestUnsupportedAndInvalidRequests(t *testing.T) {
 		{Responses, `{"model":"x","store":true,"input":"hi"}`, "store"},
 		{Responses, `{"model":"x","store":false,"input":"hi","previous_response_id":"resp_x"}`, "previous_response_id"},
 		{Responses, `{"model":"x","store":false,"input":"hi","background":true}`, "background"},
-		{Responses, `{"model":"x","store":false,"input":"hi","reasoning":{"effort":"extreme"}}`, "reasoning.effort"},
+		{Responses, `{"model":"x","store":false,"input":"hi","reasoning":{"effort":""}}`, "reasoning.effort"},
+		{Responses, `{"model":"x","store":false,"input":"hi","reasoning":{"effort":7}}`, "reasoning.effort"},
 		{Responses, `{"model":"x","store":false,"input":"hi","truncation":"always"}`, "truncation"},
 		{Responses, `{"model":"x","store":false,"input":"hi","include":["reasoning.encrypted_content",3]}`, "include[1]"},
 		{Responses, `{"model":"x","store":false,"input":"hi","text":{"verbosity":true}}`, "text.verbosity"},
@@ -77,7 +78,7 @@ func TestUnsupportedAndInvalidRequests(t *testing.T) {
 		{Responses, `{"model":"x","model":"y","store":false,"input":"hi"}`, "duplicate"},
 		{Anthropic, `{"model":"x","messages":[{"role":"user","content":"hi"}]}`, "max_tokens"},
 		{Anthropic, `{"model":"x","max_tokens":1,"messages":[{"role":"system","content":"hi"}]}`, "role"},
-		{Anthropic, `{"model":"x","max_tokens":1,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"}}`, "thinking.type"},
+		{Anthropic, `{"model":"x","max_tokens":1,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"always"}}`, "thinking.type"},
 		{Anthropic, `{"model":"x","max_tokens":1,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":0}}`, "thinking.budget_tokens"},
 		{Anthropic, `{"model":"x","max_tokens":1,"messages":[{"role":"user","content":"hi"}],"stop_sequences":"END"}`, "stop_sequences"},
 		{Anthropic, `{"model":"x","max_tokens":1,"messages":[{"role":"user","content":"hi"}],"stop_sequences":["END",""]}`, "stop_sequences[1]"},
@@ -201,6 +202,47 @@ func TestAnthropicThinkingAcceptedAndDropped(t *testing.T) {
 	for _, k := range []string{"thinking", "messages[1].content[0]", "messages[1].content[1]"} {
 		if !containsString(r.Dropped, k) {
 			t.Fatalf("dropped list missing %s: %v", k, r.Dropped)
+		}
+	}
+}
+
+// pi（claude-opus-5 的 forceAdaptiveThinking / supportsMidConvoEffort 路径）发的是
+// thinking:{type:"adaptive",display:"summarized"[,block_binding:…]} + output_config:{effort}。
+// 这三样此前都会 400：思考开关无法被假装满足是事实，但让真实客户端直接用不了 Messages
+// 入口不是——状态丢掉、effort 映射到 Chat reasoning_effort，并在 Dropped 里记账。
+func TestAnthropicAdaptiveThinkingAndOutputConfig(t *testing.T) {
+	r := mustDecode(t, Anthropic, `{"model":"x","max_tokens":10,"thinking":{"type":"adaptive","display":"summarized",`+
+		`"block_binding":{"prefix_mismatch_behavior":"drop_block"}},"output_config":{"effort":"high"},`+
+		`"messages":[{"role":"user","content":"hi"}]}`)
+	if _, exists := r.Chat.Object["thinking"]; exists {
+		t.Fatal("adaptive thinking forwarded", r.Chat.Object)
+	}
+	if got := r.Chat.Object["reasoning_effort"]; got != "high" {
+		t.Fatalf("output_config.effort not mapped: %v", got)
+	}
+	for _, k := range []string{"thinking", "thinking.display", "thinking.block_binding"} {
+		if !containsString(r.Dropped, k) {
+			t.Fatalf("dropped list missing %s: %v", k, r.Dropped)
+		}
+	}
+	// enabled + display（pi 的普通 thinking 路径）同样不得因为 display 被拒。
+	r = mustDecode(t, Anthropic, `{"model":"x","max_tokens":10,"thinking":{"type":"enabled","budget_tokens":1024,"display":"omitted"},"messages":[{"role":"user","content":"hi"}]}`)
+	if !containsString(r.Dropped, "thinking.display") {
+		t.Fatalf("display not reported: %v", r.Dropped)
+	}
+	// output_config.format（结构化输出）仍必须明确拒绝：丢掉它等于假装支持。
+	if _, err := Decode(Anthropic, []byte(`{"model":"x","max_tokens":10,"output_config":{"format":{"type":"json_schema"}},"messages":[{"role":"user","content":"hi"}]}`)); err == nil || !strings.Contains(err.Error(), "output_config") {
+		t.Fatalf("err=%v want output_config", err)
+	}
+}
+
+// 越界档位不再在桥接层 400：合法集随 realm/模型变化（同一模型名 CN 与 global 可不同），
+// 桥接层没有这份信息，归一交由出站钳位（upstream.ClampEffort）。
+func TestReasoningEffortValuesPassThrough(t *testing.T) {
+	for _, eff := range []string{"none", "off", "minimal", "low", "medium", "high", "xhigh", "max", "extreme"} {
+		r := mustDecode(t, Responses, `{"model":"x","store":false,"input":"hi","reasoning":{"effort":"`+eff+`"}}`)
+		if got := r.Chat.Object["reasoning_effort"]; got != eff {
+			t.Fatalf("effort=%s forwarded %v", eff, got)
 		}
 	}
 }

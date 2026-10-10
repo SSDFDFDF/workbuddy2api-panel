@@ -8,10 +8,9 @@ import (
 )
 
 func anthropicRequest(src map[string]any, dropped *[]string) (map[string]any, error) {
-	// metadata/service_tier are client telemetry and routing hints; top_k and a
-	// top-level cache_control are advisory. None has an upstream Chat
-	// equivalent; they are accepted and reported in Dropped.
-	ignored, err := fieldsAccept(src, "", "model messages system max_tokens stream temperature top_p tools tool_choice thinking stop_sequences", "metadata service_tier top_k cache_control")
+	// metadata/service_tier/top_k/cache_control 是客户端遥测、路由与缓存提示，
+	// output_config.format 以外的字段无 Chat 等价物：接受并在 Dropped 里记账。
+	ignored, err := fieldsAccept(src, "", "model messages system max_tokens stream temperature top_p tools tool_choice thinking stop_sequences output_config", "metadata service_tier top_k cache_control")
 	if err != nil {
 		return nil, err
 	}
@@ -26,18 +25,47 @@ func anthropicRequest(src map[string]any, dropped *[]string) (map[string]any, er
 	if err := sampling(src, dst, 1); err != nil {
 		return nil, err
 	}
+	// output_config 是新版 Messages 的推理控制对象（pi 的 forceAdaptiveThinking /
+	// supportsMidConvoEffort 路径会发 {effort:"high"|…}）：effort 是真正的生成参数，
+	// 与 Responses 的 reasoning.effort 同义，映射为 Chat reasoning_effort（越界档位由
+	// 出站钳位归一，见 responses_request.go 同处注释）。未知子字段仍 400：
+	// output_config.format（结构化输出）本网关未验证，不得静默丢掉语义。
+	if v := src["output_config"]; v != nil {
+		m, err := object(v, "output_config")
+		if err != nil {
+			return nil, err
+		}
+		if err = fields(m, "output_config", "effort"); err != nil {
+			return nil, err
+		}
+		if v := m["effort"]; v != nil {
+			s, err := nonempty(v, "output_config.effort")
+			if err != nil {
+				return nil, err
+			}
+			dst["reasoning_effort"] = s
+		}
+	}
 	if v := src["thinking"]; v != nil {
 		m, err := object(v, "thinking")
 		if err != nil {
 			return nil, err
 		}
-		if err = fields(m, "thinking", "type budget_tokens"); err != nil {
+		// display 只影响推理展示档（本桥不交付推理正文）；block_binding 是官方
+		// 多轮块绑定调优（客户端侧行为，桥接不参与）：接受即丢，记账。
+		thinkingIgnored, err := fieldsAccept(m, "thinking", "type budget_tokens", "display block_binding")
+		if err != nil {
 			return nil, err
+		}
+		for _, k := range thinkingIgnored {
+			*dropped = append(*dropped, "thinking."+k)
 		}
 		switch m["type"] {
 		case "disabled":
 			dst["thinking"] = map[string]any{"type": "disabled"}
-		case "enabled":
+		case "enabled", "adaptive":
+			// adaptive 是官方自适应思考模式（客户端不报 budget，由模型自行决定什么时候
+			// 想）：与 enabled 同口径处理——只校验 budget 形态，状态一律丢弃。
 			// Signed thinking state cannot be replayed by the Chat bridge (the
 			// upstream emits unsigned reasoning text). The request is accepted so
 			// thinking-enabled clients keep working, but the budget/state is
@@ -48,9 +76,11 @@ func anthropicRequest(src map[string]any, dropped *[]string) (map[string]any, er
 					return nil, invalid("thinking.budget_tokens", "positive integer required")
 				}
 			}
+			// 只记字段路径不记值：面板列回答的是「客户端要了什么被我们丢了」，而
+			// enabled / adaptive 的区别对下游排查无意义（两者都是状态被丢弃、模型重新推理）。
 			*dropped = append(*dropped, "thinking")
 		default:
-			return nil, invalid("thinking.type", "disabled or enabled expected")
+			return nil, invalid("thinking.type", "disabled, enabled or adaptive expected")
 		}
 	}
 	if v := src["stop_sequences"]; v != nil {

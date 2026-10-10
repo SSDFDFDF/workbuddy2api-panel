@@ -80,12 +80,36 @@ type chatStat struct {
 
 	// 跨协议接受但无法表达的客户端字段（opts 入口采集，出口写入 reqlog.Event）。
 	dropped []string
+	// 网关主动改写的生成参数（key:原值→出站值）。与 dropped 分开：语义不同
+	//（执行了 vs 没执行），且不能被客户端遥测字段占满的 dropped 上限挤掉。
+	rewritten []string
 
 	logged bool
 }
 
 // maxDroppedFields 归档事件保留的“被忽略字段”上限（推理历史等逐项路径会很多）。
 const maxDroppedFields = 8
+
+// maxRewrittenFields 归档事件保留的“改写”上限。改写只会是「越界档位归一」这类
+// 少数几条（幂等且去重），上限只用于防病态客户端。
+const maxRewrittenFields = 4
+
+// noteRewrite 记录一次主动改写（key:原值→出站值）：去重 + 限长。
+//
+// 为什么不经 droppedFields：改写路径在轮转循环里逐 attempt 产生（多号重试可能命中不同
+// realm 的能力表），而 droppedFields 只在入口调一次；若两者共用一个列表，重试会产生
+// 重复项，且被客户端的遥测字段挤掉最需要被看见的改写记录。
+func (s *chatStat) noteRewrite(entry string) {
+	for _, old := range s.rewritten {
+		if old == entry {
+			return
+		}
+	}
+	if len(s.rewritten) >= maxRewrittenFields {
+		return
+	}
+	s.rewritten = append(s.rewritten, entry)
+}
 
 // droppedFields 归一化跨协议被忽略的客户端字段（去重、限长、下标折叠），
 // 只写入请求归档，不打 stdout 流水行。
@@ -434,6 +458,7 @@ func (t *requestTrace) event(status int) reqlog.Event {
 		e.PromptSHA = s.promptSHA
 		e.PromptChars = s.promptChars
 		e.Dropped = s.dropped
+		e.Rewritten = s.rewritten
 	}
 	e.ClientIP = t.clientIP
 	e.UserAgent = t.userAgent
