@@ -33,11 +33,20 @@ function Ico({ d }: { d: string }) {
   );
 }
 
-export function AppShell({ children }: { children: (view: ViewId) => React.ReactNode }) {
+export function AppShell({
+  children,
+  needKey,
+  onKeyReady,
+}: {
+  children: (view: ViewId) => React.ReactNode;
+  /** 密钥门可见性：由 401 回调（Root 持有）驱动。 */
+  needKey: boolean;
+  /** 密钥验证通过：关闭密钥门。 */
+  onKeyReady: () => void;
+}) {
   const { overview, refresh, hardRefresh } = useData();
   const { theme, toggle } = useTheme();
   const [view, setView] = useState<ViewId>(viewFromHash);
-  const [needKey, setNeedKey] = useState(false);
   const [adding, setAdding] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -190,7 +199,7 @@ export function AppShell({ children }: { children: (view: ViewId) => React.React
       {needKey && (
         <KeyGate
           onReady={() => {
-            setNeedKey(false);
+            onKeyReady();
             void refresh();
           }}
         />

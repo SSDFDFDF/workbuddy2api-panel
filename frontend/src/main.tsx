@@ -1,5 +1,5 @@
 /* React 入口：ThemeProvider + DataProvider + AppShell + 视图分发。 */
-import { StrictMode } from 'react';
+import { StrictMode, useCallback, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './tokens.css';
 import { ThemeProvider } from './theme';
@@ -54,10 +54,17 @@ function View({ id }: { id: ViewId }) {
 }
 
 function Root() {
+  /* 401 → 密钥门（KeyGate）的状态放在最外层：DataProvider 注册的 401 回调
+     需要一个「父组件拥有」的 setter，AppShell 自己 set 不到（它是 DataProvider 的子节点）。 */
+  const [needKey, setNeedKey] = useState(false);
+  const onNeedKey = useCallback(() => setNeedKey(true), []);
+  const onKeyReady = useCallback(() => setNeedKey(false), []);
   return (
     <ThemeProvider>
-      <DataProvider onNeedKey={() => {}}>
-        <AppShell>{(view) => <View id={view} />}</AppShell>
+      <DataProvider onNeedKey={onNeedKey}>
+        <AppShell needKey={needKey} onKeyReady={onKeyReady}>
+          {(view) => <View id={view} />}
+        </AppShell>
       </DataProvider>
       <ToastHost />
     </ThemeProvider>
