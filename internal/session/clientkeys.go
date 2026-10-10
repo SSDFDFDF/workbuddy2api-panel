@@ -292,19 +292,24 @@ func BodyKey(body []byte, promptCacheKey string) string {
 	if len(body) > 0 {
 		var obj map[string]any
 		if err := json.Unmarshal(body, &obj); err == nil {
-			if k := bodySessionKeyObj(obj); k != "" {
-				return k
-			}
-			if promptCacheKey != "" {
-				return promptCacheKey
-			}
-			// 派生回退闸：带 user 维度标识的请求不派生（契约见 ExtractKey）。
-			if hasUserIDKey(obj) {
-				return ""
-			}
-			return deriveKey(obj)
+			return BodyKeyObject(obj, promptCacheKey)
 		}
 	}
 	// body 为空 / 解析失败：prompt_cache_key 仍可用（forwarding 层已校验）。
 	return promptCacheKey
+}
+
+// BodyKeyObject 在未改变会话材料的原协议解码树上提取键，不修改 obj。
+// 跨协议必须传原始 Source，不能传翻译后的 Chat（字段与派生材料不同）。
+func BodyKeyObject(obj map[string]any, promptCacheKey string) string {
+	if k := bodySessionKeyObj(obj); k != "" {
+		return k
+	}
+	if promptCacheKey != "" {
+		return promptCacheKey
+	}
+	if hasUserIDKey(obj) {
+		return ""
+	}
+	return deriveKey(obj)
 }

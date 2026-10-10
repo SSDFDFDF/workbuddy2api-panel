@@ -578,15 +578,54 @@ func deriveKey(obj map[string]any) string {
 	return derivedKeyPrefix + hex.EncodeToString(sum[:16])
 }
 
-// userContentSignature 把已解析的 content（any）转回 RawMessage 后取**会话级稳定**
-// 签名，供 deriveKey（粘性键）专用。与 TurnKey 的 contentSignature（全文摘）不同：
-// 文本 part 照常拼接；非文本 part 只入 "[type]" 占位**不入内容摘要**——同一逻辑
-// 图片的 URL 逐轮变化（签名 URL/重编码 base64）是真实场景，内容摘要入键会让
-// 派生键随轮漂移、粘性名存实亡（fork 既有契约：image url changes must not
-// break derived key stability）。占位仍能区分"有无图片/图片数量"，纯图片首条
-// 消息（无 text part）由此可派生非空键（首图会话粘性盲区修复，对齐上游 G1
-// 的目标语义而保留 fork 的稳定性口径）。marshal 失败按无内容处理（不伪造）。
+// userContentSignature 提取已解析 content 的会话级稳定签名。非文本 part
+// 只记录类型，不读取图片 URL/base64；正常请求不再做 Marshal/Unmarshal 往返。
+// 保留文本空白及历史键语义，非标准大小写字段走旧解码口径兜底。
 func userContentSignature(content any) string {
+	if s, ok := content.(string); ok {
+		return s
+	}
+	parts, ok := content.([]any)
+	if !ok {
+		return userContentSignatureJSON(content)
+	}
+	var b strings.Builder
+	hasNonText := false
+	for _, raw := range parts {
+		if raw == nil {
+			continue // JSON null 解进结构体时是空字段
+		}
+		p, ok := raw.(map[string]any)
+		if !ok {
+			return userContentSignatureJSON(content)
+		}
+		for key := range p {
+			if key != "type" && key != "text" && (strings.EqualFold(key, "type") || strings.EqualFold(key, "text")) {
+				return userContentSignatureJSON(content)
+			}
+		}
+		typ, typeOK := p["type"].(string)
+		text, textOK := p["text"].(string)
+		if (!typeOK && p["type"] != nil) || (!textOK && p["text"] != nil) {
+			return ""
+		}
+		if typ == "" || typ == "text" {
+			b.WriteString(text)
+			continue
+		}
+		hasNonText = true
+		b.WriteString("\n[")
+		b.WriteString(typ)
+		b.WriteString("]\n")
+	}
+	if hasNonText {
+		return strings.TrimSpace(b.String())
+	}
+	return b.String()
+}
+
+// userContentSignatureJSON 仅供非标准字段大小写/非解码树输入兼容兜底。
+func userContentSignatureJSON(content any) string {
 	raw, err := json.Marshal(content)
 	if err != nil {
 		return ""

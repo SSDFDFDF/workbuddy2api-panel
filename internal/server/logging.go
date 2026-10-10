@@ -163,13 +163,16 @@ func collapseIndexes(s string) string {
 	return b.String()
 }
 
-// newChatStat 以请求进入 handler 的时刻为起点构造统计对象；toks 默认 -1（usage 缺失）。
-func newChatStat(now time.Time, body []byte, stream bool) *chatStat {
+// newChatStat 复用已校验的 model，不为日志再次扫描整包 JSON；toks 默认 -1。
+func newChatStat(now time.Time, model string, stream bool) *chatStat {
 	mode := "sync"
 	if stream {
 		mode = "stream"
 	}
-	return &chatStat{start: now, model: parseModelFromBody(body), mode: mode, toks: -1}
+	if model == "" {
+		model = "-"
+	}
+	return &chatStat{start: now, model: model, mode: mode, toks: -1}
 }
 
 // done 幂等落一行表格日志。
@@ -283,17 +286,6 @@ func (s *chatStatsReader) CacheTokens() (hit, miss int64, ok bool) {
 		miss = int64(s.promptTokens - s.cacheHit)
 	}
 	return hit, miss, true
-}
-
-// parseModelFromBody 从请求 JSON 取 model 字段，缺省标 "-"。
-func parseModelFromBody(body []byte) string {
-	var obj struct {
-		Model string `json:"model"`
-	}
-	if err := json.Unmarshal(body, &obj); err != nil || obj.Model == "" {
-		return "-"
-	}
-	return obj.Model
 }
 
 // usageDeltaFromResponse 从非流式聚合响应中提取明确存在的 token 字段。

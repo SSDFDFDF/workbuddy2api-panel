@@ -2,6 +2,7 @@ package panel
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -34,6 +35,10 @@ type cockpitAccount struct {
 	LastUsed       int64  `json:"last_used"`
 }
 
+// maxCockpitImportBytes 是整个 multipart 请求（含边界/字段）的硬上限。
+// ParseMultipartForm 的参数只控制内存暂存量，不限制上传大小。
+const maxCockpitImportBytes = 32 << 20
+
 // importCockpit 接收 cockpit tools 导出的 JSON 文件，批量导入账号到池中。
 //
 //	POST /panel/api/import/cockpit
@@ -42,9 +47,23 @@ type cockpitAccount struct {
 //
 // 返回 {ok, total, imported, skipped, errors}。
 func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		writeErr(w, http.StatusBadRequest, "parse form: "+err.Error())
+	if r.ContentLength > maxCockpitImportBytes {
+		writeErr(w, http.StatusRequestEntityTooLarge, "import exceeds 32 MiB; split the export into smaller files")
 		return
+	}
+	// 未声明长度/chunked 同样受硬限制；在导入任何账号之前读完并验证。
+	r.Body = http.MaxBytesReader(w, r.Body, maxCockpitImportBytes)
+	if err := r.ParseMultipartForm(maxCockpitImportBytes); err != nil {
+		status := http.StatusBadRequest
+		var large *http.MaxBytesError
+		if errors.As(err, &large) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeErr(w, status, "parse form: "+err.Error())
+		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
 	}
 	file, _, err := r.FormFile("file")
 	if err != nil {

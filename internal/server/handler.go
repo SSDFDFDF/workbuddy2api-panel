@@ -613,7 +613,7 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 		return
 	}
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到，**含门禁 404**）。
-	st := newChatStat(time.Now(), body, peek.Stream)
+	st := newChatStat(time.Now(), peek.Model, peek.Stream)
 	// 跨协议入口被忽略的客户端字段（如 Codex 的 include/reasoning 历史/客户端遥测）：
 	// 只写请求归档，用于回答“它发了什么被我们丢了”。
 	st.dropped = droppedFields(request.Dropped)
@@ -681,7 +681,7 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 	} else if v := session.HeaderSessionKey(r.Header); v != "" {
 		convKey = v
 	} else {
-		convKey = session.BodyKey(body, peek.PromptCacheKey)
+		convKey = bodySessionKey(request, body)
 	}
 	// isDerivedKey 精确判定派生键形态（"d-" + 32 hex，与 deriveKey 输出严格
 	// 同宽）：prompt_cache_key 是裸值入键，客户端可能碰巧传 "d-" 开头的值，

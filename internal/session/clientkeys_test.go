@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -97,6 +98,12 @@ func TestBodyKey(t *testing.T) {
 			got := BodyKey([]byte(c.body), c.pck)
 			if got != c.want {
 				t.Fatalf("got %q want %q", got, c.want)
+			}
+			var obj map[string]any
+			if json.Unmarshal([]byte(c.body), &obj) == nil {
+				if got := BodyKeyObject(obj, c.pck); got != c.want {
+					t.Fatalf("parsed-object key=%q want %q", got, c.want)
+				}
 			}
 		})
 	}

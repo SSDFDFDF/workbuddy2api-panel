@@ -158,7 +158,10 @@ type Recorder struct {
 	succeeded   int64
 	httpSuccess int64
 	durationSum int64
-	recent      []Event
+	// recent 按完成顺序写入环形缓冲；仅 Snapshot 按最新在前复制。
+	recent      [recentLimit]Event
+	recentNext  int
+	recentCount int
 	archive     atomic.Pointer[archiveWriter]
 	// closed 置位后 Reconfigure 不再新建 writer（进程关停阶段保存配置时不留
 	// 无人回收的归档 goroutine）。
@@ -178,7 +181,7 @@ func normalizeArchiveConfig(cfg Config) Config {
 
 // New 创建记录器；Dir 为空或 Enabled=false 时只启用内存指标。
 func New(cfg Config) *Recorder {
-	r := &Recorder{started: time.Now(), recent: make([]Event, 0, recentLimit)}
+	r := &Recorder{started: time.Now()}
 	r.archive.Store(newArchiveWriter(normalizeArchiveConfig(cfg)))
 	return r
 }
@@ -248,9 +251,10 @@ func (r *Recorder) Record(e Event) {
 		r.httpSuccess++
 	}
 	r.durationSum += e.DurationMs
-	r.recent = append([]Event{e}, r.recent...)
-	if len(r.recent) > recentLimit {
-		r.recent = r.recent[:recentLimit]
+	r.recent[r.recentNext] = e
+	r.recentNext = (r.recentNext + 1) % recentLimit
+	if r.recentCount < recentLimit {
+		r.recentCount++
 	}
 	r.mu.Unlock()
 	if w := r.archive.Load(); w != nil {
@@ -275,7 +279,12 @@ func (r *Recorder) Snapshot() Snapshot {
 		Completed: r.completed,
 		InFlight:  r.inFlight,
 		Succeeded: r.succeeded,
-		Recent:    append([]Event(nil), r.recent...),
+	}
+	if r.recentCount > 0 {
+		s.Recent = make([]Event, r.recentCount)
+		for i := range s.Recent {
+			s.Recent[i] = r.recent[(r.recentNext-1-i+recentLimit)%recentLimit]
+		}
 	}
 	if r.completed > 0 {
 		s.Failed = r.completed - r.succeeded

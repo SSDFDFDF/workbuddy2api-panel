@@ -275,15 +275,23 @@ func TestRequestMetricsDetectsStreamErrorFrame(t *testing.T) {
 	}
 }
 
-func TestParseModelFromBody(t *testing.T) {
-	if got := parseModelFromBody([]byte(`{"model":"deepseek-v4-flash","stream":true}`)); got != "deepseek-v4-flash" {
-		t.Errorf("got %q", got)
-	}
-	if got := parseModelFromBody([]byte(`{}`)); got != "-" {
-		t.Errorf("got %q want -", got)
-	}
-	if got := parseModelFromBody([]byte(`not json`)); got != "-" {
-		t.Errorf("got %q want -", got)
+func TestNewChatStatUsesParsedModel(t *testing.T) {
+	now := time.Now()
+	for _, model := range []string{"cn:deepseek-v4-flash", "global:gpt-5.4", ""} {
+		for _, stream := range []bool{false, true} {
+			s := newChatStat(now, model, stream)
+			want := model
+			if want == "" {
+				want = "-"
+			}
+			mode := "sync"
+			if stream {
+				mode = "stream"
+			}
+			if s.model != want || s.mode != mode || s.start != now || s.toks != -1 {
+				t.Fatalf("unexpected stat: %+v", s)
+			}
+		}
 	}
 }
 
