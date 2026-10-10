@@ -23,11 +23,11 @@ export function StackedBars({ pts, tick }: { pts: ChartPoint[]; tick?: (p: { t: 
   const geo = useMemo(() => {
     if (!pts.length) return null;
     const W = 1200;
-    const H = 200;
-    const PL = 58;
-    const PR = 14;
-    const PT = 18;
-    const PB = 30;
+    const H = 120;
+    const PL = 48;
+    const PR = 12;
+    const PT = 10;
+    const PB = 22;
     const iw = W - PL - PR;
     const ih = H - PT - PB;
     const t0 = pts[0].t;
@@ -100,13 +100,13 @@ export function StackedBars({ pts, tick }: { pts: ChartPoint[]; tick?: (p: { t: 
       </defs>
 
       {/* y 轴网格 + 刻度 */}
-      {Array.from({ length: 5 }, (_, i) => {
-        const y = PT + ih - (ih * i) / 4;
+      {Array.from({ length: 4 }, (_, i) => {
+        const y = PT + ih - (ih * i) / 3;
         return (
           <g key={i}>
             <line className="stroke-[var(--line-soft)]" x1={PL} y1={y} x2={W - PR} y2={y} />
-            <text className="fill-[var(--ink-3)] text-[11px] tabular" x={PL - 6} y={y + 3.5} textAnchor="end">
-              {fmtTok((max * i) / 4)}
+            <text className="fill-[var(--ink-3)] text-[10px] tabular" x={PL - 5} y={y + 3} textAnchor="end">
+              {fmtTok((max * i) / 3)}
             </text>
           </g>
         );
@@ -116,7 +116,7 @@ export function StackedBars({ pts, tick }: { pts: ChartPoint[]; tick?: (p: { t: 
       {avg > 0 && avg < max && (
         <g>
           <line className="stroke-[var(--warn)]" strokeDasharray="4 3" opacity="0.7" x1={PL} y1={yOf(avg)} x2={W - PR} y2={yOf(avg)} />
-          <text className="fill-[var(--warn)] text-[11px] tabular" x={PL + 5} y={yOf(avg) - 4} textAnchor="start">
+          <text className="fill-[var(--warn)] text-[10px] tabular" x={PL + 5} y={yOf(avg) - 3} textAnchor="start">
             均值 {fmtTok(avg)}
           </text>
         </g>

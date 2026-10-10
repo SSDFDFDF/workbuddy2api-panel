@@ -1,14 +1,12 @@
-/* 用量视图：KPI 卡 + Token 时序图 + 维度明细表（账号/模型/域）+ 积分扣除表。 */
+/* 用量视图：KPI 卡（精简优化） + Token 时序图（紧凑视图） + 双 Tab 复用明细表（维度明细 / 积分扣除）+ 分页控制。 */
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
 import { useTimeRange, TimeRangeControl } from '../components/TimeRange';
-import { Kpi, SegBar, Empty, Loading } from '../components/ui';
+import { Kpi, SegBar, Empty, Loading, Pager } from '../components/ui';
 import { StackedBars, toChartPoints } from '../components/StackedBars';
 import { btnXs } from '../components/buttons';
 import type { UsageRow, UsageSnapshot } from '../types';
 import { fmtTok, fmtMs, fmtRate, fmtCredit, trimFixed, cacheRatePct } from '../fmt';
-
-const PAGE = 20;
 
 function sortRows(rows: UsageRow[], sort: string): UsageRow[] {
   const num = (v: unknown) => {
@@ -27,28 +25,28 @@ function DimRow({ x, withRealm, withPerf }: { x: UsageRow; withRealm: boolean; w
   const ct = Number(x.completion_tokens || 0);
   const uid = String(x.key || '');
   return (
-    <tr>
-      <td>
+    <tr className="transition-colors hover:bg-[var(--surface-2)]/60">
+      <td className="px-3.5 py-2.5">
         {withRealm ? (
           <>
-            <div className="font-medium">{x.nickname || uid.slice(0, 8) || '—'}</div>
-            <div className="text-[11px] text-[var(--ink-3)]">{x.extra || uid.slice(0, 8)}</div>
+            <div className="font-medium text-[var(--ink)]">{x.nickname || uid.slice(0, 8) || '—'}</div>
+            <div className="text-[11px] text-[var(--ink-3)] font-[family-name:var(--mono)]">{x.extra || uid.slice(0, 8)}</div>
           </>
         ) : (
-          <span className="font-[family-name:var(--mono)] text-[12.5px]">{x.key || '—'}</span>
+          <span className="font-[family-name:var(--mono)] text-[12.5px] font-medium text-[var(--ink)]">{x.key || '—'}</span>
         )}
       </td>
-      {withRealm && <td className="tabular">{x.realm || ''}</td>}
-      <td className="tabular">{fmtTok(x.requests)}</td>
-      <td className="tabular">{x.errors ? <span className="text-[var(--warn)]">{fmtTok(x.errors)}</span> : '—'}</td>
-      <td className="tabular">
-        {fmtTok(tt)}
+      {withRealm && <td className="tabular px-3.5 py-2.5 text-[var(--ink-2)]">{x.realm || '—'}</td>}
+      <td className="tabular px-3.5 py-2.5 text-[var(--ink)] font-medium">{fmtTok(x.requests)}</td>
+      <td className="tabular px-3.5 py-2.5">{x.errors ? <span className="text-[var(--warn)] font-medium">{fmtTok(x.errors)}</span> : <span className="text-[var(--ink-3)]">—</span>}</td>
+      <td className="tabular px-3.5 py-2.5">
+        <span className="font-semibold text-[var(--ink)]">{fmtTok(tt)}</span>
         {tt > 0 && (
-          <div className="mt-1 max-w-[180px]">
+          <div className="mt-1 max-w-[160px]">
             <SegBar
               segs={[
-                { value: pt, color: 'var(--accent)', title: `prompt ${fmtTok(pt)} (${((pt / tt) * 100).toFixed(1)}%)` },
-                { value: ct, color: 'var(--ok)', title: `completion ${fmtTok(ct)} (${((ct / tt) * 100).toFixed(1)}%)` },
+                { value: pt, color: 'var(--accent)', title: `读 ${fmtTok(pt)} (${((pt / tt) * 100).toFixed(1)}%)` },
+                { value: ct, color: 'var(--ok)', title: `取 ${fmtTok(ct)} (${((ct / tt) * 100).toFixed(1)}%)` },
               ]}
             />
           </div>
@@ -56,8 +54,8 @@ function DimRow({ x, withRealm, withPerf }: { x: UsageRow; withRealm: boolean; w
       </td>
       {withPerf && (
         <>
-          <td className="tabular">{fmtMs(x.avg_latency_ms)}</td>
-          <td className="tabular">{fmtRate(x.avg_tokens_per_second)}</td>
+          <td className="tabular px-3.5 py-2.5 text-[var(--ink)]">{fmtMs(x.avg_latency_ms)}</td>
+          <td className="tabular px-3.5 py-2.5 text-[var(--ink-2)]">{fmtRate(x.avg_tokens_per_second)}</td>
         </>
       )}
     </tr>
@@ -68,34 +66,48 @@ function DimRow({ x, withRealm, withPerf }: { x: UsageRow; withRealm: boolean; w
 function CacheCell({ hit, miss }: { hit?: number; miss?: number }) {
   const pct = cacheRatePct(hit, miss);
   if (pct == null) return <span className="text-[var(--ink-3)]">—</span>;
-  const cls = pct >= 90 ? 'text-[var(--ok)]' : pct >= 80 ? 'text-[var(--warn)]' : 'text-[var(--bad)]';
   return (
-    <span className={cls} title={`命中 ${fmtTok(hit)} / 未命中 ${fmtTok(miss)} tok`}>
-      {trimFixed(pct.toFixed(1))}%
+    <span
+      className={
+        'inline-flex items-center rounded-md px-1.5 py-0.5 text-[11px] font-semibold tabular ' +
+        (pct > 0 ? 'bg-[var(--ok-soft)] text-[var(--ok)] border border-[var(--ok)]/20' : 'bg-[var(--surface-2)] text-[var(--ink-3)]')
+      }
+    >
+      {pct > 0 ? `⚡ ${trimFixed(pct.toFixed(1))}%` : '0%'}
     </span>
   );
 }
 
 export function UsageView() {
+  const range = useTimeRange('0');
   const [data, setData] = useState<UsageSnapshot | null>(null);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<string | null>(null);
+
+  // 表格 Tab：'dimension' (用量维度明细) | 'credit' (积分扣除明细)
+  const [tableTab, setTableTab] = useState<'dimension' | 'credit'>('dimension');
+
+  // 维度表过滤与分页
   const [dim, setDim] = useState<'account' | 'model' | 'realm'>('account');
-  const [creditDim, setCreditDim] = useState<'account' | 'model'>('account');
   const [sort, setSort] = useState('total');
-  const range = useTimeRange('72');
+  const [dimPage, setDimPage] = useState(1);
+  const [dimPageSize, setDimPageSize] = useState(20);
+
+  // 积分扣除表过滤与分页
+  const [creditDim, setCreditDim] = useState<'model' | 'account'>('model');
+  const [creditPage, setCreditPage] = useState(1);
+  const [creditPageSize, setCreditPageSize] = useState(20);
 
   const load = useCallback(async () => {
-    setError('');
+    setError(null);
     try {
-      void api('models').catch(() => {}); // 预热倍率缓存（可选增强）
-      const d = await api<UsageSnapshot>('usage?' + range.qs(true));
+      const qs = range.qs(false);
+      const url = 'usage' + (qs ? '?' + qs : '');
+      const d = await api<UsageSnapshot>(url);
       setData(d);
     } catch (e) {
-      setError((e as Error).message);
-      setData(null);
+      setError((e as Error).message || String(e));
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [range.st.preset, range.st.from, range.st.to]);
+  }, [range]);
 
   useEffect(() => {
     void load();
@@ -112,8 +124,14 @@ export function UsageView() {
 
   const dimMeta = { account: { withRealm: true, withPerf: true }, model: { withRealm: false, withPerf: false }, realm: { withRealm: false, withPerf: false } }[dim];
   const dimRows = sortRows(d?.[({ account: 'by_account', model: 'by_model', realm: 'by_realm' } as const)[dim]] || [], sort);
+  const dimTotalPages = Math.max(1, Math.ceil(dimRows.length / dimPageSize));
+  const curDimPage = Math.min(dimPage, dimTotalPages);
+  const pagedDimRows = dimRows.slice((curDimPage - 1) * dimPageSize, curDimPage * dimPageSize);
 
   const creditRows = creditDim === 'model' ? d?.credit_by_model || [] : d?.credit_by_account || [];
+  const creditTotalPages = Math.max(1, Math.ceil(creditRows.length / creditPageSize));
+  const curCreditPage = Math.min(creditPage, creditTotalPages);
+  const pagedCreditRows = creditRows.slice((curCreditPage - 1) * creditPageSize, curCreditPage * creditPageSize);
 
   const pts = toChartPoints(d?.series || []);
   const peak = pts.length ? pts.reduce((a, b) => (b.tt > a.tt ? b : a)) : null;
@@ -124,17 +142,17 @@ export function UsageView() {
     : '';
   const note =
     (rangeEcho || range.label() ? (rangeEcho || range.label()) + ' · ' : '') +
-    (d?.buckets || 0) + ' 个分桶' +
-    (d?.since ? ' · 数据自 ' + d.since.replace('T', ' ') : '');
+    (d?.buckets || 0) + ' 分桶' +
+    (d?.since ? ' · 始自 ' + d.since.replace('T', ' ').slice(0, 16) : '');
 
   return (
     <div className="flex flex-col gap-4">
-      {/* 总览 */}
-      <div className="rounded-xl border border-[var(--line)] bg-[var(--surface)]">
-        <header className="flex flex-wrap items-center gap-2.5 px-4 py-3">
-          <h3 className="text-[14px] font-semibold">用量与积分总览</h3>
+      {/* 总览面板 */}
+      <div className="rounded-xl border border-[var(--line)] bg-[var(--surface)] shadow-xs">
+        <header className="flex flex-wrap items-center gap-2.5 px-4 py-3 border-b border-[var(--line-soft)]">
+          <h3 className="text-[14px] font-semibold text-[var(--ink)]">用量与积分总览</h3>
           <span className="flex-1" />
-          <span className="text-[12px] text-[var(--ink-3)]" title={note}>
+          <span className="text-[12px] text-[var(--ink-3)] tabular" title={note}>
             {error ? '读取失败：' + error : note || '—'}
           </span>
           <TimeRangeControl range={range} onChange={() => void load()} />
@@ -148,199 +166,275 @@ export function UsageView() {
         ) : !d ? (
           <Loading />
         ) : (
-          <div className="px-4 pb-4">
-            <div className="flex flex-wrap gap-3">
+          <div className="p-4">
+            {/* KPI 指标微卡（精简化展示） */}
+            <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-6">
               <Kpi
                 v={fmtTok(reqs)}
                 k="请求数"
                 tone={errs ? 'warn' : 'accent'}
-                sub={okRate == null ? '—' : errs ? `成功率 ${okRate.toFixed(1)}% · 失败 ${errs} 次` : '成功率 100%'}
+                sub={okRate == null ? '—' : `成功率 ${okRate.toFixed(1)}%${errs ? ' · 失败 ' + errs : ''}`}
               />
               <Kpi
                 v={fmtTok(total)}
-                k="总 token"
+                k="总 Token"
                 tone="accent"
-                sub={`prompt ${fmtTok(pt)} · completion ${fmtTok(ct)}`}
-              >
-                {total > 0 && (
-                  <div className="mt-2">
-                    <SegBar
-                      segs={[
-                        { value: pt, color: 'var(--accent)', title: `prompt ${((pt / total) * 100).toFixed(1)}%` },
-                        { value: ct, color: 'var(--ok)', title: `completion ${((ct / total) * 100).toFixed(1)}%` },
-                      ]}
-                    />
-                  </div>
-                )}
-              </Kpi>
-              <Kpi v={fmtMs(t.avg_latency_ms)} k="平均延迟" sub={t.avg_tokens_per_second ? '吐字 ' + fmtRate(t.avg_tokens_per_second) : '无速率样本'} />
-              <Kpi v={fmtCredit(t.credits)} k="扣除积分" tone="accent" sub="按上游 usage.credit 累计" />
+                sub={`读 ${fmtTok(pt)} · 取 ${fmtTok(ct)}`}
+              />
               <Kpi
-                v={t.credits_per_1m_tokens != null && t.credit_tokens ? trimFixed(Number(t.credits_per_1m_tokens).toFixed(4)) : '—'}
-                k="平均积分 / 1M Token"
+                v={fmtMs(t.avg_latency_ms)}
+                k="平均延迟"
+                tone="soft"
+                sub={t.avg_tokens_per_second ? `速率 ${fmtRate(t.avg_tokens_per_second)}` : '延迟统计'}
+              />
+              <Kpi
+                v={fmtCredit(t.credits)}
+                k="扣除积分"
+                tone="accent"
+                sub="积分消耗总额"
+              />
+              <Kpi
+                v={t.credits_per_1m_tokens != null && t.credit_tokens ? trimFixed(Number(t.credits_per_1m_tokens).toFixed(3)) : '—'}
+                k="积分 / 1M Token"
                 tone="ok"
-                sub={`${t.credit_samples || 0} 个有效样本 · 越低越划算`}
+                sub="单位均价成本"
               />
               <Kpi
                 v={cacheRatePct(t.cache_hit_tokens, t.cache_miss_tokens) == null ? '—' : trimFixed(cacheRatePct(t.cache_hit_tokens, t.cache_miss_tokens)!.toFixed(1)) + '%'}
                 k="缓存命中率"
                 tone="mute"
-                sub="上游前缀缓存命中比例；低命中意味着费用数倍放大"
+                sub="前缀缓存命中比"
               />
             </div>
 
-            {/* 时序图 */}
-            <div className="mt-4">
-              <div className="mb-1.5 flex items-center gap-2 text-[12px] text-[var(--ink-3)]">
-                <span className="font-medium text-[var(--ink-2)]">Token 时序</span>
-                  {pts.length ? (
-                    <span>
-                      {pts.length} 个点 · 峰值 {fmtTok(peak ? peak.tt : 0)} · 均值 {fmtTok(avg)}
-                    </span>
-                  ) : (
-                    <span>—</span>
-                  )}
+            {/* Token 时序图（缩小紧凑视图） */}
+            <div className="mt-3.5 rounded-lg border border-[var(--line-soft)] bg-[var(--surface-2)]/40 p-3">
+              <div className="mb-2 flex items-center gap-2 text-[11.5px] text-[var(--ink-3)]">
+                <span className="font-semibold text-[var(--ink-2)]">Token 时序</span>
+                {pts.length ? (
+                  <span className="tabular">
+                    {pts.length} 个点 · 峰值 {fmtTok(peak ? peak.tt : 0)} · 均值 {fmtTok(avg)}
+                  </span>
+                ) : (
+                  <span>—</span>
+                )}
                 <span className="flex-1" />
-                <span className="flex items-center gap-1">
-                  <i className="h-2 w-2 rounded-sm bg-[var(--accent)]" />prompt
-                  <i className="ml-2 h-2 w-2 rounded-sm bg-[var(--ok)]" />completion
+                <span className="flex items-center gap-1.5 tabular text-[11px]">
+                  <i className="h-2 w-2 rounded-xs bg-[var(--accent)]" />读 (Prompt)
+                  <i className="ml-2 h-2 w-2 rounded-xs bg-[var(--ok)]" />取 (Completion)
                 </span>
               </div>
-              {pts.length ? <StackedBars pts={pts} /> : <Empty>暂无用量数据。发起一次对话后再刷新。</Empty>}
+              <div className="max-h-[140px] overflow-hidden">
+                {pts.length ? <StackedBars pts={pts} /> : <Empty>暂无用量数据，发起一次对话后再刷新。</Empty>}
+              </div>
             </div>
           </div>
         )}
       </div>
 
-      {/* 明细 */}
-      <div className="rounded-xl border border-[var(--line)] bg-[var(--surface)]">
-        <header className="flex flex-wrap items-center gap-2.5 px-4 py-3">
-          <div className="flex gap-1">
-            {([['account', '按账号'], ['model', '按模型'], ['realm', '按域']] as const).map(([k, label]) => (
-              <button
-                key={k}
-                className={
-                  'rounded-md px-2.5 py-1 text-[12.5px] ' +
-                  (dim === k ? 'bg-[var(--accent-soft)] font-medium text-[var(--accent)]' : 'text-[var(--ink-3)] hover:text-[var(--ink)]')
-                }
-                onClick={() => setDim(k)}
-              >
-                {label}
-                {d ? <span className="ml-1 text-[11px] opacity-70">{(d[({ account: 'by_account', model: 'by_model', realm: 'by_realm' } as const)[k]] || []).length}</span> : null}
-              </button>
-            ))}
+      {/* 两个表格复用 Tab 切换展示卡片 */}
+      <div className="rounded-xl border border-[var(--line)] bg-[var(--surface)] shadow-xs overflow-hidden">
+        <header className="flex flex-wrap items-center gap-2.5 px-4 py-3 border-b border-[var(--line-soft)] bg-[var(--surface)]">
+          {/* 主 Tab 选择器 */}
+          <div className="flex items-center gap-1 rounded-lg bg-[var(--surface-2)] p-1">
+            <button
+              type="button"
+              className={
+                'flex items-center gap-1.5 rounded-md px-3 py-1 text-[12.5px] font-medium transition-all ' +
+                (tableTab === 'dimension'
+                  ? 'bg-[var(--surface)] text-[var(--accent)] font-semibold shadow-xs'
+                  : 'text-[var(--ink-2)] hover:text-[var(--ink)]')
+              }
+              onClick={() => setTableTab('dimension')}
+            >
+              <span>用量维度明细</span>
+              <span className="text-[11px] opacity-75 tabular">({dimRows.length})</span>
+            </button>
+            <button
+              type="button"
+              className={
+                'flex items-center gap-1.5 rounded-md px-3 py-1 text-[12.5px] font-medium transition-all ' +
+                (tableTab === 'credit'
+                  ? 'bg-[var(--surface)] text-[var(--accent)] font-semibold shadow-xs'
+                  : 'text-[var(--ink-2)] hover:text-[var(--ink)]')
+              }
+              onClick={() => setTableTab('credit')}
+            >
+              <span>积分扣除明细</span>
+              <span className="text-[11px] opacity-75 tabular">({creditRows.length})</span>
+            </button>
           </div>
-          <span className="flex-1" />
-          <span className="text-[12px] text-[var(--ink-3)]">{dimRows.length} 行 · 请求数含失败尝试</span>
-          <label className="flex items-center gap-1 text-[12px] text-[var(--ink-3)]">
-            排序
-            <select className="wb-select px-2 py-1" value={sort} onChange={(e) => setSort(e.target.value)}>
-              <option value="total">合计 Token</option>
-              <option value="requests">请求数</option>
-              <option value="errors">失败数</option>
-              <option value="latency">平均延迟</option>
-            </select>
-          </label>
-        </header>
-        <div className="overflow-x-auto">
-          <table className="w-full border-collapse text-[13px]">
-            <thead>
-              <tr className="border-y border-[var(--line-soft)] text-left text-[11.5px] text-[var(--ink-3)]">
-                <th className="px-3 py-2 font-medium">{dim === 'account' ? '账号' : dim === 'model' ? '模型' : '域'}</th>
-                {dimMeta.withRealm && <th className="px-3 py-2 font-medium">域</th>}
-                <th className="px-3 py-2 font-medium">请求</th>
-                <th className="px-3 py-2 font-medium">失败</th>
-                <th className="px-3 py-2 font-medium">Token</th>
-                {dimMeta.withPerf && <th className="px-3 py-2 font-medium">均延迟</th>}
-                {dimMeta.withPerf && <th className="px-3 py-2 font-medium">均速率</th>}
-              </tr>
-            </thead>
-            <tbody>
-              {dimRows.slice(0, PAGE).map((x, i) => (
-                <DimRow key={i} x={x} withRealm={dimMeta.withRealm} withPerf={dimMeta.withPerf} />
-              ))}
-              {!dimRows.length && (
-                <tr>
-                  <td colSpan={7}>
-                    <Empty>{error ? '读取用量失败' : '暂无数据'}</Empty>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
 
-      {/* 积分扣除 */}
-      <div className="rounded-xl border border-[var(--line)] bg-[var(--surface)]">
-        <header className="flex flex-wrap items-center gap-2.5 px-4 py-3">
-          <h3 className="text-[14px] font-semibold">积分扣除</h3>
-          <div className="flex gap-1">
-            {([['account', '按账号'], ['model', '按模型']] as const).map(([k, label]) => (
-              <button
-                key={k}
-                className={
-                  'rounded-md px-2.5 py-1 text-[12.5px] ' +
-                  (creditDim === k ? 'bg-[var(--accent-soft)] font-medium text-[var(--accent)]' : 'text-[var(--ink-3)] hover:text-[var(--ink)]')
-                }
-                onClick={() => setCreditDim(k)}
-              >
-                {label}
-                {d ? <span className="ml-1 text-[11px] opacity-70">{(k === 'model' ? d.credit_by_model || [] : d.credit_by_account || []).length}</span> : null}
-              </button>
-            ))}
-          </div>
           <span className="flex-1" />
-          <span className="text-[12px] text-[var(--ink-3)]">仅统计与积分同时观测到的 Token</span>
-        </header>
-        <div className="overflow-x-auto">
-          <table className="w-full border-collapse text-[13px]">
-            <thead>
-              <tr className="border-y border-[var(--line-soft)] text-left text-[11.5px] text-[var(--ink-3)]">
-                <th className="px-3 py-2 font-medium">{creditDim === 'model' ? '模型' : '账号'}</th>
-                {creditDim === 'model' && <th className="px-3 py-2 font-medium">积分倍率</th>}
-                <th className="px-3 py-2 font-medium">请求</th>
-                <th className="px-3 py-2 font-medium">扣除积分</th>
-                <th className="px-3 py-2 font-medium">有效样本 Token</th>
-                <th className="px-3 py-2 font-medium">积分 / 1M Token</th>
-                <th className="px-3 py-2 font-medium">缓存命中率</th>
-              </tr>
-            </thead>
-            <tbody>
-              {creditRows.slice(0, PAGE).map((r, i) => (
-                <tr key={i}>
-                  <td>
-                    {creditDim === 'model' ? (
-                      <span className="font-[family-name:var(--mono)] text-[12.5px]">{r.key || '—'}</span>
-                    ) : (
-                      <>
-                        <div className="font-medium">{r.nickname || String(r.key || '').slice(0, 8) || '—'}</div>
-                        <div className="text-[11px] text-[var(--ink-3)]">{r.realm || ''} · {String(r.key || '').slice(0, 8)}</div>
-                      </>
-                    )}
-                  </td>
-                  {creditDim === 'model' && <td className="tabular">{r.rate ? 'x' + r.rate : '—'}</td>}
-                  <td className="tabular">{fmtTok(r.requests)}</td>
-                  <td className="tabular">{fmtCredit(r.credits)}</td>
-                  <td className="tabular">{fmtTok(r.credit_tokens)}</td>
-                  <td className="tabular">
-                    {r.credit_samples && r.credit_tokens && r.credits_per_1m_tokens != null ? trimFixed(Number(r.credits_per_1m_tokens).toFixed(4)) : '—'}
-                  </td>
-                  <td>
-                    <CacheCell hit={r.cache_hit_tokens} miss={r.cache_miss_tokens} />
-                  </td>
-                </tr>
+
+          {/* Tab 1 专属子过滤器 */}
+          {tableTab === 'dimension' && (
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex gap-1">
+                {([['account', '按账号'], ['model', '按模型'], ['realm', '按域']] as const).map(([k, label]) => (
+                  <button
+                    key={k}
+                    className={
+                      'rounded-md px-2 py-0.5 text-[12px] ' +
+                      (dim === k ? 'bg-[var(--accent-soft)] font-medium text-[var(--accent)] border border-[var(--accent)]/20' : 'text-[var(--ink-3)] hover:text-[var(--ink)]')
+                    }
+                    onClick={() => {
+                      setDim(k);
+                      setDimPage(1);
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <label className="flex items-center gap-1 text-[12px] text-[var(--ink-3)]">
+                排序
+                <select className="wb-select px-2 py-0.5 text-[11.5px]" value={sort} onChange={(e) => setSort(e.target.value)}>
+                  <option value="total">合计 Token</option>
+                  <option value="requests">请求数</option>
+                  <option value="errors">失败数</option>
+                  <option value="latency">平均延迟</option>
+                </select>
+              </label>
+            </div>
+          )}
+
+          {/* Tab 2 专属子过滤器 */}
+          {tableTab === 'credit' && (
+            <div className="flex items-center gap-1">
+              {([['model', '按模型'], ['account', '按账号']] as const).map(([k, label]) => (
+                <button
+                  key={k}
+                  className={
+                    'rounded-md px-2 py-0.5 text-[12px] ' +
+                    (creditDim === k ? 'bg-[var(--accent-soft)] font-medium text-[var(--accent)] border border-[var(--accent)]/20' : 'text-[var(--ink-3)] hover:text-[var(--ink)]')
+                  }
+                  onClick={() => {
+                    setCreditDim(k);
+                    setCreditPage(1);
+                  }}
+                >
+                  {label}
+                </button>
               ))}
-              {!creditRows.length && (
-                <tr>
-                  <td colSpan={7}>
-                    <Empty>{error ? '读取用量失败' : '暂无积分扣除记录；升级前仅含 Token 的历史不会伪造积分。'}</Empty>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+            </div>
+          )}
+        </header>
+
+        {/* ── Tab 1 内容：用量维度明细 ── */}
+        {tableTab === 'dimension' && (
+          <div>
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse text-[13px]">
+                <thead>
+                  <tr className="border-b border-[var(--line-soft)] bg-[var(--surface-2)]/50 text-left text-[11.5px] font-semibold text-[var(--ink-2)]">
+                    <th className="px-3.5 py-2.5">{dim === 'account' ? '账号' : dim === 'model' ? '模型' : '域'}</th>
+                    {dimMeta.withRealm && <th className="px-3.5 py-2.5">域</th>}
+                    <th className="px-3.5 py-2.5">请求数</th>
+                    <th className="px-3.5 py-2.5">失败数</th>
+                    <th className="px-3.5 py-2.5">Token 构成 (读 / 取)</th>
+                    {dimMeta.withPerf && <th className="px-3.5 py-2.5">平均延迟</th>}
+                    {dimMeta.withPerf && <th className="px-3.5 py-2.5">平均速率</th>}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[var(--line-soft)]/60">
+                  {pagedDimRows.map((x, i) => (
+                    <DimRow key={i} x={x} withRealm={dimMeta.withRealm} withPerf={dimMeta.withPerf} />
+                  ))}
+                  {!dimRows.length && (
+                    <tr>
+                      <td colSpan={7}>
+                        <Empty>{error ? '读取用量失败' : '暂无数据'}</Empty>
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {/* 维度表翻页器 */}
+            <Pager
+              page={curDimPage}
+              totalPages={dimTotalPages}
+              total={dimRows.length}
+              pageSize={dimPageSize}
+              pageSizeOptions={[10, 20, 50]}
+              onPage={setDimPage}
+              onPageSizeChange={(sz) => {
+                setDimPageSize(sz);
+                setDimPage(1);
+              }}
+            />
+          </div>
+        )}
+
+        {/* ── Tab 2 内容：积分扣除明细 ── */}
+        {tableTab === 'credit' && (
+          <div>
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse text-[13px]">
+                <thead>
+                  <tr className="border-b border-[var(--line-soft)] bg-[var(--surface-2)]/50 text-left text-[11.5px] font-semibold text-[var(--ink-2)]">
+                    <th className="px-3.5 py-2.5">{creditDim === 'model' ? '模型' : '账号'}</th>
+                    {creditDim === 'model' && <th className="px-3.5 py-2.5">积分倍率</th>}
+                    <th className="px-3.5 py-2.5">请求数</th>
+                    <th className="px-3.5 py-2.5">扣除积分</th>
+                    <th className="px-3.5 py-2.5">有效样本 Token</th>
+                    <th className="px-3.5 py-2.5">积分 / 1M Token</th>
+                    <th className="px-3.5 py-2.5">缓存命中率</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[var(--line-soft)]/60">
+                  {pagedCreditRows.map((r, i) => (
+                    <tr key={i} className="transition-colors hover:bg-[var(--surface-2)]/60">
+                      <td className="px-3.5 py-2.5">
+                        {creditDim === 'model' ? (
+                          <span className="font-[family-name:var(--mono)] text-[12.5px] font-medium text-[var(--ink)]">{r.key || '—'}</span>
+                        ) : (
+                          <>
+                            <div className="font-medium text-[var(--ink)]">{r.nickname || String(r.key || '').slice(0, 8) || '—'}</div>
+                            <div className="text-[11px] text-[var(--ink-3)] font-[family-name:var(--mono)]">{r.realm || ''} · {String(r.key || '').slice(0, 8)}</div>
+                          </>
+                        )}
+                      </td>
+                      {creditDim === 'model' && <td className="tabular px-3.5 py-2.5 text-[var(--ink-2)]">{r.rate ? 'x' + r.rate : '—'}</td>}
+                      <td className="tabular px-3.5 py-2.5 text-[var(--ink)] font-medium">{fmtTok(r.requests)}</td>
+                      <td className="tabular px-3.5 py-2.5 font-bold text-[var(--accent)]">{fmtCredit(r.credits)}</td>
+                      <td className="tabular px-3.5 py-2.5 text-[var(--ink)]">{fmtTok(r.credit_tokens)}</td>
+                      <td className="tabular px-3.5 py-2.5 font-medium text-[var(--ink)]">
+                        {r.credit_samples && r.credit_tokens && r.credits_per_1m_tokens != null ? trimFixed(Number(r.credits_per_1m_tokens).toFixed(4)) : '—'}
+                      </td>
+                      <td className="px-3.5 py-2.5">
+                        <CacheCell hit={r.cache_hit_tokens} miss={r.cache_miss_tokens} />
+                      </td>
+                    </tr>
+                  ))}
+                  {!creditRows.length && (
+                    <tr>
+                      <td colSpan={7}>
+                        <Empty>{error ? '读取用量失败' : '暂无积分扣除记录；升级前仅含 Token 的历史不会伪造积分。'}</Empty>
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {/* 积分表翻页器 */}
+            <Pager
+              page={curCreditPage}
+              totalPages={creditTotalPages}
+              total={creditRows.length}
+              pageSize={creditPageSize}
+              pageSizeOptions={[10, 20, 50]}
+              onPage={setCreditPage}
+              onPageSizeChange={(sz) => {
+                setCreditPageSize(sz);
+                setCreditPage(1);
+              }}
+            />
+          </div>
+        )}
       </div>
     </div>
   );

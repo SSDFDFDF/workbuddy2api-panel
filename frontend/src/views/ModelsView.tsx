@@ -6,8 +6,6 @@ import { Tag, Empty, Loading, Pager } from '../components/ui';
 import { btnXs, btnXsGhost } from '../components/buttons';
 import { fmtK } from '../fmt';
 
-const PAGE = 25;
-
 function rateValue(m: ModelEntry): number {
   const raw = m.promo_credits != null && m.promo_credits !== '' ? m.promo_credits : m.credits;
   const n = parseFloat(String(raw == null ? '' : raw).replace(/[^\d.]/g, ''));
@@ -116,6 +114,7 @@ export function ModelsView() {
   const [probes, setProbes] = useState<Record<string, ProbeEntry>>({});
   const [error, setError] = useState('');
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
   const [f, setF] = useState({ q: '', realm: '', cap: '', effort: '', promo: '', sort: 'default' });
   const [loaded, setLoaded] = useState(false);
 
@@ -157,9 +156,9 @@ export function ModelsView() {
     return out;
   }, [all, f]);
 
-  const totalPages = Math.max(1, Math.ceil(list.length / PAGE));
+  const totalPages = Math.max(1, Math.ceil(list.length / pageSize));
   const cur = Math.min(page, totalPages);
-  const paged = list.slice((cur - 1) * PAGE, cur * PAGE);
+  const paged = list.slice((cur - 1) * pageSize, cur * pageSize);
   const probeHit = (all || []).filter((m) => probeOf(m.id)).length;
 
   const sel = 'wb-select px-2 py-1 text-[12.5px]';
@@ -237,18 +236,18 @@ export function ModelsView() {
       <div className="overflow-x-auto">
         <table className="w-full border-collapse text-[13px]">
           <thead>
-            <tr className="border-y border-[var(--line-soft)] text-left text-[11.5px] text-[var(--ink-3)]">
-              <th className="px-3 py-2 font-medium">模型 ID</th>
-              <th className="px-3 py-2 font-medium">模型名称</th>
-              <th className="px-3 py-2 font-medium">能力</th>
-              <th className="px-3 py-2 font-medium">积分倍率</th>
-              <th className="px-3 py-2 font-medium">默认档</th>
-              <th className="px-3 py-2 font-medium">支持的思考档位</th>
-              <th className="px-3 py-2 font-medium">上下文长度</th>
-              <th className="px-3 py-2 font-medium">最大输出</th>
+            <tr className="border-y border-[var(--line-soft)] bg-[var(--surface-2)]/50 text-left text-[11.5px] font-semibold text-[var(--ink-2)]">
+              <th className="px-3.5 py-2.5 font-medium">模型 ID</th>
+              <th className="px-3.5 py-2.5 font-medium">模型名称</th>
+              <th className="px-3.5 py-2.5 font-medium">能力</th>
+              <th className="px-3.5 py-2.5 font-medium">积分倍率</th>
+              <th className="px-3.5 py-2.5 font-medium">默认档</th>
+              <th className="px-3.5 py-2.5 font-medium">支持的思考档位</th>
+              <th className="px-3.5 py-2.5 font-medium">上下文长度</th>
+              <th className="px-3.5 py-2.5 font-medium">最大输出</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody className="divide-y divide-[var(--line-soft)]/60">
             {all == null ? (
               <tr>
                 <td colSpan={8}>
@@ -267,12 +266,12 @@ export function ModelsView() {
                 if (m.can_disable_thinking && eff.length && !eff.includes('off')) eff.push('off（可关）');
                 const pr = probeOf(m.id);
                 return (
-                  <tr key={m.id}>
-                    <td className="font-[family-name:var(--mono)] text-[12.5px] font-medium" title={m.description}>
+                  <tr key={m.id} className="transition-colors hover:bg-[var(--surface-2)]/60">
+                    <td className="px-3.5 py-2.5 font-[family-name:var(--mono)] text-[12.5px] font-medium text-[var(--ink)]" title={m.description}>
                       {m.id}
                     </td>
-                    <td>{m.name || '—'}</td>
-                    <td>
+                    <td className="px-3.5 py-2.5 text-[var(--ink-2)]">{m.name || '—'}</td>
+                    <td className="px-3.5 py-2.5">
                       <div className="flex flex-wrap gap-1">
                         {m.is_default && <Tag tone="ok">默认</Tag>}
                         {m.supports_tool_call && <Tag tone="warn">工具</Tag>}
@@ -281,11 +280,11 @@ export function ModelsView() {
                         {!m.is_default && !m.supports_tool_call && !m.supports_images && <span className="text-[var(--ink-3)]">—</span>}
                       </div>
                     </td>
-                    <td>
+                    <td className="tabular px-3.5 py-2.5">
                       <RateCell m={m} />
                     </td>
-                    <td>{m.default_effort ? <Tag tone="ok">{m.default_effort}</Tag> : <span className="text-[var(--ink-3)]">—</span>}</td>
-                    <td className="max-w-[240px] whitespace-normal">
+                    <td className="px-3.5 py-2.5">{m.default_effort ? <Tag tone="ok">{m.default_effort}</Tag> : <span className="text-[var(--ink-3)]">—</span>}</td>
+                    <td className="max-w-[240px] whitespace-normal px-3.5 py-2.5">
                       {eff.length ? (
                         <div className="flex flex-wrap gap-1">
                           {eff.map((e) => (
@@ -298,7 +297,7 @@ export function ModelsView() {
                         <span className="text-[12.5px] text-[var(--ink-3)]">{m.supports_reasoning ? '固定档 · 默认 ' + (m.default_effort || '?') : '不支持思考'}</span>
                       )}
                     </td>
-                    <td className="tabular">{m.context_length ? Math.round(m.context_length / 1000) + 'K' : '—'}</td>
+                    <td className="tabular px-3.5 py-2.5">{m.context_length ? Math.round(m.context_length / 1000) + 'K' : '—'}</td>
                     <OutputCell m={m} pr={pr} />
                   </tr>
                 );
@@ -307,7 +306,18 @@ export function ModelsView() {
           </tbody>
         </table>
       </div>
-      <Pager page={cur} totalPages={totalPages} total={list.length} onPage={setPage} />
+      <Pager
+        page={cur}
+        totalPages={totalPages}
+        total={list.length}
+        pageSize={pageSize}
+        pageSizeOptions={[10, 20, 50, 100]}
+        onPage={setPage}
+        onPageSizeChange={(sz) => {
+          setPageSize(sz);
+          setPage(1);
+        }}
+      />
     </div>
   );
 }

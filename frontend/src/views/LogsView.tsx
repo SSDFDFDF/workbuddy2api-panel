@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
 import { useTimeRange, TimeRangeControl } from '../components/TimeRange';
-import { Tag, Empty } from '../components/ui';
+import { Tag, Empty, Pager } from '../components/ui';
 import { btnXs } from '../components/buttons';
 import { copyText } from '../clipboard';
 import { toast } from '../toast';
@@ -268,6 +268,8 @@ export function LogsView() {
   const [q, setQ] = useState('');
   const [outcome, setOutcome] = useState('');
   const [limit, setLimit] = useState(100);
+  const [reqPage, setReqPage] = useState(1);
+  const [reqPageSize, setReqPageSize] = useState(20);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const range = useTimeRange('0');
   const boxRef = useRef<HTMLPreElement>(null);
@@ -363,6 +365,11 @@ export function LogsView() {
       return true;
     });
   }, [reqRows, outcome, q]);
+
+  // 请求记录分页
+  const reqTotalPages = Math.max(1, Math.ceil(reqFiltered.length / reqPageSize));
+  const curReqPage = Math.min(reqPage, reqTotalPages);
+  const pagedReqs = reqFiltered.slice((curReqPage - 1) * reqPageSize, curReqPage * reqPageSize);
 
   const a = metrics?.archive;
   const hasSource = (reqRows || []).some((e) => e.client_ip || e.user_agent);
@@ -494,7 +501,10 @@ export function LogsView() {
                   className={inputCls + ' w-[240px] pl-8'}
                   placeholder="搜索 IP / UA / 模型 / 账号 / ID"
                   value={q}
-                  onChange={(e) => setQ(e.target.value.trim())}
+                  onChange={(e) => {
+                    setQ(e.target.value.trim());
+                    setReqPage(1);
+                  }}
                   aria-label="搜索请求记录"
                 />
                 <svg
@@ -514,7 +524,10 @@ export function LogsView() {
               <select
                 className="wb-select px-2.5 py-1.5 text-[12.5px]"
                 value={outcome}
-                onChange={(e) => setOutcome(e.target.value)}
+                onChange={(e) => {
+                  setOutcome(e.target.value);
+                  setReqPage(1);
+                }}
                 aria-label="按结果筛选"
               >
                 <option value="">全部结果</option>
@@ -575,7 +588,7 @@ export function LogsView() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[var(--line-soft)]">
-                  {reqFiltered.map((e, i) => {
+                  {pagedReqs.map((e, i) => {
                     const rowKey = e.request_id || `${e.time}-${i}`;
                     const isExpanded = expandedId === rowKey;
                     const totalTok = Number(e.total_tokens || 0) || Number(e.prompt_tokens || 0) + Number(e.completion_tokens || 0);
@@ -711,7 +724,7 @@ export function LogsView() {
                   })}
 
                   {/* 展开详情卡片行 */}
-                  {reqFiltered.map((e, i) => {
+                  {pagedReqs.map((e, i) => {
                     const rowKey = e.request_id || `${e.time}-${i}`;
                     if (expandedId !== rowKey) return null;
                     return (
@@ -733,6 +746,20 @@ export function LogsView() {
                 </tbody>
               </table>
             </div>
+
+            {/* 分页控制台 */}
+            <Pager
+              page={curReqPage}
+              totalPages={reqTotalPages}
+              total={reqFiltered.length}
+              pageSize={reqPageSize}
+              pageSizeOptions={[10, 20, 50, 100]}
+              onPage={setReqPage}
+              onPageSizeChange={(sz) => {
+                setReqPageSize(sz);
+                setReqPage(1);
+              }}
+            />
           </div>
         </div>
       )}

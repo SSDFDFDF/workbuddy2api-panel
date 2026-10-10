@@ -67,11 +67,17 @@ export function AppShell({ children }: { children: (view: ViewId) => React.React
               <Logo size={32} />
             </div>
             <div className="min-w-0 flex-1">
-              <div className="truncate text-[14.5px] font-semibold tracking-tight text-[var(--ink)]">WorkBuddy</div>
-              <div className="flex items-center gap-1.5 font-[family-name:var(--mono)] text-[11px] text-[var(--ink-3)]">
-                <span>Manager</span>
-                <span className="opacity-40">·</span>
-                <span>v{d?.version || '-'}</span>
+              <div className="flex items-center gap-1.5 leading-tight">
+                <span className="truncate text-[14px] font-bold tracking-tight text-[var(--ink)]">WorkBuddy</span>
+                <span className="rounded bg-[var(--surface-2)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-2)] border border-[var(--line-soft)]">
+                  Manager
+                </span>
+              </div>
+              <div className="mt-1 flex items-center gap-1.5 font-[family-name:var(--mono)] text-[10.5px] text-[var(--ink-3)]">
+                <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--ok)] shadow-[0_0_5px_var(--ok)]" />
+                <span className="truncate rounded-md bg-[var(--accent-soft)] px-1.5 py-0.5 font-medium text-[var(--accent)] border border-[var(--accent)]/15">
+                  v{d?.version || '-'}
+                </span>
               </div>
             </div>
           </div>

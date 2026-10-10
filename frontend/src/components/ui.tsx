@@ -123,19 +123,105 @@ export function Kpi({
   );
 }
 
-/* Pager 轻量翻页条。 */
-export function Pager({ page, totalPages, total, onPage }: { page: number; totalPages: number; total: number; onPage: (p: number) => void }) {
-  if (totalPages <= 1) return null;
+export interface PagerProps {
+  page: number;
+  totalPages: number;
+  total: number;
+  pageSize?: number;
+  pageSizeOptions?: number[];
+  onPage: (p: number) => void;
+  onPageSizeChange?: (size: number) => void;
+}
+
+/* Pager 全功能翻页条：含统计信息、每页条数选择器、多页码跳转与上一页/下一页。 */
+export function Pager({
+  page,
+  totalPages,
+  total,
+  pageSize,
+  pageSizeOptions,
+  onPage,
+  onPageSizeChange,
+}: PagerProps) {
+  const cur = Math.max(1, Math.min(page, Math.max(1, totalPages)));
+
+  // 计算展示的页码按钮
+  const pages: (number | string)[] = [];
+  if (totalPages <= 7) {
+    for (let i = 1; i <= Math.max(1, totalPages); i++) pages.push(i);
+  } else {
+    pages.push(1);
+    if (cur > 3) pages.push('...');
+    const start = Math.max(2, cur - 1);
+    const end = Math.min(totalPages - 1, cur + 1);
+    for (let i = start; i <= end; i++) pages.push(i);
+    if (cur < totalPages - 2) pages.push('...');
+    pages.push(totalPages);
+  }
+
+  const startIdx = total === 0 ? 0 : pageSize ? (cur - 1) * pageSize + 1 : 1;
+  const endIdx = total === 0 ? 0 : pageSize ? Math.min(cur * pageSize, total) : total;
+
   return (
-    <div className="flex items-center justify-between px-4 py-2.5 text-[12px] text-[var(--ink-3)]">
-      <div className="tabular">
-        共 {total} 项 · 第 {page} / {totalPages} 页
+    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--line-soft)] bg-[var(--surface)] px-4 py-2.5 text-[12px] text-[var(--ink-3)]">
+      <div className="flex items-center gap-2 tabular">
+        <span>
+          {pageSize ? `显示 ${startIdx} - ${endIdx} 项 · ` : ''}共 {total} 项 · 第 {cur} / {Math.max(1, totalPages)} 页
+        </span>
+        {pageSize && pageSizeOptions && onPageSizeChange && (
+          <select
+            className="wb-select ml-1 px-2 py-0.5 text-[11.5px]"
+            value={pageSize}
+            onChange={(e) => onPageSizeChange(Number(e.target.value))}
+            aria-label="每页显示条数"
+          >
+            {pageSizeOptions.map((opt) => (
+              <option key={opt} value={opt}>
+                {opt} 条/页
+              </option>
+            ))}
+          </select>
+        )}
       </div>
-      <div className="flex gap-2">
-        <button className="btn-xs" disabled={page <= 1} onClick={() => onPage(page - 1)}>
+
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          className="rounded border border-[var(--line)] bg-[var(--surface-2)] px-2.5 py-0.5 text-[11.5px] font-medium text-[var(--ink-2)] transition-colors hover:text-[var(--ink)] hover:border-[var(--ink-3)] disabled:cursor-not-allowed disabled:opacity-40"
+          disabled={cur <= 1}
+          onClick={() => onPage(cur - 1)}
+        >
           上一页
         </button>
-        <button className="btn-xs" disabled={page >= totalPages} onClick={() => onPage(page + 1)}>
+
+        {pages.map((p, idx) =>
+          typeof p === 'number' ? (
+            <button
+              key={idx}
+              type="button"
+              className={
+                'min-w-[26px] rounded px-1.5 py-0.5 text-[11.5px] tabular font-medium transition-colors ' +
+                (cur === p
+                  ? 'bg-[var(--accent)] text-[var(--accent-ink)] font-semibold shadow-xs'
+                  : 'text-[var(--ink-2)] hover:bg-[var(--surface-2)] hover:text-[var(--ink)]')
+              }
+              onClick={() => onPage(p)}
+            >
+              {p}
+            </button>
+          ) : (
+            <span key={idx} className="px-1 text-[var(--ink-3)]">
+              {p}
+            </span>
+          )
+        )}
+
+        <button
+          type="button"
+          className="rounded border border-[var(--line)] bg-[var(--surface-2)] px-2.5 py-0.5 text-[11.5px] font-medium text-[var(--ink-2)] transition-colors hover:text-[var(--ink)] hover:border-[var(--ink-3)] disabled:cursor-not-allowed disabled:opacity-40"
+          disabled={cur >= totalPages}
+          onClick={() => onPage(cur + 1)}
+        >
           下一页
         </button>
       </div>

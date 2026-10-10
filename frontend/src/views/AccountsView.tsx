@@ -5,7 +5,7 @@ import { api } from '../api';
 import { accountAction } from '../actions';
 import { toast } from '../toast';
 import type { OverviewAccount, PackageAccount } from '../types';
-import { Kpi, Tag, RealmTag, SegBar, Empty } from '../components/ui';
+import { Kpi, Tag, RealmTag, SegBar, Empty, Pager } from '../components/ui';
 import { btnXs, btnXsGhost, btnXsPrimary } from '../components/buttons';
 import { TasksDialog } from './TasksDialog';
 import { ExpiryCard } from './ExpiryCard';
@@ -232,9 +232,14 @@ export function AccountsView() {
   const { overview, refresh } = useData();
   const [tasksUid, setTasksUid] = useState<string | null>(null);
   const [packages, setPackages] = useState<PackageAccount[] | null>(null);
+  const [acctPage, setAcctPage] = useState(1);
+  const [acctPageSize, setAcctPageSize] = useState(20);
 
   const d = overview;
   const accounts = d?.accounts || [];
+  const acctTotalPages = Math.max(1, Math.ceil(accounts.length / acctPageSize));
+  const curAcctPage = Math.min(acctPage, acctTotalPages);
+  const pagedAccounts = accounts.slice((curAcctPage - 1) * acctPageSize, curAcctPage * acctPageSize);
   const healthy = d?.healthy || 0;
   const cooling = d?.cooling || 0;
   const disabled = d?.disabled || 0;
@@ -262,27 +267,22 @@ export function AccountsView() {
 
   return (
     <div className="flex flex-col gap-4">
-      {/* KPI */}
-      <div className="flex flex-wrap gap-3">
-        <Kpi v={total} k="账号总数" sub="池内已接入账号" />
-        <Kpi v={healthy} k="可用账号" tone={healthy === 0 && total > 0 ? 'bad' : cooling > 0 ? 'warn' : 'ok'} sub={[cooling ? `冷却 ${cooling}` : '', disabled ? `禁用 ${disabled}` : '', paused ? `暂停 ${paused}` : ''].filter(Boolean).join(' · ') || (total ? '全部正常可用' : '池内暂无账号')}>
-          {total > 0 && (
-            <div className="mt-2">
-              <SegBar
-                segs={[
-                  { value: healthy, color: 'var(--ok)', title: '可用 ' + healthy },
-                  { value: cooling, color: 'var(--warn)', title: '冷却 ' + cooling },
-                  { value: paused, color: 'var(--ink-3)', title: '暂停 ' + paused },
-                  { value: disabled, color: 'var(--bad)', title: '禁用 ' + disabled },
-                ]}
-                total={total}
-                aria="账号池可用比例"
-              />
-            </div>
-          )}
-        </Kpi>
-        <Kpi v={creditSum.tot > 0 ? `${creditSum.rem} / ${creditSum.tot}` : creditSum.rem} k="积分剩余 / 总额" tone="accent" sub="全池可用额度" />
-        <Kpi v={d?.sticky_sessions ?? '—'} k="粘性会话" tone="mute" sub="活跃粘性固定会话" />
+      {/* KPI 指标卡：精简化展示 */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <Kpi v={total} k="账号总数" tone="soft" sub={healthy > 0 ? `${healthy} 个正常可用` : '暂无可用账号'} />
+        <Kpi
+          v={healthy}
+          k="可用账号"
+          tone={healthy === 0 && total > 0 ? 'bad' : cooling > 0 ? 'warn' : 'ok'}
+          sub={[cooling ? `冷却 ${cooling}` : '', disabled ? `禁用 ${disabled}` : '', paused ? `暂停 ${paused}` : ''].filter(Boolean).join(' · ') || '运行状态正常'}
+        />
+        <Kpi
+          v={creditSum.rem}
+          k="积分剩余"
+          tone="accent"
+          sub={creditSum.tot > 0 ? `总额 ${creditSum.tot}` : '全池可用额度'}
+        />
+        <Kpi v={d?.sticky_sessions ?? 0} k="粘性会话" tone="mute" sub="活跃连接数" />
       </div>
 
       {/* 积分到期提醒（与积分构成视图共享 packages 缓存） */}
@@ -310,21 +310,21 @@ export function AccountsView() {
         <div className="overflow-x-auto">
           <table className="w-full border-collapse text-[13px]">
             <thead>
-              <tr className="border-y border-[var(--line-soft)] text-left text-[11.5px] text-[var(--ink-3)]">
+              <tr className="border-y border-[var(--line-soft)] bg-[var(--surface-2)]/50 text-left text-[11.5px] font-semibold text-[var(--ink-2)]">
                 <th className="w-[3px]" aria-hidden="true" />
-                <th className="px-3 py-2 font-medium">账号</th>
-                <th className="px-3 py-2 font-medium">状态</th>
-                <th className="px-3 py-2 font-medium">积分</th>
-                <th className="px-3 py-2 font-medium">成功 / 失败</th>
-                <th className="px-3 py-2 font-medium">在途</th>
-                <th className="px-3 py-2 font-medium">用量</th>
-                <th className="px-3 py-2 font-medium">最近成功</th>
-                <th className="px-3 py-2" />
+                <th className="px-3.5 py-2.5">账号</th>
+                <th className="px-3.5 py-2.5">状态</th>
+                <th className="px-3.5 py-2.5">积分</th>
+                <th className="px-3.5 py-2.5">成功 / 失败</th>
+                <th className="px-3.5 py-2.5">在途</th>
+                <th className="px-3.5 py-2.5">用量</th>
+                <th className="px-3.5 py-2.5">最近成功</th>
+                <th className="px-3.5 py-2.5 text-right">操作</th>
               </tr>
             </thead>
-            {accounts.length ? (
-              <tbody>
-                {accounts.map((s) => (
+            {pagedAccounts.length ? (
+              <tbody className="divide-y divide-[var(--line-soft)]/60">
+                {pagedAccounts.map((s) => (
                   <AccountRow key={s.uid} s={s} onAction={onAction} onTasks={setTasksUid} proxyConfigured={!!d?.proxy_configured} />
                 ))}
               </tbody>
@@ -339,6 +339,18 @@ export function AccountsView() {
             )}
           </table>
         </div>
+        <Pager
+          page={curAcctPage}
+          totalPages={acctTotalPages}
+          total={accounts.length}
+          pageSize={acctPageSize}
+          pageSizeOptions={[10, 20, 50]}
+          onPage={setAcctPage}
+          onPageSizeChange={(sz) => {
+            setAcctPageSize(sz);
+            setAcctPage(1);
+          }}
+        />
       </div>
 
       {/* 模型锁池 */}

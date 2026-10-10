@@ -310,13 +310,16 @@ export function TasksCenterView() {
         </header>
 
         {progress && items.length > 0 && (
-          <div className="flex items-center gap-3 px-4 pt-3">
-            <div className="h-1 flex-1 overflow-hidden rounded bg-[var(--surface-2)]">
-              <i className="block h-full rounded bg-[var(--accent)] transition-[width] duration-500" style={{ width: (items.length ? Math.round((done / items.length) * 100) : 0) + '%' }} />
+          <div className="flex items-center gap-3 px-4 pt-3.5 pb-1">
+            <div className="h-2 flex-1 overflow-hidden rounded-full bg-[var(--surface-2)] p-0.5">
+              <i
+                className="block h-full rounded-full bg-[var(--accent)] transition-[width] duration-500 shadow-xs"
+                style={{ width: (items.length ? Math.round((done / items.length) * 100) : 0) + '%' }}
+              />
             </div>
-            <span className="tabular text-[12px] text-[var(--ink-3)]">
-              {progress.running ? '执行中 ' : '已结束 '}
-              {done} / {items.length}
+            <span className="tabular text-[12px] font-medium text-[var(--ink-2)]">
+              {progress.running ? <span className="text-[var(--accent)]">执行中 </span> : '已结束 '}
+              {done} / {items.length} ({items.length ? Math.round((done / items.length) * 100) : 0}%)
             </span>
           </div>
         )}
@@ -333,37 +336,50 @@ export function TasksCenterView() {
             <div className="max-w-[34em] text-[12.5px]">{emptyText.d}</div>
           </div>
         ) : (
-          <div className="px-4 pb-4">
+          <div className="p-4 space-y-3">
             {groups.map((g) => (
-              <div key={g.uid} className="mb-3">
-                <header className="mb-1 flex items-center gap-2 text-[13px]">
-                  <span className="font-medium">{g.nick || g.uid.slice(0, 12)}</span>
-                  <span className="text-[12px] text-[var(--ink-3)]">{g.rows.length} 项待办</span>
+              <div key={g.uid} className="rounded-lg border border-[var(--line-soft)] bg-[var(--surface-2)]/30 p-3.5 shadow-2xs">
+                <header className="mb-2.5 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="font-semibold text-[13.5px] text-[var(--ink)]">{g.nick || g.uid.slice(0, 12)}</span>
+                    <span className="font-[family-name:var(--mono)] text-[11px] text-[var(--ink-3)]">{g.uid.slice(0, 8)}</span>
+                  </div>
+                  <span className="rounded-full bg-[var(--surface)] px-2 py-0.5 text-[11px] tabular text-[var(--ink-3)] border border-[var(--line-soft)]">
+                    {g.rows.length} 项待办
+                  </span>
                 </header>
-                {g.rows.map((it, i) => {
-                  const dotCls =
-                    it.status === 'running'
-                      ? 'bg-[var(--accent)] wb-pulse-anim'
-                      : it.status === 'error'
-                        ? 'bg-[var(--bad)]'
-                        : it.status === 'skipped'
-                          ? 'bg-[var(--ink-3)]'
-                          : it.status === 'done'
-                            ? 'bg-[var(--ok)]'
-                            : 'bg-[var(--line)]';
-                  return (
-                    <div key={i} className="flex items-center gap-2.5 border-b border-[var(--line-soft)] py-2 text-[13px] last:border-0" title={it.message || ''}>
-                      <span className="font-[family-name:var(--mono)] text-[11.5px] text-[var(--ink-3)]">{it.code}</span>
-                      <span className="flex-1">{it.kind === 'school' ? <span>开学季闭环 <Tag tone="mute">开学季</Tag></span> : it.code}</span>
-                      {it.prog && <span className="tabular text-[12px] text-[var(--ink-3)]">{it.prog}</span>}
-                      <span className="flex items-center gap-1.5 text-[12px]">
-                        <span className={'h-2 w-2 rounded-full ' + dotCls} />
-                        {ST_WORDS[it.status || ''] || it.status}
-                      </span>
-                      {it.message && <span className="max-w-[240px] truncate text-[11.5px] text-[var(--ink-3)]">{it.message}</span>}
-                    </div>
-                  );
-                })}
+                <div className="divide-y divide-[var(--line-soft)]/50 rounded-md border border-[var(--line-soft)]/60 bg-[var(--surface)] overflow-hidden">
+                  {g.rows.map((it, i) => {
+                    const dotCls =
+                      it.status === 'running'
+                        ? 'bg-[var(--accent)] wb-pulse-anim'
+                        : it.status === 'error'
+                          ? 'bg-[var(--bad)]'
+                          : it.status === 'skipped'
+                            ? 'bg-[var(--ink-3)]'
+                            : it.status === 'done'
+                              ? 'bg-[var(--ok)]'
+                              : 'bg-[var(--line)]';
+                    return (
+                      <div
+                        key={i}
+                        className="flex items-center gap-3 px-3 py-2 text-[12.5px] transition-colors hover:bg-[var(--surface-2)]/50"
+                        title={it.message || ''}
+                      >
+                        <span className="font-[family-name:var(--mono)] text-[11px] text-[var(--ink-3)] min-w-[70px] truncate">{it.code}</span>
+                        <span className="flex-1 font-medium text-[var(--ink)] truncate">
+                          {it.kind === 'school' ? <span>开学季闭环 <Tag tone="mute">开学季</Tag></span> : it.code}
+                        </span>
+                        {it.prog && <span className="tabular text-[11.5px] text-[var(--ink-3)]">{it.prog}</span>}
+                        <span className="flex items-center gap-1.5 text-[11.5px] min-w-[55px]">
+                          <span className={'h-2 w-2 rounded-full shrink-0 ' + dotCls} />
+                          <span className="font-medium text-[var(--ink-2)]">{ST_WORDS[it.status || ''] || it.status}</span>
+                        </span>
+                        {it.message && <span className="max-w-[200px] truncate text-[11px] text-[var(--ink-3)]">{it.message}</span>}
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             ))}
           </div>

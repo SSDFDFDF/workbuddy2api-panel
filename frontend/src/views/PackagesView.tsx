@@ -8,7 +8,6 @@ import { btnXs, btnPrimary } from '../components/buttons';
 import { fmtTok } from '../fmt';
 
 const PK_COLORS = ['#4f8cff', '#25b08b', '#e8a33d', '#c96bd6', '#e2607a', '#5aa9e6', '#8fbf3f', '#b58b5a', '#7d8fa8', '#d4785c'];
-const PAGE = 20;
 
 /* 包按 code+name 归并：来源 → 面额/余额/个数。 */
 interface SourceGroup {
@@ -91,6 +90,7 @@ export function PackagesView() {
   const [list, setList] = useState<PackageAccount[] | null>(null);
   const [error, setError] = useState('');
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
   const [sortMode, setSortMode] = useState<'end_asc' | 'size_desc'>('end_asc');
   const [detailUid, setDetailUid] = useState<string | null>(null);
 
@@ -134,9 +134,9 @@ export function PackagesView() {
     return out;
   }, [list, sortMode, today]);
 
-  const totalPages = Math.max(1, Math.ceil((sorted.length || 0) / PAGE));
+  const totalPages = Math.max(1, Math.ceil((sorted.length || 0) / pageSize));
   const cur = Math.min(page, totalPages);
-  const paged = sorted.slice((cur - 1) * PAGE, cur * PAGE);
+  const paged = sorted.slice((cur - 1) * pageSize, cur * pageSize);
   const detail = detailUid ? sorted.find((a) => a.uid === detailUid) : null;
 
   return (
@@ -157,19 +157,19 @@ export function PackagesView() {
         <div className="overflow-x-auto">
           <table className="w-full border-collapse text-[13px]">
             <thead>
-              <tr className="border-y border-[var(--line-soft)] text-left text-[11.5px] text-[var(--ink-3)]">
-                <th className="px-3 py-2 font-medium">账号</th>
-                <th className="px-3 py-2 font-medium">UID</th>
-                <th className="px-3 py-2 font-medium">域</th>
-                <th className="px-3 py-2 font-medium">剩余积分</th>
-                <th className="px-3 py-2 font-medium">总额度</th>
-                <th className="px-3 py-2 font-medium">可用包数</th>
-                <th className="px-3 py-2 font-medium">最近到期</th>
-                <th className="px-3 py-2 font-medium">主要构成来源</th>
-                <th className="px-3 py-2" />
+              <tr className="border-y border-[var(--line-soft)] bg-[var(--surface-2)]/50 text-left text-[11.5px] font-semibold text-[var(--ink-2)]">
+                <th className="px-3.5 py-2.5 font-medium">账号</th>
+                <th className="px-3.5 py-2.5 font-medium">UID</th>
+                <th className="px-3.5 py-2.5 font-medium">域</th>
+                <th className="px-3.5 py-2.5 font-medium">剩余积分</th>
+                <th className="px-3.5 py-2.5 font-medium">总额度</th>
+                <th className="px-3.5 py-2.5 font-medium">可用包数</th>
+                <th className="px-3.5 py-2.5 font-medium">最近到期</th>
+                <th className="px-3.5 py-2.5 font-medium">主要构成来源</th>
+                <th className="px-3.5 py-2.5 text-right font-medium">操作</th>
               </tr>
             </thead>
-            <tbody>
+            <tbody className="divide-y divide-[var(--line-soft)]/60">
               {list == null ? (
                 <tr>
                   <td colSpan={9}>
@@ -186,13 +186,13 @@ export function PackagesView() {
                 paged.map((a) => {
                   if (a.error) {
                     return (
-                      <tr key={a.uid}>
-                        <td className="font-medium">{a.nickname || a.uid.slice(0, 8)}</td>
-                        <td className="font-[family-name:var(--mono)] text-[11px] text-[var(--ink-3)]">{a.uid.slice(0, 8)}</td>
-                        <td>
+                      <tr key={a.uid} className="transition-colors hover:bg-[var(--surface-2)]/60">
+                        <td className="px-3.5 py-2.5 font-medium">{a.nickname || a.uid.slice(0, 8)}</td>
+                        <td className="px-3.5 py-2.5 font-[family-name:var(--mono)] text-[11px] text-[var(--ink-3)]">{a.uid.slice(0, 8)}</td>
+                        <td className="px-3.5 py-2.5">
                           <RealmTag>{a.realm || ''}</RealmTag>
                         </td>
-                        <td colSpan={6} className="text-[var(--bad)]">
+                        <td colSpan={6} className="px-3.5 py-2.5 text-[var(--bad)]">
                           查询失败：{a.error}
                         </td>
                       </tr>
@@ -207,27 +207,27 @@ export function PackagesView() {
                   const dayWord = days === 0 ? '今天' : days === 1 ? '明天' : days != null ? days + '天后' : '';
                   const expColor = days == null ? '' : days <= 3 ? 'var(--bad)' : days <= 7 ? 'var(--warn)' : 'inherit';
                   return (
-                    <tr key={a.uid}>
-                      <td className="font-medium">{a.nickname || a.uid.slice(0, 8)}</td>
-                      <td className="font-[family-name:var(--mono)] text-[11px] text-[var(--ink-3)]">{a.uid.slice(0, 8)}</td>
-                      <td>
+                    <tr key={a.uid} className="transition-colors hover:bg-[var(--surface-2)]/60">
+                      <td className="px-3.5 py-2.5 font-medium text-[var(--ink)]">{a.nickname || a.uid.slice(0, 8)}</td>
+                      <td className="px-3.5 py-2.5 font-[family-name:var(--mono)] text-[11px] text-[var(--ink-3)]">{a.uid.slice(0, 8)}</td>
+                      <td className="px-3.5 py-2.5">
                         <RealmTag>{a.realm || ''}</RealmTag>
                       </td>
-                      <td className="tabular font-semibold">{fmtTok(a.remain)}</td>
-                      <td className="tabular">{fmtTok(a.size)}</td>
-                      <td className="tabular">
+                      <td className="tabular px-3.5 py-2.5 font-semibold text-[var(--ink)]">{fmtTok(a.remain)}</td>
+                      <td className="tabular px-3.5 py-2.5 text-[var(--ink-2)]">{fmtTok(a.size)}</td>
+                      <td className="tabular px-3.5 py-2.5 text-[var(--ink-2)]">
                         {availablePks} / {(a.packages || []).length}
                       </td>
-                      <td>
+                      <td className="px-3.5 py-2.5">
                         {first ? (
-                          <span className="tabular" style={{ color: expColor }}>
+                          <span className="tabular font-medium" style={{ color: expColor }}>
                             <b>{first.date}</b> · {fmtTok(first.remain)} <span className="text-[11.5px] text-[var(--ink-3)]">({dayWord})</span>
                           </span>
                         ) : (
                           <span className="text-[var(--ink-3)]">—</span>
                         )}
                       </td>
-                      <td>
+                      <td className="px-3.5 py-2.5">
                         <div className="flex flex-wrap gap-1">
                           {srcs.slice(0, 3).map((s, i) => {
                             const pct = Math.round((s.size / totalSize) * 100);
@@ -241,7 +241,7 @@ export function PackagesView() {
                           {!srcs.length && <span className="text-[var(--ink-3)]">—</span>}
                         </div>
                       </td>
-                      <td>
+                      <td className="px-3.5 py-2.5 text-right">
                         <button className={btnXs} onClick={() => setDetailUid(a.uid)}>
                           包明细
                         </button>
@@ -253,7 +253,18 @@ export function PackagesView() {
             </tbody>
           </table>
         </div>
-        <Pager page={cur} totalPages={totalPages} total={sorted.length} onPage={setPage} />
+        <Pager
+          page={cur}
+          totalPages={totalPages}
+          total={sorted.length}
+          pageSize={pageSize}
+          pageSizeOptions={[10, 20, 50]}
+          onPage={setPage}
+          onPageSizeChange={(sz) => {
+            setPageSize(sz);
+            setPage(1);
+          }}
+        />
       </div>
 
       {detail && <PackagesModal a={detail} onClose={() => setDetailUid(null)} />}
