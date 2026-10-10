@@ -15,6 +15,19 @@ import { fmtMs, fmtTok, fmtBytes, fmtTimeHM, fmtNum, cacheRatePct, cacheRateText
 const inputCls =
   'rounded-lg border border-[var(--line)] bg-[var(--surface-2)] px-2.5 py-1.5 text-[12.5px] outline-none transition-all focus:border-[var(--accent)] focus:ring-1 focus:ring-[var(--accent)]/30';
 
+/* 轮询周期：两侧成本差一个量级，不能共用一个数。
+   - RING_POLL_MS：服务端只把内存环形缓冲 copy 出来，5s 无压力；
+   - ARCHIVE_POLL_MS：request_logs 每次都把归档目录的 JSONL 全扫一遍（内存有界、
+     但磁盘扫描量随归档体积线性增长）。5s 一次的收益是「新请求最多早 10s 出现」，
+     代价是面板开着就一直扫盘。 */
+const RING_POLL_MS = 5000;
+const ARCHIVE_POLL_MS = 15000;
+
+/* REQ_COLS = 请求记录表的列数（时间/接口/结果/模型/账号/来源/耗时/Token/缓存/积分/
+   丢弃·改写/操作）。展开详情行与空态行都要 colSpan 整行，硬编码会在下次加列时错位
+   （加「接口」列时就踩过一次：表头 12 列、colSpan 还是 11）。 */
+const REQ_COLS = 12;
+
 function outcomeTag(e: RequestEvent) {
   const o = String(e.outcome || '');
   const label = { success: '成功', http_error: 'HTTP 错误', stream_error: '流错误', interrupted: '中断' }[o] || o || '—';
@@ -26,21 +39,49 @@ function outcomeTag(e: RequestEvent) {
   );
 }
 
+/* 接口标签（请求进来的端点）：三种协议入口各一色，便于一眼扫出哪个客户端打哪个端点。
+   未收录的路径（后续新增入口）原样显示，不做映射猜测。 */
+const PATH_LABEL: Record<string, { label: string; tone: 'ok' | 'warn' | 'bad' | 'mute' | 'accent' }> = {
+  '/v1/chat/completions': { label: 'chat', tone: 'mute' },
+  '/v1/responses': { label: 'responses', tone: 'accent' },
+  '/v1/messages': { label: 'messages', tone: 'warn' },
+};
+
+function pathTag(path?: string) {
+  if (!path) return <span className="text-[var(--ink-3)]">—</span>;
+  const known = PATH_LABEL[path];
+  return (
+    <Tag tone={known?.tone ?? 'mute'} title={path}>
+      {known?.label ?? path}
+    </Tag>
+  );
+}
+
 function creditCell(e: RequestEvent) {
   if (!e.credit_known) return <span className="text-[var(--ink-3)]">—</span>;
   const v = Number(e.credit);
   return Number.isFinite(v) ? <span className="tabular font-medium">{v.toFixed(2)}</span> : <span className="text-[var(--ink-3)]">—</span>;
 }
 
-/* 丢弃字段展示 */
+/* 丢弃 / 改写展示。两者语义不同（没执行 vs 换了个值执行了），用颜色区分：
+   丢弃=warn（黄），改写=accent（蓝）。改写是本网关自己做的近似变换，优先展示。 */
 function droppedCell(e: RequestEvent) {
-  const list = e.dropped || [];
-  if (!list.length) return <span className="text-[var(--ink-3)]">—</span>;
-  const shown = list.slice(0, 2);
-  const rest = list.length - shown.length;
+  const dropped = e.dropped || [];
+  const rewritten = e.rewritten || [];
+  if (!dropped.length && !rewritten.length) return <span className="text-[var(--ink-3)]">—</span>;
+  const rewriteShown = rewritten.slice(0, 2);
+  // 改写占满两格时不再挤入丢弃项（完整列表在 title 里）。
+  const droppedShown = rewriteShown.length >= 2 ? [] : dropped.slice(0, 2 - rewriteShown.length);
+  const rest = dropped.length + rewritten.length - rewriteShown.length - droppedShown.length;
+  const title = [...rewritten.map((k) => '改写 ' + k), ...dropped.map((k) => '丢弃 ' + k)].join(' · ');
   return (
-    <span className="flex max-w-[170px] items-center gap-1" title={list.join(' · ')}>
-      {shown.map((k) => (
+    <span className="flex max-w-[190px] items-center gap-1" title={title}>
+      {rewriteShown.map((k) => (
+        <Tag key={k} tone="accent">
+          <span className="tabular block max-w-[110px] truncate">{k}</span>
+        </Tag>
+      ))}
+      {droppedShown.map((k) => (
         <Tag key={k} tone="warn">
           <span className="tabular block max-w-[100px] truncate">{k}</span>
         </Tag>
@@ -208,6 +249,10 @@ function RequestDetailRow({ e, onCopy }: { e: RequestEvent; onCopy: (text: strin
               {e.ttfb_ms ? <span className="tabular ml-1 text-[11px] text-[var(--ink-3)]">(首字 {fmtMs(e.ttfb_ms)})</span> : null}
             </div>
             <div>
+              <span className="text-[var(--ink-3)]">请求接口：</span>
+              <span className="ml-1">{e.path ? <Tag tone="accent">{e.path}</Tag> : '—'}</span>
+            </div>
+            <div>
               <span className="text-[var(--ink-3)]">调用模型：</span>
               <span className="tabular ml-1 font-medium text-[var(--ink)]">{e.model || '—'}</span>
             </div>
@@ -237,9 +282,15 @@ function RequestDetailRow({ e, onCopy }: { e: RequestEvent; onCopy: (text: strin
                 </span>
               </div>
             )}
+            {e.rewritten && e.rewritten.length > 0 && (
+              <div className="col-span-2 border-t border-[var(--line-soft)] pt-1.5 text-[11.5px]">
+                <span className="font-medium text-[var(--accent)]">网关改写：</span>
+                <span className="ml-1 text-[var(--ink-2)]">{e.rewritten.join(' · ')}</span>
+              </div>
+            )}
             {e.dropped && e.dropped.length > 0 && (
               <div className="col-span-2 border-t border-[var(--line-soft)] pt-1.5 text-[11.5px]">
-                <span className="text-[var(--warn)] font-medium">丢弃字段：</span>
+                <span className="font-medium text-[var(--warn)]">丢弃字段：</span>
                 <span className="ml-1 text-[var(--ink-2)]">{e.dropped.join(' · ')}</span>
               </div>
             )}
@@ -275,38 +326,63 @@ export function LogsView() {
   const boxRef = useRef<HTMLPreElement>(null);
   const inFlight = useRef(false);
 
-  const load = useCallback(async () => {
-    if (inFlight.current) return;
-    inFlight.current = true;
-    try {
-      const rq = new URLSearchParams();
-      const qs = range.qs(false);
-      if (qs) rq.set('from', qs.match(/from=(\d+)/)?.[1] || '');
-      if (qs.includes('to=')) rq.set('to', qs.match(/to=(\d+)/)?.[1] || '');
-      rq.set('limit', String(limit));
-      const [d, m, rows] = await Promise.all([
-        api<{ entries: LogEntry[] }>('logs'),
-        api<RequestMetrics>('request_metrics').catch(() => ({}) as RequestMetrics),
-        api<{ entries: RequestEvent[] }>('request_logs?' + rq.toString()).catch(() => ({ entries: [] })),
-      ]);
-      setEntries(d.entries || []);
-      setMetrics(m || {});
-      const archiveOn = !!(m && m.archive && m.archive.enabled);
-      setReqRows(archiveOn ? rows.entries || [] : m.recent || []);
-    } catch {
-      /* 概览已提示 */
-    } finally {
-      inFlight.current = false;
-    }
-  }, [limit, range]);
+  const load = useCallback(
+    async (scope: 'runtime' | 'requests' | 'all' = 'all') => {
+      if (inFlight.current) return;
+      inFlight.current = true;
+      try {
+        // 运行日志：内存环形缓冲快照，无磁盘 I/O（便宜）。
+        if (scope === 'runtime' || scope === 'all') {
+          const d = await api<{ entries: LogEntry[] }>('logs');
+          setEntries(d.entries || []);
+        }
+        if (scope === 'requests' || scope === 'all') {
+          // request_metrics 只读进程内计数（便宜）。
+          const m = await api<RequestMetrics>('request_metrics').catch(() => ({}) as RequestMetrics);
+          setMetrics(m || {});
+          // request_logs 是**全归档扫描**（os.ReadDir + 逐文件读 JSONL，服务端用
+          // top-K 堆限制内存、但磁盘扫描量与归档体积成正比）。归档关闭时没有这份
+          // 数据，直接用 metrics 的进程内 recent，省一次无意义请求。
+          if (m?.archive?.enabled) {
+            const rq = new URLSearchParams();
+            const qs = range.qs(false);
+            if (qs) rq.set('from', qs.match(/from=(\d+)/)?.[1] || '');
+            if (qs.includes('to=')) rq.set('to', qs.match(/to=(\d+)/)?.[1] || '');
+            rq.set('limit', String(limit));
+            const rows = await api<{ entries: RequestEvent[] }>('request_logs?' + rq.toString()).catch(() => ({
+              entries: [],
+            }));
+            setReqRows(rows.entries || []);
+          } else {
+            setReqRows(m.recent || []);
+          }
+        }
+      } catch {
+        /* 概览已提示 */
+      } finally {
+        inFlight.current = false;
+      }
+    },
+    [limit, range],
+  );
 
+  // 首次进入与筛选条件变化：拉当前 Tab 需要的那部分（用户动作 → 立即刷新）。
   useEffect(() => {
-    void load();
+    void load(activeTab === 'runtime' ? 'runtime' : 'requests');
+  }, [load, activeTab]);
+
+  // 轮询按 Tab 分流，两侧成本差一个量级：
+  //   - 运行日志：内存环形缓冲，5s；
+  //   - 请求记录：归档 JSONL 全扫 + 指标快照，15s（归档随请求量增长，5s 扫一遍是纯浪费）。
+  // 页面隐藏时一律暂停（切后台没人看，但服务端会真的扫盘）。
+  useEffect(() => {
+    const scope = activeTab === 'runtime' ? 'runtime' : 'requests';
+    const period = activeTab === 'runtime' ? RING_POLL_MS : ARCHIVE_POLL_MS;
     const id = setInterval(() => {
-      if (!document.hidden) void load();
-    }, 5000);
+      if (!document.hidden) void load(scope);
+    }, period);
     return () => clearInterval(id);
-  }, [load]);
+  }, [load, activeTab]);
 
   // 运行日志自动滚动
   const box = boxRef.current;
@@ -345,6 +421,7 @@ export function LogsView() {
       if (outcome && String(e.outcome || '') !== outcome) return false;
       if (q) {
         const text = [
+          e.path,
           e.client_ip,
           e.user_agent,
           e.model,
@@ -354,6 +431,7 @@ export function LogsView() {
           e.prompt_mode,
           e.prompt_sha256,
           ...(e.dropped || []),
+          ...(e.rewritten || []),
         ]
           .filter(Boolean)
           .join(' ')
@@ -447,7 +525,7 @@ export function LogsView() {
               任务 {logCounts.task || 0} · 对话 {logCounts.chat || 0} · 系统 {logCounts.sys || 0}
             </span>
           )}
-          <button className={btnXs} onClick={() => void load()}>
+          <button className={btnXs} onClick={() => void load('all')}>
             刷新数据
           </button>
         </div>
@@ -499,7 +577,7 @@ export function LogsView() {
                 <input
                   type="search"
                   className={inputCls + ' w-[240px] pl-8'}
-                  placeholder="搜索 IP / UA / 模型 / 账号 / ID"
+                  placeholder="搜索 接口 / IP / UA / 模型 / 账号 / ID"
                   value={q}
                   onChange={(e) => {
                     setQ(e.target.value.trim());
@@ -537,7 +615,7 @@ export function LogsView() {
                 <option value="interrupted">中断</option>
               </select>
 
-              <TimeRangeControl range={range} onChange={() => void load()} />
+              <TimeRangeControl range={range} onChange={() => void load('requests')} />
 
               <select
                 className="wb-select px-2.5 py-1.5 text-[12.5px]"
@@ -560,7 +638,7 @@ export function LogsView() {
                     }`}
               </span>
 
-              <button className={btnXs} onClick={() => void load()}>
+              <button className={btnXs} onClick={() => void load('requests')}>
                 重新读取
               </button>
             </div>
@@ -568,9 +646,13 @@ export function LogsView() {
             {/* 请求记录数据表 */}
             <div className="overflow-x-auto">
               <table className="w-full border-collapse text-[12.5px]">
+                {/* 本表列数见上方 REQ_COLS（展开行/空态行的 colSpan 依赖它）。 */}
                 <thead>
                   <tr className="border-b border-[var(--line-soft)] bg-[var(--surface-2)]/40 text-left text-[11.5px] font-medium text-[var(--ink-3)]">
                     <th className="px-3.5 py-2.5">时间</th>
+                    <th className="px-3 py-2.5" title="请求进来的端点">
+                      接口
+                    </th>
                     <th className="px-3 py-2.5">结果</th>
                     <th className="px-3 py-2.5">模型</th>
                     <th className="px-3 py-2.5">账号</th>
@@ -583,7 +665,12 @@ export function LogsView() {
                       缓存 (命中 · 命中率)
                     </th>
                     <th className="px-3 py-2.5">积分</th>
-                    <th className="px-3 py-2.5">丢弃字段</th>
+                    <th
+                      className="px-3 py-2.5"
+                      title="丢弃=接受但无法表达（黄）；改写=网关按模型能力换了值执行（蓝）"
+                    >
+                      丢弃 / 改写
+                    </th>
                     <th className="px-3 py-2.5 text-right">操作</th>
                   </tr>
                 </thead>
@@ -612,6 +699,9 @@ export function LogsView() {
                         <td className="tabular px-3.5 py-2 text-[var(--ink-2)]">
                           <span title={e.time ? new Date(e.time).toLocaleString('zh-CN') : ''}>{fmtTimeHM(e.time)}</span>
                         </td>
+
+                        {/* 接口（请求进来的端点） */}
+                        <td className="px-3 py-2">{pathTag(e.path)}</td>
 
                         {/* 结果 */}
                         <td className="px-3 py-2">{outcomeTag(e)}</td>
@@ -696,7 +786,7 @@ export function LogsView() {
                         {/* 积分 */}
                         <td className="tabular px-3 py-2">{creditCell(e)}</td>
 
-                        {/* 丢弃字段 */}
+                        {/* 丢弃 / 改写 */}
                         <td className="px-3 py-2">{droppedCell(e)}</td>
 
                         {/* 展开/折叠操作 */}
@@ -729,7 +819,7 @@ export function LogsView() {
                     if (expandedId !== rowKey) return null;
                     return (
                       <tr key={`exp-${rowKey}`}>
-                        <td colSpan={11} className="p-0">
+                        <td colSpan={REQ_COLS} className="p-0">
                           <RequestDetailRow e={e} onCopy={handleCopy} />
                         </td>
                       </tr>
@@ -738,7 +828,7 @@ export function LogsView() {
 
                   {!reqFiltered.length && (
                     <tr>
-                      <td colSpan={11}>
+                      <td colSpan={REQ_COLS}>
                         <Empty>{reqRows?.length ? '没有符合当前筛选条件的请求记录' : '暂无请求记录'}</Empty>
                       </td>
                     </tr>
