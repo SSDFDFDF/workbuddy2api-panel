@@ -171,7 +171,7 @@ export function ModelsView() {
     <div className="rounded-xl border border-[var(--line)] bg-[var(--surface)]">
       <header className="flex flex-wrap items-center gap-2.5 px-4 py-3">
         <h3 className="text-[14px] font-semibold">
-          模型能力 <span className="ml-1 text-[12px] font-normal text-[var(--ink-3)]">max_tokens 已修复可正常透传；官方返回的最大输出仅为参考</span>
+          模型能力 <span className="ml-1 text-[12px] font-normal text-[var(--ink-3)]">「重新获取」同时刷新网关模型校验目录（不在目录里的模型会被网关直接拒绝）；官方返回的最大输出仅为参考</span>
         </h3>
         <span className="flex-1" />
         <span className="text-[12px] text-[var(--ink-3)]">{loaded && all ? `${all.length} 个模型${probeHit ? ' · ' + probeHit + ' 个有实测上限' : ''}` : '实时查询上游'}</span>

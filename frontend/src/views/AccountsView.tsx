@@ -6,45 +6,119 @@ import { accountAction } from '../actions';
 import { toast } from '../toast';
 import type { OverviewAccount, PackageAccount } from '../types';
 import { Kpi, Tag, RealmTag, SegBar, Empty, Pager } from '../components/ui';
+import { Dialog } from '../components/Dialog';
 import { btnXs, btnXsGhost, btnXsPrimary } from '../components/buttons';
 import { TasksDialog } from './TasksDialog';
 import { ExpiryCard } from './ExpiryCard';
 import { ago, dur, fmtTok, parseAPITime, fmtLocalDateTime } from '../fmt';
 
-/* 限流/模型不可用行内提示（来自账号的 rate_limited_models）。 */
-function RateLimits({ rows }: { rows: OverviewAccount['rate_limited_models'] }) {
-  const list = (rows || []).filter((r) => r && r.model);
-  if (!list.length) return null;
-  const now = Date.now();
+/* 模型限流/锁定单元（来自账号的 rate_limited_models）。
+   展示规则（每个账号一行，最多两行）：
+   - 每项只显示「模型 + 限流中/锁定中 + 倒计时」，不显示「预计 4时10分 后重试」这类长句；
+     具体解封时刻与上游原因放 title 与弹窗里；
+   - 超过 2 项：显示 1 项 + 「+N 更多」，点开弹窗看全部（避免把账号表撑高）。 */
+const LIMIT_MAX_ROWS = 2;
+
+function limitInfo(r: NonNullable<OverviewAccount['rate_limited_models']>[number]) {
+  const until = parseAPITime(r.reset_at) || parseAPITime(r.until);
+  const left = until ? Math.max(0, Math.round((until - Date.now()) / 1000)) : 0;
+  const locked = r.kind === 'model_unavailable';
+  return {
+    locked,
+    label: locked ? '锁定中' : '限流中',
+    until,
+    left,
+    // 倒计时为主（一眼看出还要等多久），绝对时刻写进 title/弹窗。
+    when: until ? dur(left) : '待重新探测',
+    at: until ? fmtLocalDateTime(until) : '',
+    tip: `${r.model}\n${locked ? '锁定中' : '限流中'}${until ? '：' + fmtLocalDateTime(until) + '（剩余 ' + dur(left) + '）' : ''}${r.reason ? '\n' + r.reason : ''}`,
+  };
+}
+
+function LimitChip({ r, onClick }: { r: NonNullable<OverviewAccount['rate_limited_models']>[number]; onClick?: () => void }) {
+  const i = limitInfo(r);
   return (
-    <div className="mt-1.5 flex flex-col gap-1">
-      {list.map((r, i) => {
-        const deadline = parseAPITime(r.reset_at) || parseAPITime(r.until);
-        const remaining = deadline > now ? Math.round((deadline - now) / 1000) : 0;
-        const detail =
-          r.kind === 'model_unavailable'
-            ? remaining
-              ? '预计 ' + dur(remaining) + ' 后重试'
-              : '等待重新探测'
-            : deadline
-              ? '预计 ' + fmtLocalDateTime(deadline) + ' 解封' + (remaining ? '（剩余 ' + dur(remaining) + '）' : '')
-              : '预计解封时间未知';
-        const title = r.model + '\n' + detail;
-        return (
-          <div
-            key={i}
-            title={title}
-            className={
-              'flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[11.5px] ' +
-              (r.kind === 'model_unavailable' ? 'bg-[var(--bad-soft)] text-[var(--bad)]' : 'bg-[var(--warn-soft)] text-[var(--warn)]')
-            }
+    <button
+      type="button"
+      title={i.tip}
+      onClick={onClick}
+      className={
+        'flex w-full items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[11.5px] text-left transition-colors ' +
+        (onClick ? 'cursor-pointer hover:brightness-110 ' : 'cursor-default ') +
+        (i.locked ? 'bg-[var(--bad-soft)] text-[var(--bad)]' : 'bg-[var(--warn-soft)] text-[var(--warn)]')
+      }
+    >
+      <b className="min-w-0 flex-1 truncate font-[family-name:var(--mono)] font-medium">{r.model}</b>
+      <span className="shrink-0 font-medium">{i.label}</span>
+      <span className="tabular shrink-0 opacity-80">{i.when}</span>
+    </button>
+  );
+}
+
+/* 限流详情弹窗：全部条目（模型 / 状态 / 倒计时 / 解封时刻 / 上游原因）。 */
+function LimitsDialog({ uid, rows, onClose }: { uid: string; rows: NonNullable<OverviewAccount['rate_limited_models']>; onClose: () => void }) {
+  return (
+    <Dialog title={`模型限流明细 · ${rows.length} 项`} hint={'uid: ' + uid} onClose={onClose} width={620}>
+      <table className="w-full border-collapse text-[12.5px]">
+        <thead>
+          <tr className="border-b border-[var(--line-soft)] text-left text-[11.5px] text-[var(--ink-2)]">
+            <th className="px-2 py-1.5 font-medium">模型</th>
+            <th className="px-2 py-1.5 font-medium">状态</th>
+            <th className="px-2 py-1.5 font-medium">剩余</th>
+            <th className="px-2 py-1.5 font-medium">解封时刻</th>
+            <th className="px-2 py-1.5 font-medium">上游原因</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-[var(--line-soft)]/60">
+          {rows.map((r, i) => {
+            const x = limitInfo(r);
+            return (
+              <tr key={i}>
+                <td className="px-2 py-1.5 font-[family-name:var(--mono)] text-[var(--ink)]">{r.model}</td>
+                <td className="px-2 py-1.5">
+                  <Tag tone={x.locked ? 'bad' : 'warn'}>{x.label}</Tag>
+                </td>
+                <td className="tabular px-2 py-1.5">{x.left > 0 ? dur(x.left) : '—'}</td>
+                <td className="tabular px-2 py-1.5 text-[var(--ink-2)]">{x.at || '—'}</td>
+                <td className="max-w-[220px] px-2 py-1.5 text-[11.5px] text-[var(--ink-3)]">{r.reason || '—'}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <p className="mt-3 text-[11.5px] leading-relaxed text-[var(--ink-3)]">
+        「锁定中」= 上游回 11102 该账号无此模型（网关侧负缓存，实测成功即解除）；「限流中」= 上游回 6004 模型级限额（按上游重置时刻解封）。
+        整池范围的锁定情况见下方「模型锁池」。
+      </p>
+    </Dialog>
+  );
+}
+
+/* 模型限流单元：最多两行，超出折叠为「+N 更多」。 */
+function ModelLimits({ uid, rows }: { uid: string; rows: OverviewAccount['rate_limited_models'] }) {
+  const [open, setOpen] = useState(false);
+  const list = (rows || []).filter((r) => r && r.model);
+  if (!list.length) return <span className="text-[12px] text-[var(--ink-3)]">—</span>;
+  const shown = list.length > LIMIT_MAX_ROWS ? list.slice(0, 1) : list;
+  const more = list.length - shown.length;
+  return (
+    <>
+      <div className="flex flex-col gap-1">
+        {shown.map((r, i) => (
+          <LimitChip key={i} r={r} onClick={() => setOpen(true)} />
+        ))}
+        {more > 0 && (
+          <button
+            type="button"
+            onClick={() => setOpen(true)}
+            className="rounded-md border border-[var(--line)] bg-[var(--surface-2)] px-1.5 py-0.5 text-[11.5px] text-[var(--ink-3)] hover:border-[var(--accent)]/40 hover:text-[var(--accent)]"
           >
-            <b className="font-[family-name:var(--mono)]">{r.model}</b>
-            <span>{detail}</span>
-          </div>
-        );
-      })}
-    </div>
+            +{more} 更多…
+          </button>
+        )}
+      </div>
+      {open && <LimitsDialog uid={uid} rows={list} onClose={() => setOpen(false)} />}
+    </>
   );
 }
 
@@ -113,7 +187,9 @@ function AccountRow({ s, onAction, onTasks, proxyConfigured }: { s: OverviewAcco
       <td className="px-3.5 py-2.5">
         {tag}
         {s.reason && <div className="mt-0.5 text-[11.5px] text-[var(--ink-3)]">{s.reason}</div>}
-        <RateLimits rows={s.rate_limited_models} />
+      </td>
+      <td className="px-3.5 py-2.5 align-top">
+        <ModelLimits uid={s.uid} rows={s.rate_limited_models} />
       </td>
       <td className="tabular px-3.5 py-2.5" title={credTip}>
         {unlimited ? '不限' : s.credits == null ? '—' : <>{s.credits}{s.credits_total && s.credits_total > 0 ? <span className="text-[var(--ink-3)]">/{s.credits_total}</span> : null}</>}
@@ -199,9 +275,14 @@ function ModelLocksTable({ rows }: { rows: { model: string; realm?: string; stat
     starved: ['warn', '没号可用'],
     partial: ['warn', '部分限流'],
   };
+  // 倒计时为主、绝对时刻进 title（不显示「预计 … 后重试」这类长句）。
+  // cell 把 (倒计时, 绝对时刻) 渲染成带 title 的单元格。
+  const cell = (x: { text: string; at: string }) => <span title={x.at || undefined}>{x.text}</span>;
   const left = (iso?: string) => {
     const ms = parseAPITime(iso);
-    return ms ? dur(Math.max(0, Math.round((ms - Date.now()) / 1000))) : '—';
+    if (!ms) return { text: '—', at: '' };
+    const sec = Math.max(0, Math.round((ms - Date.now()) / 1000));
+    return { text: dur(sec), at: fmtLocalDateTime(ms) };
   };
   return (
     <tbody className="divide-y divide-[var(--line-soft)]/60">
@@ -220,8 +301,8 @@ function ModelLocksTable({ rows }: { rows: { model: string; realm?: string; stat
               {r.servable || 0} / {r.total || 0}
             </td>
             <td className="tabular px-3.5 py-2.5">{r.locked || 0}</td>
-            <td className="tabular px-3.5 py-2.5">{left(r.unlock_at || r.fully_unlock_at)}</td>
-            <td className="tabular px-3.5 py-2.5">{left(r.fully_unlock_at)}</td>
+            <td className="tabular px-3.5 py-2.5">{cell(left(r.unlock_at || r.fully_unlock_at))}</td>
+            <td className="tabular px-3.5 py-2.5">{cell(left(r.fully_unlock_at))}</td>
             <td className="max-w-[240px] px-3.5 py-2.5 text-[12px] text-[var(--ink-3)]">{r.reason || '—'}</td>
           </tr>
         );
@@ -315,6 +396,7 @@ export function AccountsView() {
               <tr className="border-b border-[var(--line-soft)] bg-[var(--surface-2)]/50 text-left text-[11.5px] font-semibold text-[var(--ink-2)]">
                 <th className="px-3.5 py-2.5 font-medium">账号</th>
                 <th className="px-3.5 py-2.5 font-medium">状态</th>
+                <th className="px-3.5 py-2.5 font-medium">模型限流</th>
                 <th className="px-3.5 py-2.5 font-medium">积分</th>
                 <th className="px-3.5 py-2.5 font-medium">成功 / 失败</th>
                 <th className="px-3.5 py-2.5 font-medium">在途</th>
@@ -332,7 +414,7 @@ export function AccountsView() {
             ) : (
               <tbody>
                 <tr>
-                  <td colSpan={8}>
+                  <td colSpan={9}>
                     <Empty big="账号池是空的">点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</Empty>
                   </td>
                 </tr>

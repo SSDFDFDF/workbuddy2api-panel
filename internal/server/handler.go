@@ -14,8 +14,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-
-	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -367,24 +365,9 @@ func countsMapFrom(total, healthy, cooling, disabled, inFlightFull int) map[stri
 	}
 }
 
-// dynamicModelsCache 动态模型缓存。
-var dynamicModelsCache struct {
-	sync.RWMutex
-	ids      []upstream.ModelInfo
-	fetched  time.Time // 最近一次成功拉取时间
-	lastFail time.Time // 最近一次拉取失败时间（负缓存）
-}
-
-const (
-	// dynamicModelsTTL 模型目录缓存时长。曾是 1h；缩到 10min 对齐「面板实时、
-	// API 缓存」的漂移痛点（PR #38 报告）：目录新增模型时面板立即可见，公开
-	// /v1/models 最多滞后一个 TTL。再短就不值得——每次失效都是 2 次上游探测。
-	dynamicModelsTTL        = 10 * time.Minute
-	modelsFetchFailCooldown = 5 * time.Minute
-)
-
-// models 返回模型列表：纯动态（缓存 10min），失败/无号返回空列表（无静态兜底——
-// 拉不出目录即意味着上游不可用，假名单只会让客户端选到 11102 的模型）。
+// models 返回模型列表：只读目录快照（启动预热 / 面板手动刷新写入）。
+// 快照为空 → 空列表（无静态兜底——拉不出目录时假名单只会让客户端选到 11102 的模型）。
+// 本端点**不触发上游探测**：客户端随时可拉，零上游代价。
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
@@ -465,10 +448,14 @@ func applyModelInfoFields(entry map[string]any, mi upstream.ModelInfo) map[strin
 
 // modelList 模型列表：CN 模型输出统一加 "cn:" 前缀（gateway 路由协议，与 resolveModel
 // 对称）；global.enabled=true 时追加 global: 前缀的国际版名单。
-// 纯动态：动态拉取失败/无号 → 该域空列表，无静态兜底。
+// 纯动态 + 缓存制：只读目录快照（启动预热 / 面板手动刷新写入），
+// 快照为空 → 该域空列表；本方法**绝不触发上游探测**（客户端请求路径零上游调用）。
 func (h *Handler) modelList() []map[string]any {
 	out := make([]map[string]any, 0)
-	for _, mi := range h.fetchDynamicModels() {
+	if h.cfg.Upstream == nil {
+		return out
+	}
+	for _, mi := range h.cfg.Upstream.Catalog("cn").Infos {
 		entry := map[string]any{
 			"id":       "cn:" + mi.ID,
 			"object":   "model",
@@ -498,20 +485,13 @@ func (h *Handler) modelList() []map[string]any {
 		out = append(out, entry)
 	}
 	// global 模型名单：仅 GlobalEnabled=true 时列出（逃生门）。
-	// 名单 = 纯动态探测结果（fetchGlobalModels，失败/无号 → 空）。
+	// 名单 = global 域目录快照（启动预热 / 面板手动刷新写入），空 → 该域空列表。
 	if h.globalEnabled.Load() {
 		// global 域 effort 能力三级查找：探测下发桶（权威）→ 静态兜底表 → 省略。
-		// 先 fetchGlobalModels（内部探测并落 effort 桶），再按 id 取快照。
-		globalIDs, globalAccount := h.fetchGlobalModels()
-		// 探测对象形态的全字段条目（与 fetchGlobalModels 共享同一次探测缓存）：
-		// 命中 id 才透出富字段；窄表/失败 → nil，按裸 ID 条目输出（不编造字段）。
-		// globalAccount 为 nil（无 global 号）时返回 nil，跳过富字段映射。
-		globalInfos := map[string]upstream.ModelInfo{}
-		for _, mi := range h.cfg.Upstream.FetchGlobalModelInfos(globalAccount) {
-			globalInfos[mi.ID] = mi
-		}
+		// 快照里的 ModelInfo 已带 supportedEfforts/defaultEffort，直接透出。
 		globalEfforts, globalDefaults := h.cfg.Upstream.GlobalEffortSnapshot()
-		for _, id := range globalIDs {
+		for _, mi := range h.cfg.Upstream.Catalog("global").Infos {
+			id := mi.ID
 			entry := map[string]any{
 				"id":       "global:" + id,
 				"object":   "model",
@@ -519,13 +499,10 @@ func (h *Handler) modelList() []map[string]any {
 				"owned_by": "workbuddy",
 			}
 			// context_length / max_output_tokens 四级查找（与 CN 动态分支同口径）。
-			var remoteCtx, remoteOut int64
-			if mi, ok := globalInfos[id]; ok {
-				entry = applyModelInfoFields(entry, mi)
-				remoteCtx, remoteOut = mi.ContextWindow, mi.MaxTokens
-			}
-			entry["context_length"] = upstream.ContextWindowListingV4(id, remoteCtx, h.cfg.Upstream.ShortClient())
-			if mo, ok := upstream.MaxOutputTokensListingV4(id, remoteOut, h.cfg.Upstream.ShortClient()); ok {
+			// 快照条目自带上游动态值（maxInputTokens/maxOutputTokens），直接透出。
+			entry = applyModelInfoFields(entry, mi)
+			entry["context_length"] = upstream.ContextWindowListingV4(id, mi.ContextWindow, h.cfg.Upstream.ShortClient())
+			if mo, ok := upstream.MaxOutputTokensListingV4(id, mi.MaxTokens, h.cfg.Upstream.ShortClient()); ok {
 				entry["max_output_tokens"] = mo
 			}
 			if efforts, def := upstream.EffortListing("global", id, globalEfforts[id], globalDefaults[id]); efforts != nil {
@@ -538,81 +515,6 @@ func (h *Handler) modelList() []map[string]any {
 		}
 	}
 	return out
-}
-
-// fetchGlobalModels 返回 global 模型名单（纯动态探测结果）及被探测账号。
-// 缓存/失败回落封在 upstream.FetchGlobalModels（内部 1h + 5min 负缓存）。
-// 本方法只负责"何时探测"：池中无 global 账号 → 空名单 + nil 账号（零上游调用）。
-// 返回的 acct 供调用方在同一账号上取富 ModelInfo（FetchGlobalModelInfos 与
-// FetchGlobalModels 共享缓存，不会触发第二次上游探测）。
-// GlobalEnabled=false 时 modelList 已不进入本分支（逃生门在调用方 gate）。
-func (h *Handler) fetchGlobalModels() ([]string, *auth.Auth) {
-	acct := h.cfg.Pool.PickExcludingForRealm(nil, "", "global")
-	if acct == nil {
-		return nil, nil
-	}
-	return h.cfg.Upstream.FetchGlobalModels(acct), acct
-}
-
-// fetchDynamicModels 从第一个可用 CN 账号拉模型列表（含 contextWindow/maxTokens），
-// 缓存 10min。
-// 选号与 /panel/api/models 完全同口径（AvailableUIDsForRealm("cn") 首个 + AuthByUID），
-// 而非 Pool.Pick()：Pick 无 realm 过滤，混合池里可能选中 global 号去打 CN 端点，
-// 表现为偶发失败/面板与 /v1/models 两套目录（PR #38 报告并给出的选号修复）。
-// 缓存 + 5min 负缓存按既有语义**保留**（#38 原案整体删除缓存被拒）：公开端点逐请求
-// 实时拉取 = 每次 2 个上游探测，客户端周期性刷新模型列表会持续打上游；上游故障时
-// 无冷却窗口，客户端重试即放大请求量——负缓存正是为此设计（见 handler_test 吸收
-// 上游 9832283 的注释）；且 cachedModelsSnapshot（gateway_hint 判定）依赖缓存写入。
-func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
-	dynamicModelsCache.RLock()
-	if len(dynamicModelsCache.ids) > 0 && time.Since(dynamicModelsCache.fetched) < dynamicModelsTTL {
-		out := dynamicModelsCache.ids
-		dynamicModelsCache.RUnlock()
-		return out
-	}
-	// 失败负缓存：冷却期内不再请求上游。
-	if !dynamicModelsCache.lastFail.IsZero() && time.Since(dynamicModelsCache.lastFail) < modelsFetchFailCooldown {
-		dynamicModelsCache.RUnlock()
-		return nil
-	}
-	dynamicModelsCache.RUnlock()
-
-	uids := h.cfg.Pool.AvailableUIDsForRealm("cn")
-	if len(uids) == 0 {
-		return nil
-	}
-	acct := h.cfg.Pool.AuthByUID(uids[0])
-	if acct == nil {
-		return nil
-	}
-	infos, err := h.cfg.Upstream.FetchModels(acct)
-	if err != nil || len(infos) == 0 {
-		// 拉取失败只进负缓存（5min lastFail），不 NoteError：NoteError 喂的是 chat
-		// 熔断器，models 端点偶发 5xx 跨界惩罚 chat 通道健康的账号；
-		// models 拉取失败 ≠ 账号 chat 不可用。
-		dynamicModelsCache.Lock()
-		dynamicModelsCache.lastFail = time.Now()
-		dynamicModelsCache.Unlock()
-		return nil
-	}
-	dynamicModelsCache.Lock()
-	dynamicModelsCache.ids = infos
-	dynamicModelsCache.fetched = time.Now()
-	dynamicModelsCache.lastFail = time.Time{} // 成功则清空负缓存
-	dynamicModelsCache.Unlock()
-	return infos
-}
-
-// cachedModelsSnapshot 只读模型目录缓存（TTL 内快照）；缓存冷/空 → nil。
-// 不发起任何上游调用（hint 判定用：错误路径加一次 FetchModels 网络调用既拖慢
-// 错误响应、又污染上游调用语义）。
-func cachedModelsSnapshot() []upstream.ModelInfo {
-	dynamicModelsCache.RLock()
-	defer dynamicModelsCache.RUnlock()
-	if len(dynamicModelsCache.ids) == 0 || time.Since(dynamicModelsCache.fetched) >= dynamicModelsTTL {
-		return nil
-	}
-	return dynamicModelsCache.ids
 }
 
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -710,13 +612,7 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 		out.Error(w, http.StatusBadRequest, "invalid_model", "model realm is disabled or model is empty")
 		return
 	}
-	primaryRealm := candidateRealms[0]
-	modelRate := ""
-	if h.cfg.Upstream != nil {
-		modelRate = h.cfg.Upstream.ModelRate(primaryRealm, bareModel)
-	}
-
-	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
+	// 请求级统计：出口即打一行表格日志（任何路径都会走到，**含门禁 404**）。
 	st := newChatStat(time.Now(), body, peek.Stream)
 	// 跨协议入口被忽略的客户端字段（如 Codex 的 include/reasoning 历史/客户端遥测）：
 	// 只写请求归档，用于回答“它发了什么被我们丢了”。
@@ -728,6 +624,27 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 		st.clientIP, st.userAgent = tr.clientIP, tr.userAgent
 	}
 	defer st.done()
+
+	// 模型目录门禁（modelcheck.go）：快照可用时，不存在的模型在选号之前直接 404——
+	// 一个错写的模型名此前会逐个账号去上游撞 11102，每撞一次就往「模型锁池」里
+	// 写一条 6h 起的模型级负缓存（Hits 达 4 次后 24h），纯属自伤。
+	// 命中时顺便重排候选域（global-only 模型不再先拿 CN 号撞一次）与纠正大小写。
+	// 快照为空（未刷新过）→ fail-open，维持既有行为（不给客户端请求探测上游）。
+	var catalogRejected bool
+	candidateRealms, bareModel, catalogRejected = h.checkModel(candidateRealms, bareModel)
+	if catalogRejected {
+		st.status = http.StatusNotFound
+		st.outcome = reqlog.OutcomeHTTPError
+		out.ErrorHint(w, http.StatusNotFound, modelNotFoundCode,
+			"model not found: the gateway model catalog does not contain this model",
+			modelNotFoundHint(bareModel, candidateRealms))
+		return
+	}
+	primaryRealm := candidateRealms[0]
+	modelRate := ""
+	if h.cfg.Upstream != nil {
+		modelRate = h.cfg.Upstream.ModelRate(primaryRealm, bareModel)
+	}
 
 	tried := map[string]bool{}
 	var lastErr error
@@ -1712,16 +1629,16 @@ func writeOpenAIErrorHint(w http.ResponseWriter, status int, code, msg, hint str
 // 是否带图 + 模型目录 supports_images 声明（目录未收录 → ModelInCatalog=false，
 // 不做「不支持」判定，防查不到误判）。仅错误路径调用（成功请求零开销）。
 //
-// 目录查询只读既有缓存快照（cachedModelsSnapshot），**不触发上游拉取**：错误路径
+// 目录查询只读目录快照（upstream.Client.Catalog），**不触发任何上游拉取**：错误路径
 // 加一次 FetchModels 网络调用既拖慢错误响应、又污染上游调用语义（错误风暴时放大
-// 请求量——与 WAF IP fail-fast 的「不放大请求量」哲学相悖）。缓存冷（最近 10min 未
-// 拉过）→ ModelInCatalog=false，11133 退中性 hint（宁缺勿滥，不编造能力事实）。
+// 请求量——与 WAF IP fail-fast 的「不放大请求量」哲学相悖）。快照为空/未收录 →
+// ModelInCatalog=false，11133 退中性 hint（宁缺勿滥，不编造能力事实）。
 func (h *Handler) hintContext(bareModel string, hasImage bool) upstream.HintContext {
 	ctx := upstream.HintContext{Model: bareModel, HasImage: hasImage}
-	if bareModel == "" {
+	if bareModel == "" || h.cfg.Upstream == nil {
 		return ctx
 	}
-	for _, mi := range cachedModelsSnapshot() {
+	for _, mi := range h.cfg.Upstream.Catalog("cn").Infos {
 		if mi.ID == bareModel {
 			ctx.ModelInCatalog = true
 			ctx.ModelSupportsImages = mi.SupportsImages

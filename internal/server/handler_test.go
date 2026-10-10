@@ -843,7 +843,10 @@ func TestChatHTTP4xxClientDoesNotPenalize(t *testing.T) {
 }
 
 func TestModelsEndpoint(t *testing.T) {
-	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}), Upstream: upstream.New()})
+	up := upstream.New()
+	// 目录快照是显式刷新制的：/v1/models 只读快照，测试需先写入（生产路径 = 启动预热）。
+	up.SetCatalogForTest("cn", []upstream.ModelInfo{{ID: "glm-5.2"}, {ID: "glm-5.1"}, {ID: "kimi-k3"}, {ID: "hy3"}, {ID: "minimax-m3"}})
+	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}), Upstream: up})
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -871,20 +874,33 @@ func TestModelsEndpoint(t *testing.T) {
 }
 
 func TestModelsDynamic(t *testing.T) {
-	// 清缓存
-	dynamicModelsCache.Lock()
-	dynamicModelsCache.ids = nil
-	dynamicModelsCache.fetched = time.Time{}
-	dynamicModelsCache.lastFail = time.Time{}
-	dynamicModelsCache.Unlock()
-
-	// 假上游返回动态模型（含 agents + maxInputTokens/maxOutputTokens + reasoning 档位）
+	// 假上游返回动态模型（含 agents + maxInputTokens/maxOutputTokens + reasoning 档位）：
+	// 门禁/列表都只读快照，故这里直接写快照 + 断言 /v1/models 的字段映射。
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 200, `{"code":0,"data":{"models":[{"id":"dyn-model-a","maxInputTokens":65536,"maxOutputTokens":8192,"reasoning":{"effort":"medium","supportedEfforts":["low","medium","high"]}},{"id":"dyn-model-b","maxInputTokens":131072,"maxOutputTokens":16384},{"id":"glm-9.9","maxInputTokens":262144,"maxOutputTokens":32768}],"agents":[{"name":"cli","models":["dyn-model-a","dyn-model-b","glm-9.9"]}]}}`, false
 	})
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: up})
+
+	// 未刷新 → 空列表（无静态兜底、无懒探测）。
 	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/models", nil))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d", rec.Code)
+	}
+	var empty map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &empty)
+	if got := len(empty["data"].([]any)); got != 0 {
+		t.Fatalf("cold catalog should yield empty list, got %d", got)
+	}
+
+	// 手动刷新（面板「重新获取」同路径）→ 写快照 + 返回目录。
+	infos, err := up.RefreshCatalog(p.AuthByUID("u1"))
+	if err != nil || len(infos) != 3 {
+		t.Fatalf("RefreshCatalog: infos=%d err=%v (want 3)", len(infos), err)
+	}
+
+	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/models", nil))
 	if rec.Code != 200 {
 		t.Fatalf("code=%d", rec.Code)
@@ -907,7 +923,7 @@ func TestModelsDynamic(t *testing.T) {
 	for _, m := range data {
 		mm := m.(map[string]any)
 		switch mm["id"] {
-		case "dyn-model-a":
+		case "cn:dyn-model-a":
 			if mm["context_length"].(float64) != 65536 {
 				t.Errorf("dyn-model-a context_length=%v want 65536", mm["context_length"])
 			}
@@ -915,22 +931,19 @@ func TestModelsDynamic(t *testing.T) {
 				t.Errorf("dyn-model-a max_output_tokens=%v want 8192", mm["max_output_tokens"])
 			}
 			// reasoning 档位透出：supported_efforts + default_effort
-			efforts, _ := mm["supported_efforts"].([]any)
+			efforts, _ := mm["reasoning_supported_efforts"].([]any)
 			if len(efforts) != 3 || efforts[0] != "low" {
-				t.Errorf("dyn-model-a supported_efforts=%v", mm["supported_efforts"])
+				t.Errorf("dyn-model-a reasoning_supported_efforts=%v", mm["reasoning_supported_efforts"])
 			}
-			if mm["default_effort"] != "medium" {
-				t.Errorf("dyn-model-a default_effort=%v want medium", mm["default_effort"])
+			if mm["reasoning_default_effort"] != "medium" {
+				t.Errorf("dyn-model-a reasoning_default_effort=%v want medium", mm["reasoning_default_effort"])
 			}
-		case "dyn-model-b":
-			// 上游未返回 reasoning → 两个档位字段都省略（客户端按自身默认）
-			if _, has := mm["supported_efforts"]; has {
-				t.Errorf("dyn-model-b supported_efforts should be omitted, got %v", mm["supported_efforts"])
+		case "cn:dyn-model-b":
+			// 上游未返回 reasoning → 档位字段省略（客户端按自身默认）
+			if _, has := mm["reasoning_supported_efforts"]; has {
+				t.Errorf("dyn-model-b supported efforts should be omitted, got %v", mm["reasoning_supported_efforts"])
 			}
-			if _, has := mm["default_effort"]; has {
-				t.Errorf("dyn-model-b default_effort should be omitted")
-			}
-		case "glm-9.9":
+		case "cn:glm-9.9":
 			if mm["context_length"].(float64) != 262144 {
 				t.Errorf("glm-9.9 context_length=%v want 262144", mm["context_length"])
 			}
@@ -939,25 +952,11 @@ func TestModelsDynamic(t *testing.T) {
 			}
 		}
 	}
-
-	// 第二次调用走缓存（把上游关掉也成功）
-	dynamicModelsCache.RLock()
-	cached := len(dynamicModelsCache.ids)
-	dynamicModelsCache.RUnlock()
-	if cached != 3 {
-		t.Errorf("cache not populated: %d", cached)
-	}
 }
 
-func TestModelsDynamicFallsBackToStatic(t *testing.T) {
-	// 纯动态化（产品决策）：上游失败 → 空列表（200），不再回落静态表——
-	// 拉不出目录即意味着上游不可用，假名单只会让客户端选到 11102 的模型。
-	dynamicModelsCache.Lock()
-	dynamicModelsCache.ids = nil
-	dynamicModelsCache.fetched = time.Time{}
-	dynamicModelsCache.lastFail = time.Time{}
-	dynamicModelsCache.Unlock()
-
+func TestModelsEmptyCatalogYieldsEmptyList(t *testing.T) {
+	// 纯动态 + 缓存制（产品决策）：目录未刷新过 → 空列表（200），无静态兜底——
+	// 拉不出目录时假名单只会让客户端选到 11102 的模型。
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 500, `boom`, false
@@ -972,53 +971,24 @@ func TestModelsDynamicFallsBackToStatic(t *testing.T) {
 	json.Unmarshal(rec.Body.Bytes(), &resp)
 	data := resp["data"].([]any)
 	if len(data) != 0 {
-		t.Errorf("pure-dynamic failure should yield empty list, got %d", len(data))
+		t.Errorf("empty catalog should yield empty list, got %d", len(data))
 	}
 }
 
-func TestModelsFetchFailurePenalizesAccount(t *testing.T) {
-	// 吸收上游 9832283：models 拉取失败只进负缓存，不 NoteError——
-	// NoteError 喂的是 chat 熔断器，models 端点 5xx 跨界惩罚 chat 通道健康号。
-	dynamicModelsCache.Lock()
-	dynamicModelsCache.ids = nil
-	dynamicModelsCache.fetched = time.Time{}
-	dynamicModelsCache.lastFail = time.Time{}
-	dynamicModelsCache.Unlock()
-
+func TestModelsEndpointNeverProbesUpstream(t *testing.T) {
+	// 缓存制的核心契约：**客户端请求路径零上游探测**。刷新只发生在启动预热与
+	// 面板手动刷新；/v1/models 拉到目录为空也照常 200，且不喂 chat 熔断器
+	// （旧实现的懒探测每次都会打上游，熔断阈值 1 时一次失败即熔断——这正是
+	// 上游 9832283 报过的问题）。
+	var calls atomic.Int32
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	p.SetBreaker(1, time.Hour, time.Hour) // 熔断阈值 1：若仍罚号，一次 fetch 失败即熔断
-	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
-		return 500, `boom`, false
-	})
-	h := NewHandler(Config{Pool: p, Upstream: up})
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/models", nil))
-	if rec.Code != 200 {
-		t.Fatalf("code=%d", rec.Code)
-	}
-	st, _ := p.Status("u1")
-	if st.Cooling {
-		t.Fatalf("models fetch failure must not trip chat breaker: %+v", st)
-	}
-}
-
-func TestModelsNegativeCacheOnFetchFailure(t *testing.T) {
-	dynamicModelsCache.Lock()
-	dynamicModelsCache.ids = nil
-	dynamicModelsCache.fetched = time.Time{}
-	dynamicModelsCache.lastFail = time.Time{}
-	dynamicModelsCache.Unlock()
-
-	var calls atomic.Int32 // FetchModels 企业/v3 两路并发探测回调，计数须原子
+	p.SetBreaker(1, time.Hour, time.Hour)
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		calls.Add(1)
 		return 500, `boom`, false
 	})
-	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: up})
 
-	// 连续 3 次请求，上游持续 500 → 只应触发 1 次 fetch（负缓存生效），
-	// 纯动态下空列表仍返回 200。
 	for i := 0; i < 3; i++ {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/models", nil))
@@ -1026,22 +996,56 @@ func TestModelsNegativeCacheOnFetchFailure(t *testing.T) {
 			t.Fatalf("req %d: code=%d body=%s", i, rec.Code, rec.Body)
 		}
 	}
-	// 一轮探测 = 2 次上游调用（企业端点 + /v3/config 并发，两路全失败才进负缓存）。
-	if got := calls.Load(); got != 2 {
-		t.Errorf("want 2 probes (console + v3), got %d", got)
+	if got := calls.Load(); got != 0 {
+		t.Errorf("/v1/models must not probe upstream, got %d calls", got)
 	}
+	st, _ := p.Status("u1")
+	if st.Cooling {
+		t.Fatalf("models endpoint must not trip chat breaker: %+v", st)
+	}
+}
 
-	// 冷却期结束（把失败时间戳拨回 10 分钟前）→ 应重新 fetch。
-	dynamicModelsCache.Lock()
-	dynamicModelsCache.lastFail = time.Now().Add(-10 * time.Minute)
-	dynamicModelsCache.Unlock()
+func TestRefreshCatalogFailureKeepsOldSnapshot(t *testing.T) {
+	// 刷新失败：保留旧快照（旧目录总比没有强，且不会被一次网络抖动清空）、
+	// 记录失败原因，且**不罚账号**（models 端点失败 ≠ chat 不可用）。
+	fail := false
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		if fail {
+			return 500, `boom`, false
+		}
+		return 200, `{"code":0,"data":{"models":[{"id":"glm-5.2"}],"agents":[{"name":"cli","models":["glm-5.2"]}]}}`, false
+	})
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up})
+
+	if _, err := up.RefreshCatalog(p.AuthByUID("u1")); err != nil {
+		t.Fatalf("initial refresh: %v", err)
+	}
+	fail = true
+	if _, err := up.RefreshCatalog(p.AuthByUID("u1")); err == nil {
+		t.Fatal("refresh should fail on 500")
+	}
+	entry := up.Catalog("cn")
+	if len(entry.Infos) != 1 || entry.Infos[0].ID != "glm-5.2" {
+		t.Fatalf("failure must keep previous snapshot: %+v", entry.Infos)
+	}
+	if entry.FetchedAt.IsZero() || entry.LastErr == "" {
+		t.Errorf("entry should keep FetchedAt and record LastErr: %+v", entry)
+	}
+	// 门禁照常按旧快照工作。
+	if _, ok, ready := up.LookupCatalog("cn", "glm-5.2"); !ok || !ready {
+		t.Errorf("stale-but-usable snapshot should still serve the gate: ok=%v ready=%v", ok, ready)
+	}
+	// 账号不留痕。
+	st, _ := p.Status("u1")
+	if st.Cooling || st.ErrTotal != 0 {
+		t.Fatalf("catalog refresh failure must not penalize the account: %+v", st)
+	}
+	// /v1/models 仍列出旧目录。
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/models", nil))
-	if rec.Code != 200 {
-		t.Fatalf("after cooldown: code=%d", rec.Code)
-	}
-	if got := calls.Load(); got != 4 {
-		t.Errorf("want 4 probes after cooldown (2 rounds x 2), got %d", got)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "cn:glm-5.2") {
+		t.Errorf("stale snapshot should still be listed: code=%d body=%s", rec.Code, rec.Body)
 	}
 }
 

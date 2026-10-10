@@ -38,6 +38,7 @@ export interface RateLimitRow {
   kind?: string;
   reset_at?: string;
   until?: string;
+  reason?: string;
 }
 
 export interface ModelLockRow {

@@ -12,7 +12,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"workbuddy_manager/internal/auth"
 	"workbuddy_manager/internal/media"
@@ -180,21 +179,12 @@ func TestMediaRejectedBeforeAccountSelection(t *testing.T) {
 // user 是图片数组时，gateway_hint 仍须判定"请求确实带图"。旧 hasImagePart 按 body
 // 反序列化会在字符串 content 上整体失败并漏判，11133 只给中性参数 hint。
 func TestImageHintWithMixedContentMessages(t *testing.T) {
-	dynamicModelsCache.Lock()
-	prevIDs, prevFetched, prevFail := dynamicModelsCache.ids, dynamicModelsCache.fetched, dynamicModelsCache.lastFail
-	dynamicModelsCache.ids = []upstream.ModelInfo{{ID: "glm-5.2"}} // SupportsImages=false
-	dynamicModelsCache.fetched = time.Now()
-	dynamicModelsCache.lastFail = time.Time{}
-	dynamicModelsCache.Unlock()
-	t.Cleanup(func() {
-		dynamicModelsCache.Lock()
-		dynamicModelsCache.ids, dynamicModelsCache.fetched, dynamicModelsCache.lastFail = prevIDs, prevFetched, prevFail
-		dynamicModelsCache.Unlock()
-	})
-
 	up := newFakeUpstream(t, func(string) (int, string, bool) {
 		return 400, `{"code":11133,"msg":"model does not support image"}`, false
 	})
+	// 目录快照里 glm-5.2 未声明 supports_images（SupportsImages=false）：
+	// gateway_hint 的「模型不支持图片」判定需要目录命中（hintContext 只读快照）。
+	up.SetCatalogForTest("cn", []upstream.ModelInfo{{ID: "glm-5.2"}})
 	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "media", AccessToken: "t", ExpiresAt: 9999999999}), Upstream: up})
 	body := `{"model":"glm-5.2","stream":true,"messages":[{"role":"system","content":"rules"},{"role":"user","content":[{"type":"image_url","image_url":"` + mediaTinyImage + `"}]}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))

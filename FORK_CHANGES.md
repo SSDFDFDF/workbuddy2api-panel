@@ -69,6 +69,8 @@ git log --oneline <已同步基线>..upstream/main     # 列出待判定提交�
 | 12 | **裸模型名默认域** | `model_default_realm = cn / global / auto(:cn,global) / auto:global,cn` | `cn` |
 | 13 | **客户端特征对齐** | 稳定设备/会话指纹、硬件特征离散化、`/v2/report` 桌面指纹、版本自检 | 启用 |
 | 14 | **面板版本配置** | 占位符来自后端内置基线（不硬编码）；「一键填入已拉取版本」；CLI 版本需人工核对 | 生效 |
+| 16 | **模型目录门禁（显式刷新制）** | 出站前先查模型目录快照：快照可用而模型不存在 → 直接 `404 model_not_found`，**不选号、不打上游**（旧行为是逐个账号撞 11102，每个账号被写一条 6h 起的模型级负缓存，于是「模型锁池」里长出永不自愈的条目）；命中时顺带重排候选域（`global` 专有模型不再先拿 CN 号白撞一次）与纠正大小写。快照为空（从未刷新过）→ fail-open，维持旧行为。快照只在**启动预热**与**面板「模型能力」页手动刷新**时写入；客户端请求路径（含 `GET /v1/models`）零上游探测 | 生效 |
+
 | 15 | **Responses / Anthropic 桥接** | `/v1/responses` 无状态文本 / function tools；`/v1/messages` 文本 / client tools。复用原有执行、重试、用量与日志；原生 Chat 保留扩展。纯提示/遥测字段（`cache_control` / `metadata` / `include` / `client_metadata` / `service_tier` / `prompt_cache_key` / `stream_options` / `top_k` / `text.verbosity` 等）与客户端侧推理状态（Responses `reasoning` 历史、Anthropic `thinking`）接受即丢，丢弃项写入请求归档并在面板展示；近似变换显式可见（`is_error` → `[tool error]` 文本前缀、`stop_sequences` → Chat `stop`）；会改变语义或伪造能力的字段（`previous_response_id` / `conversation` / `background:true` / `text.format` 结构化输出 / `strict:true` / 白名单外未知字段）仍明确 400。见 [兼容说明](docs/PROTOCOL_COMPATIBILITY.md) | 生效（限定子集） |
 
 ---
@@ -124,6 +126,43 @@ git log --oneline <已同步基线>..upstream/main     # 列出待判定提交�
 `GET /panel/api/tasks/actions` 下发（前端不硬编码，灰显 = 当前被策略屏蔽）。
 
 ---
+
+### 模型目录门禁（显式刷新制）
+
+**动机**：客户端此前可以请求任意模型名，网关不做任何目录校验，裸名解析后直接选号打上游，
+由上游 11102「该后端无此模型」兜底。代价：
+（a）错写的模型名会**逐个账号**去上游撞 11102，每次 `ErrModelBlocked` 都往
+`modelCooldowns` 写 `(账号, 模型)` 负缓存（6h 起、封顶 24h），「模型锁池」里于是长出
+一个永远等不到解封的条目；（b）这些账号本可以用在真实请求上。
+
+**做法**：`internal/upstream/catalog.go` 在 Client 实例上持有每域（cn / global）一份
+模型目录快照，**只读**给三处消费：
+
+| 消费方 | 位置 | 行为 |
+| --- | --- | --- |
+| 出站门禁 | `internal/server/modelcheck.go`（`checkModel`） | 候选域目录都可用且都没有该模型 → 选号前 `404 model_not_found`；任一候选域目录为空 → fail-open（上游 11102 兜底） |
+| 公开列表 | `GET /v1/models`（`handler.modelList`） | 读同一份快照拼 `cn:` / `global:` 条目；快照为空 → 空列表 |
+| 面板列表 | `GET /panel/api/models`（`panel.models`） | 手动刷新（面板「模型能力」页「重新获取」）→ 探测成功后写快照，因此**刷新一次即同时更新门禁名单** |
+
+**写入点只有两个**：启动预热（`cmd/server.warmModelCatalog`，与积分倍率表同一次探测，
+顺带解决「重启后到首次访问模型页之间倍率表为空、触底号被当成收费未知放行」的旧问题）
+与面板手动刷新。**没有 TTL 懒刷新**：目录内容变化极慢，而懒刷新意味着一次客户端请求
+可能触发 2~4 次上游探测（CN：`/v3/config` + 企业端点；global：三 UA + 企业端点家族），
+还与 chat 抢同一账号的在途名额。刷新失败**保留旧快照**并记 `LastErr`（旧目录比没有强，
+不被一次网络抖动清空），且不罚账号（models 端点失败 ≠ chat 不可用）。
+
+**边界**：
+- 门禁只看快照，**不查账号、不探测上游**——「没有 global 号」这类部署事实不构成拒绝理由
+  （否则 `auto` 策略下所有未知模型都会被拒）；显式 `cn:` / `global:` 前缀仍恒优先，不会因为
+  另一个域有该模型就跨域路由。
+- 快照由「该域第一个可用账号」单账号探测而来（与 `/v1/models` 同源、同一账号选取口径），
+  所以它回答的是「探测账号能看到什么」。上游 11102 本带账号维度（同模型可能 A 号无、B 号有），
+  故门禁偏严：确有某号能服务、而它不在探测账号目录里的模型会被 404 挡下（旧行为是逐个号
+  试过去、偶尔成功）。取舍明确——把「错写/已下线模型」的代价从「全池各写一条 6h 负缓存」
+  降到「一次 404」，代价是丧失跨账号的目录差集宽容度；目录为空时 fail-open 保留旧行为。改动文件：`internal/upstream/catalog.go`（新增）、
+`internal/server/modelcheck.go`（新增）、`internal/server/handler.go`（门禁挂载 + `modelList`
+改读快照）、`internal/panel/panel.go`（手动刷新写快照）、`cmd/server/main.go`（启动预热）。
+回归：`internal/server/modelcheck_test.go`（含「拒绝时零上游调用、零模型锁池」断言）。
 
 ## 3. 回主线禁忌
 
@@ -271,6 +310,7 @@ content:[]。空数组保持原形，不作为 null、缺失结果或虚构文�
 | 出站代理 | `internal/proxy/`、`internal/auth/auth.go`、`internal/upstream/proxy.go` |
 | 裸模型名默认域 | `internal/server/resolve_model.go` |
 | 请求归档 / 被丢弃字段 | `internal/reqlog/reqlog.go`（`Event.dropped`）、`internal/server/logging.go`（归一化：去重 / 下标折叠 / 上限 8）；面板 `frontend/src/views/LogsView.tsx`（列 + 搜索 + tooltip） |
+| 模型目录门禁 | **新增** `internal/upstream/catalog.go`、`internal/server/modelcheck.go`；`internal/server/handler.go`（门禁挂载 + `modelList`/`hintContext` 改读快照）、`internal/panel/panel.go`（手动刷新写快照）、`cmd/server/main.go`（启动预热） |
 | 面板 | 源码 `frontend/src/`（React + Vite 工程）；构建产物 `internal/panel/web/`（固定三件套，`go:embed`，见 `web_embed.go`）；后端 `internal/panel/{config.go,panel.go,web_embed.go}` |
 | 成长任务自动化策略 | `internal/config/{schema,normalize,catalog}.go`（`growth.autotasks` 定义/校验/热生效登记）、`internal/panel/autotask_policy.go`（**新增**：策略快照 + 启用集合/顺序/参数/mp 解析）、`internal/panel/{autotask,taskcenter,tasks}.go`（动作实现与调用点）、`internal/upstream/blackcat.go`（`InWindow` 窗口判定，面板与排程共用）、`internal/scheduler/{scheduler.go,blackcat.go}`（`SetBlackcatWindow` 热改 + 窗口守卫）、`cmd/server/main.go`（装配 + 热应用 + `blackcatWindowFrom`）、面板表单项（`frontend/src/{configSchema.ts,views/ConfigView.tsx}`） |
 

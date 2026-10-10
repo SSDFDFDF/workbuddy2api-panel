@@ -397,13 +397,14 @@ func main() {
 	go sch.Run(ctx)
 	sch.StartBalanceRefresh(ctx, cfg.BalanceRefreshInterval)
 
-	// 启动即预热模型积分倍率表：倍率只在 FetchModels/FetchGlobalModelInfos 成功时
-	// 填充（两者均懒触发），重启后到首次 /v1/models 或面板模型页被访问之前，
-	// ModelRate 恒返回空串——积分保底的目录兜底在这段空窗期内形同虚设，触底号
-	// 会被当成「收费未知」放行并打穿（实测：重启后 2 分钟，97 分的账号打收费
-	// 模型归零；倍率表当时尚未建立）。
-	// 异步执行：不阻塞监听启动；失败仅记日志（下一轮懒触发或本轮重试仍可补上）。
-	go warmModelRates(ctx, up, p)
+	// 启动即预热模型目录快照 + 积分倍率表（同一次探测，见 warmModelCatalog）：
+	//   - 目录快照是出站门禁与 /v1/models 的唯一事实来源，不预热则门禁一直
+	//     fail-open（不报错，但也拦不住不存在的模型）；
+	//   - 倍率表只在探测成功时填充，不预热则 ModelRate 恒返回空串——积分保底的
+	//     目录兜底在空窗期内形同虚设，触底号会被当成「收费未知」放行并打穿
+	//     （实测：重启后 2 分钟，97 分的账号打收费模型归零）。
+	// 异步执行：不阻塞监听启动；失败仅记日志（面板「模型能力」页可手动刷新补上）。
+	go warmModelCatalog(ctx, up, p)
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
@@ -462,16 +463,21 @@ func main() {
 // 拖住重启，也明显长于旧实现固定的 5s（大上下文请求常常来不及写完）。
 const shutdownGrace = 30 * time.Second
 
-// warmModelRates 启动预热各域模型积分倍率表（供积分保底的目录兜底判定）。
+// warmModelCatalog 启动预热：刷新各域模型目录快照 + 积分倍率表。
 //
-// 为什么需要：倍率表只在 FetchModels（CN）/ FetchGlobalModelInfos（global）成功时
-// 填充，两者都是懒触发（被 /v1/models 或面板模型页访问才跑）。重启后到首次触发
-// 之间的空窗期里 ModelRate 恒返回空串，保底的目录兜底判不出收费，触底号会被
-// 当成「收费未知」放行并打穿（实测：重启后 2 分钟，97 分的账号打收费模型归零）。
+// 一次刷新同时产出两样东西（都只在探测成功时写入）：
+//   - **模型目录快照**（upstream.Client.Catalog）：网关出站门禁与 /v1/models 的
+//     唯一事实来源。刷新制而非懒加载：客户端请求路径上零上游探测，行为可预测；
+//   - 积分倍率表（供积分保底的目录兜底判定）。
 //
-// 失败处理：单域失败只记 WARN（不阻塞、不致命——后续懒触发仍会补上）；global 域
-// 仅在其路由开关开启时预热（逃生门关锁时按 CN 处理，无需探测）。
-func warmModelRates(ctx context.Context, up *upstream.Client, p *pool.Pool) {
+// 为什么必须预热倍率：倍率表只在探测成功时填充，此前是懒触发（被 /v1/models 或
+// 面板模型页访问才跑）。重启后到首次触发之间的空窗期里 ModelRate 恒返回空串，
+// 保底的目录兜底判不出收费，触底号会被当成「收费未知」放行并打穿（实测：重启后
+// 2 分钟，97 分的账号打收费模型归零）。目录快照同理会留出门禁 fail-open 空窗。
+//
+// 失败处理：单域失败只记 WARN（不阻塞、不致命——面板「模型能力」页可手动刷新）；
+// global 域仅在其路由开关开启时预热（逃生门关锁时按 CN 处理，无需探测）。
+func warmModelCatalog(ctx context.Context, up *upstream.Client, p *pool.Pool) {
 	// 预热不得拖住进程退出：ctx 取消（SIGINT/SIGTERM）时立刻放弃剩余域。
 	if ctx.Err() != nil {
 		return
@@ -479,10 +485,10 @@ func warmModelRates(ctx context.Context, up *upstream.Client, p *pool.Pool) {
 	// CN：有可用 CN 账号才拉（与面板 models 同口径，避免无谓上游调用）。
 	if uids := p.AvailableUIDsForRealm("cn"); len(uids) > 0 {
 		if a := p.AuthByUID(uids[0]); a != nil {
-			if _, err := up.FetchModels(a); err != nil {
-				log.Printf("WARN: [upstream] warm model rates (cn): %v", err)
+			if infos, err := up.RefreshCatalog(a); err != nil {
+				log.Printf("WARN: [upstream] warm model catalog (cn): %v", err)
 			} else {
-				log.Printf("[upstream] warm model rates: cn ok")
+				log.Printf("[upstream] warm model catalog: cn ok (%d models)", len(infos))
 			}
 		}
 	}
@@ -491,12 +497,10 @@ func warmModelRates(ctx context.Context, up *upstream.Client, p *pool.Pool) {
 	if up.GlobalOn() && ctx.Err() == nil {
 		if uids := p.AvailableUIDsForRealm("global"); len(uids) > 0 {
 			if a := p.AuthByUID(uids[0]); a != nil {
-				// FetchGlobalModelInfos 无错误返回（内部负缓存自行节流），
-				// 仅按结果条数判断是否拿到目录。
-				if infos := up.FetchGlobalModelInfos(a); len(infos) == 0 {
-					log.Printf("WARN: [upstream] warm model rates (global): empty model list")
+				if infos, err := up.RefreshCatalog(a); err != nil {
+					log.Printf("WARN: [upstream] warm model catalog (global): %v", err)
 				} else {
-					log.Printf("[upstream] warm model rates: global ok (%d models)", len(infos))
+					log.Printf("[upstream] warm model catalog: global ok (%d models)", len(infos))
 				}
 			}
 		}

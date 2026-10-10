@@ -409,21 +409,24 @@ func (p *Panel) requestLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"entries": rows, "limit": limit})
 }
 
-// models 实时查询上游模型列表与 reasoning 实际档位（直连上游，不读路由层 1h 缓存）：
-// 回答"该模型到底支持哪几档思考"。顺带刷新 client 的 effort 降级能力缓存。
-// 与 /v1/models 同口径的双域输出：CN 域模型加 "cn:" 前缀、global 域加 "global:" 前缀
-// （gateway 路由协议，前端显示的 id 就是调用时要填的完整 model 值）。
-// 各域独立探测、独立容错：某域无可用账号则整域跳过；两域全空时才报错
-// （有错误明细回 502，一个账号都没有回 503）。
+// models 手动刷新上游模型目录并返回全字段列表（面板「模型能力」页「重新获取」）。
+// 这是目录快照的**两个写入点之一**（另一个是启动预热）：刷新成功后写
+// upstream.Client.Catalog（网关出站门禁与 /v1/models 都读它），因此
+// 「面板重新获取一次 = 客户端模型门禁的名单也更新」。
+// 与 /v1/models 同口径的双域输出：CN 域模型加 "cn:" 前缀、global 域加 "global:"
+// 前缀（gateway 路由协议，前端显示的 id 就是调用时要填的完整 model 值）。
+// 各域独立探测、独立容错：某域无可用账号则整域跳过（保留旧快照）；
+// 两域全空时才报错（有错误明细回 502，一个账号都没有回 503）。
 func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 	out := make([]map[string]any, 0)
 	var fetchErrs []string
 
 	// CN 域：有可用 CN 账号才查（此前无条件 Pool.Pick()+FetchModels——选中 global
 	// 账号时打 CN 端点必然失败，混合池表现为偶发 502，纯 global 池必炸）。
+	// 刷新失败：快照保留旧值（面板缓存里有旧目录就用旧的，不清空）。
 	if uids := p.cfg.Pool.AvailableUIDsForRealm("cn"); len(uids) > 0 {
 		if acct := p.cfg.Pool.AuthByUID(uids[0]); acct != nil {
-			infos, err := p.cfg.Upstream.FetchModels(acct)
+			infos, err := p.cfg.Upstream.RefreshCatalog(acct)
 			if err != nil {
 				fetchErrs = append(fetchErrs, "cn: "+err.Error())
 			} else {
@@ -434,14 +437,15 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// global 域：路由开关开且有可用 global 账号才查（独立目录端点，FetchGlobalModelInfos；
-	// GlobalOn() 读热改快照（config global.enabled 保存后即时生效），与 main 装配一致）。
+	// global 域：路由开关开且有可用 global 账号才查（独立目录端点，RefreshCatalog
+	// 内部走 FetchGlobalModelInfos；GlobalOn() 读热改快照（config global.enabled
+	// 保存后即时生效），与 main 装配一致）。
 	if p.cfg.Upstream.GlobalOn() {
 		if uids := p.cfg.Pool.AvailableUIDsForRealm("global"); len(uids) > 0 {
 			if acct := p.cfg.Pool.AuthByUID(uids[0]); acct != nil {
-				infos := p.cfg.Upstream.FetchGlobalModelInfos(acct)
-				if len(infos) == 0 {
-					fetchErrs = append(fetchErrs, "global: 上游未返回可用模型")
+				infos, err := p.cfg.Upstream.RefreshCatalog(acct)
+				if err != nil {
+					fetchErrs = append(fetchErrs, "global: "+err.Error())
 				} else {
 					efforts, defaults := p.cfg.Upstream.GlobalEffortSnapshot()
 					for _, mi := range infos {

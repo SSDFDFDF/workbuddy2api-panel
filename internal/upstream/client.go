@@ -639,6 +639,10 @@ type Client struct {
 	// 1h TTL + 5min 负缓存），见 global_models.go。按实例持有，测试新建 Client 即隔离。
 	globalModels fetchGlobalModelsCache
 
+	// catalog 模型目录快照（显式刷新制，见 catalog.go）：网关门禁与列表端点的
+	// 唯一事实来源，只在启动预热与面板手动刷新时写入。按实例持有，测试即隔离。
+	catalog catalogCache
+
 	// cnModelsProbe / globalModelsProbe 并发合并（单飞）：缓存过期的同一瞬间
 	// 多个请求会同时打探测，此前各自发起一次完整上游调用（N 倍放大）。见 inflight.go。
 	cnModelsProbe     inflight

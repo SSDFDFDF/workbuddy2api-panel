@@ -50,8 +50,8 @@ var GlobalModelNames = []string{
 	"kimi-k2.6",
 }
 
-// fetchGlobalModelsCache 探测结果缓存（语义参照 CN 侧 handler.dynamicModelsCache：1h TTL +
-// 5min 失败负缓存）。按 Client 实例持有（effortsMu 同模式），测试新建 Client 即隔离。
+// fetchGlobalModelsCache 探测结果缓存（1h TTL + 5min 失败负缓存；与 CN 侧探测的
+// 单飞合并同模式）。按 Client 实例持有（effortsMu 同模式），测试新建 Client 即隔离。
 // Mutex 内嵌，与 modelList 无并发读路径竞争（唯一读写点本文件内）。
 type fetchGlobalModelsCache struct {
 	sync.Mutex
