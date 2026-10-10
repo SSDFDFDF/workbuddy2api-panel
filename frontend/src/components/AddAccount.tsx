@@ -4,6 +4,7 @@ import { api, apiUpload } from '../api';
 import { Dialog } from './Dialog';
 import { State, Dots } from './ui';
 import { btnPrimary, btnGhost } from './buttons';
+import { copyText } from '../clipboard';
 import { toast } from '../toast';
 
 export function AddAccountDialog({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
@@ -103,10 +104,9 @@ export function AddAccountDialog({ onClose, onAdded }: { onClose: () => void; on
               <button
                 className={btnGhost}
                 onClick={() => {
-                  void navigator.clipboard.writeText(url).then(
-                    () => toast('链接已复制', 'ok'),
-                    () => toast('复制失败，请手动选择复制', 'err'),
-                  );
+                  copyText(url)
+                    .then(() => toast('链接已复制', 'ok'))
+                    .catch(() => toast('复制失败，请手动选择复制', 'err'));
                 }}
               >
                 复制链接
