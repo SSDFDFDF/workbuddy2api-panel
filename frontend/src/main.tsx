@@ -1,7 +1,8 @@
-/* React 入口：DataProvider + AppShell + 视图分发。 */
+/* React 入口：ThemeProvider + DataProvider + AppShell + 视图分发。 */
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import './tokens.css';
+import { ThemeProvider } from './theme';
 import { DataProvider } from './data';
 import { AppShell, type ViewId } from './AppShell';
 import { ToastHost } from './toast';
@@ -12,12 +13,6 @@ import { TasksCenterView } from './views/TasksCenterView';
 import { ModelsView } from './views/ModelsView';
 import { ConfigView } from './views/ConfigView';
 import { LogsView } from './views/LogsView';
-
-// 初始化暗色主题
-try {
-  localStorage.removeItem('wb2api.theme');
-  document.documentElement.dataset.theme = 'dark';
-} catch {}
 
 // 注入多色混合官方 Logo 作为 Favicon
 function setupFavicon() {
@@ -60,10 +55,12 @@ function View({ id }: { id: ViewId }) {
 
 function Root() {
   return (
-    <DataProvider onNeedKey={() => {}}>
-      <AppShell>{(view) => <View id={view} />}</AppShell>
+    <ThemeProvider>
+      <DataProvider onNeedKey={() => {}}>
+        <AppShell>{(view) => <View id={view} />}</AppShell>
+      </DataProvider>
       <ToastHost />
-    </DataProvider>
+    </ThemeProvider>
   );
 }
 

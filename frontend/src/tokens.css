@@ -27,6 +27,27 @@
   --sans: system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
 }
 
+[data-theme='light'] {
+  --bg: #f4f5f8;
+  --surface: #ffffff;
+  --surface-2: #f8f9fb;
+  --raise: #ffffff;
+  --line: #e2e5ec;
+  --line-soft: #eceef3;
+  --ink: #14171f;
+  --ink-2: #545c6e;
+  --ink-3: #8b93a5;
+  --accent: #3d5fe0;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(61, 95, 224, 0.09);
+  --ok: #0f9d63;
+  --ok-soft: rgba(15, 157, 99, 0.1);
+  --warn: #b47611;
+  --warn-soft: rgba(180, 118, 17, 0.11);
+  --bad: #cf3b34;
+  --bad-soft: rgba(207, 59, 52, 0.09);
+}
+
 @layer base {
   html,
   body,
@@ -119,6 +140,6 @@
 }
 
 /* datetime-local 的图标按钮在暗色下是黑块，改为细箭头。 */
-input[type='datetime-local']::-webkit-calendar-picker-indicator {
+[data-theme='dark'] input[type='datetime-local']::-webkit-calendar-picker-indicator {
   filter: invert(0.7);
 }

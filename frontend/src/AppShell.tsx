@@ -1,6 +1,7 @@
 /* 应用外壳：左侧导航 + 顶栏 + hash 路由 + 全局弹窗与密钥门。 */
 import { useEffect, useState } from 'react';
 import { useData } from './data';
+import { useTheme } from './theme';
 import { fmtUptime } from './fmt';
 import { KeyGate } from './components/KeyGate';
 import { AddAccountDialog } from './components/AddAccount';
@@ -34,6 +35,7 @@ function Ico({ d }: { d: string }) {
 
 export function AppShell({ children }: { children: (view: ViewId) => React.ReactNode }) {
   const { overview, refresh, hardRefresh } = useData();
+  const { theme, toggle } = useTheme();
   const [view, setView] = useState<ViewId>(viewFromHash);
   const [needKey, setNeedKey] = useState(false);
   const [adding, setAdding] = useState(false);
@@ -138,6 +140,23 @@ export function AppShell({ children }: { children: (view: ViewId) => React.React
           <span className="tabular text-[12px] text-[var(--ink-3)]" title="服务连续运行时长">
             {d ? '运行 ' + fmtUptime(d.uptime_sec || 0) : '运行 -'}
           </span>
+          <button
+            className="rounded-lg border border-[var(--line)] bg-transparent p-1.5 text-[var(--ink-2)] hover:text-[var(--ink)] cursor-pointer transition-colors"
+            onClick={toggle}
+            title={theme === 'light' ? '切换到深色' : '切换到浅色'}
+            aria-label="切换主题"
+          >
+            {theme === 'light' ? (
+              <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.4">
+                <path d="M13.2 9.6A5.6 5.6 0 0 1 6.4 2.8a5.6 5.6 0 1 0 6.8 6.8z" />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.4">
+                <circle cx="8" cy="8" r="3" />
+                <path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.2 3.2l1.4 1.4M11.4 11.4l1.4 1.4M12.8 3.2l-1.4 1.4M4.6 11.4l-1.4 1.4" />
+              </svg>
+            )}
+          </button>
           <button
             className={btnGhost}
             disabled={refreshing}

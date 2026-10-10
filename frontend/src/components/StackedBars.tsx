@@ -1,6 +1,7 @@
 /* StackedBars 时序堆叠柱图：简洁明了的时间序列用量图表。
-   真实时间轴、清晰网格、双段堆叠（Prompt 读入 / Completion 产出）、交互悬浮 Tooltip。 */
-import { useMemo, useState, useRef } from 'react';
+   自适应容器真实像素宽度（ResizeObserver），杜绝宽屏下 SVG viewBox 缩放导致的文字与轴线变大。
+   双段堆叠（Prompt 读入 / Completion 产出）、清晰刻度网格、交互悬浮 Tooltip。 */
+import { useMemo, useState, useRef, useEffect } from 'react';
 import { fmtTok } from '../fmt';
 
 export interface ChartPoint {
@@ -28,19 +29,41 @@ function formatFullTime(p: ChartPoint): string {
 }
 
 export function StackedBars({ pts, tick }: { pts: ChartPoint[]; tick?: (p: { t: number; scope?: string }) => string }) {
-  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const [containerWidth, setContainerWidth] = useState<number>(0);
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+
+  // 监听容器真实像素宽度，1:1 匹配 SVG viewBox，防止宽屏下等比拉大字体
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const update = () => {
+      if (containerRef.current) {
+        const w = containerRef.current.clientWidth;
+        if (w > 0) setContainerWidth(w);
+      }
+    };
+    update();
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const w = Math.round(entry.contentRect.width);
+        if (w > 0) setContainerWidth(w);
+      }
+    });
+    ro.observe(containerRef.current);
+    return () => ro.disconnect();
+  }, []);
+
+  const W = containerWidth || 960;
+  const H = 140;
 
   const geo = useMemo(() => {
     if (!pts.length) return null;
-    const W = 1000;
-    const H = 150;
     const PL = 46;
     const PR = 16;
-    const PT = 14;
-    const PB = 24;
-    const iw = W - PL - PR;
-    const ih = H - PT - PB;
+    const PT = 12;
+    const PB = 22;
+    const iw = Math.max(10, W - PL - PR);
+    const ih = Math.max(10, H - PT - PB);
     const t0 = pts[0].t;
     const span = Math.max(1, pts[pts.length - 1].t - t0);
     const maxVal = Math.max(1, ...pts.map((p) => p.tt));
@@ -50,13 +73,13 @@ export function StackedBars({ pts, tick }: { pts: ChartPoint[]; tick?: (p: { t: 
     for (let i = 1; i < pts.length; i++) minGap = Math.min(minGap, pts[i].t - pts[i - 1].t);
     if (!isFinite(minGap) || minGap <= 0) minGap = span;
     const rawBw = iw * (minGap / span) * 0.65;
-    const bw = Math.max(3.5, Math.min(22, rawBw));
+    const bw = Math.max(3.5, Math.min(20, rawBw));
 
     const xOf = (t: number) => PL + bw / 2 + ((t - t0) / span) * Math.max(1, iw - bw);
     const yOf = (v: number) => PT + ih - ih * (v / maxVal);
 
     return { W, H, PL, PR, PT, PB, iw, ih, t0, span, maxVal, bw, xOf, yOf };
-  }, [pts]);
+  }, [pts, W, H]);
 
   if (!geo || !pts.length) {
     return (
@@ -66,12 +89,13 @@ export function StackedBars({ pts, tick }: { pts: ChartPoint[]; tick?: (p: { t: 
     );
   }
 
-  const { W, H, PL, PR, PT, ih, maxVal, bw, xOf } = geo;
+  const { PL, PR, PT, ih, maxVal, bw, xOf } = geo;
   const yBase = PT + ih;
   const tl = tick || formatTickLabel;
 
-  // X 轴刻度：等距选取 5-6 个关键时间点
-  const TICKS = Math.min(6, Math.max(2, pts.length));
+  // X 轴刻度：根据当前容器实际像素宽度自适应数量，保持间距舒适（约 110px 一个刻度）
+  const dynamicTickCount = Math.min(10, Math.max(2, Math.floor((W - PL - PR) / 110)));
+  const TICKS = Math.min(dynamicTickCount, pts.length);
   const used = new Set<number>();
   const ticks: { x: number; anchor: 'start' | 'middle' | 'end'; text: string }[] = [];
   for (let k = 0; k < TICKS; k++) {
@@ -92,22 +116,21 @@ export function StackedBars({ pts, tick }: { pts: ChartPoint[]; tick?: (p: { t: 
     ticks.push({ x: Math.max(PL, Math.min(W - PR, cx)), anchor, text: tl({ t: pts[bi].t, scope: pts[bi].scope }) });
   }
 
-  // 悬浮点与 Tooltip 位置
+  // 悬浮点与 Tooltip 位置（直接使用像素坐标，杜绝百分比漂移）
   const activePt = hoverIdx !== null && pts[hoverIdx] ? pts[hoverIdx] : null;
   const activeX = activePt ? xOf(activePt.t) : 0;
-  const tooltipLeftPercent = activePt ? (activeX / W) * 100 : 0;
 
   return (
     <div
       ref={containerRef}
-      className="relative select-none"
+      className="relative select-none w-full"
       onMouseLeave={() => setHoverIdx(null)}
     >
       <svg
         viewBox={`0 0 ${W} ${H}`}
-        className="w-full overflow-visible"
+        style={{ width: '100%', height: `${H}px` }}
         role="img"
-        preserveAspectRatio="xMidYMid meet"
+        preserveAspectRatio="none"
       >
         <defs>
           <linearGradient id="tokGradPrompt" x1="0" y1="0" x2="0" y2="1">
@@ -214,12 +237,12 @@ export function StackedBars({ pts, tick }: { pts: ChartPoint[]; tick?: (p: { t: 
         {/* X 轴底部基线 */}
         <line x1={PL} y1={yBase} x2={W - PR} y2={yBase} stroke="var(--line)" />
 
-        {/* X 轴时间刻度文字 */}
+        {/* X 轴时间刻度文字（固定 10.5px，绝不随屏宽放大） */}
         {ticks.map((t, i) => (
           <text
             key={i}
             x={t.x.toFixed(1)}
-            y={yBase + 16}
+            y={yBase + 15}
             textAnchor={t.anchor}
             className="fill-[var(--ink-3)] text-[10.5px] tabular"
           >
@@ -233,7 +256,7 @@ export function StackedBars({ pts, tick }: { pts: ChartPoint[]; tick?: (p: { t: 
         <div
           className="pointer-events-none absolute top-1 z-30 -translate-x-1/2 rounded-lg border border-[var(--line)] bg-[var(--surface)]/95 px-3 py-2 text-[11.5px] shadow-lg backdrop-blur"
           style={{
-            left: `${Math.max(16, Math.min(84, tooltipLeftPercent))}%`,
+            left: `${Math.max(100, Math.min(W - 100, activeX))}px`,
           }}
         >
           <div className="mb-1 border-b border-[var(--line-soft)] pb-1 font-medium text-[var(--ink)]">
