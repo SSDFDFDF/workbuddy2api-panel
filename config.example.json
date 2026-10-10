@@ -131,7 +131,8 @@
   "session_sticky": {
     "enabled": true,
     "ttl": "30m",
-    "gc_interval": "5m"
+    "gc_interval": "5m",
+    "fingerprint_enabled": true
   },
   "proxy_url": "",
   "resin_url": "",

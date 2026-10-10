@@ -683,11 +683,41 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 	} else {
 		convKey = session.BodyKey(body, peek.PromptCacheKey)
 	}
+	// isDerivedKey 精确判定派生键形态（"d-" + 32 hex，与 deriveKey 输出严格
+	// 同宽）：prompt_cache_key 是裸值入键，客户端可能碰巧传 "d-" 开头的值，
+	// 宽松前缀判定会把这类显式键误入救场/记录路径。显式键不会漂移，两路都
+	// 应排除。
+	isDerivedKey := len(convKey) == len(session.DerivedKeyPrefix)+32 &&
+		strings.HasPrefix(convKey, session.DerivedKeyPrefix)
+	// 指纹救场（仅派生键会话）：派生键的正确性依赖 system+首条 user 每轮恒定，
+	// system 带时间戳/动态注入的客户端每轮键都变 → 粘性永久失效。窗口匹配
+	// （user/assistant 历史，排除 system）对这类漂移免疫：用消息指纹找回该
+	// 会话上一跳使用的账号，成功后 Bind 到**本请求的派生键**（单次搭便车——
+	// 不借用候选键，下一轮自己的键已有绑定，救场不再参与）。
+	//   - 仅当派生键当前无有效绑定时触发。探测必须用只读 PeekForModel——
+	//     ResolveForModel 未命中会走慢路径分配新绑定，把救场结果覆盖掉。
+	//   - 候选按 principal+model 收窄；误配代价是单跳搭错车（TTL 内自愈），
+	//     非正确性问题。
+	fpRescue := false
 	sessKey := ""
 	stickyUID := ""
+	if convKey != "" && isDerivedKey && h.cfg.Session != nil && h.cfg.Session.FingerprintEnabled() {
+		probeKey := primaryRealm + ":" + bareModel + ":" + convKey
+		if principalID != "" {
+			probeKey = principalID + ":" + probeKey
+		}
+		if _, ok := h.cfg.Session.PeekForModel(probeKey, peek.Model); !ok {
+			if ruid, rok := h.cfg.Session.RescueDerivedKey(body, principalID, bareModel, peek.Model); rok {
+				stickyUID = ruid
+				fpRescue = true
+				log.Printf("[session] 指纹救场命中 uid=%s conv=%s…", logfmt.UID8(ruid), convKey[:min(16, len(convKey))])
+			}
+		}
+	}
 	if convKey != "" {
 		// 在候选域中按优先级检查既有会话绑定（避免多轮对话因自动轮转发生跨域漂移）。
-		if h.cfg.Session != nil {
+		// 救场命中时跳过：ResolveForModel 的慢路径会给本键分配新绑定，覆盖救场结果。
+		if !fpRescue && h.cfg.Session != nil {
 			for _, cr := range candidateRealms {
 				k := cr + ":" + bareModel + ":" + convKey
 				if principalID != "" {
@@ -1159,6 +1189,10 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 						sessKey = actualSessKey
 					}
 					h.cfg.Session.Bind(sessKey, acct.UID)
+					// 指纹记录：派生键会话成功后快照消息窗口，供断链后的窗口匹配找回。
+					if isDerivedKey {
+						h.cfg.Session.RecordFingerprint(sessKey, principalID, bareModel, peek.Object)
+					}
 				}
 			}
 			credit, hasCredit := stats.Credit()
@@ -1253,6 +1287,10 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 				sessKey = actualSessKey
 			}
 			h.cfg.Session.Bind(sessKey, acct.UID)
+			// 指纹记录（非流式同理）：仅派生键会话。
+			if isDerivedKey {
+				h.cfg.Session.RecordFingerprint(sessKey, principalID, bareModel, peek.Object)
+			}
 		}
 		// 成本账本（非流式）：从聚合响应的 usage 取 credit 与 token 总数。
 		if hasCredit {

@@ -138,7 +138,7 @@ func main() {
 		// 裸名按 model_default_realm 策略（与 handler 同一 resolver）。
 		AvailableForModel: realmAwareAvailableForModel(p, realmResolver),
 	})
-	sessRouter.Reconfigure(cfg.SessionTTL, cfg.SessionGCInterval, cfg.SessionSticky.Enabled)
+	sessRouter.ReconfigureFingerprint(cfg.SessionTTL, cfg.SessionGCInterval, cfg.SessionSticky.Enabled, cfg.SessionFingerprint)
 	defer sessRouter.StopGC()
 	sessCount := func() int { return sessRouter.Count() }
 
@@ -673,7 +673,7 @@ func saveConfigTx(raw []byte, path string, hot *hotTargets) ([]string, error) {
 	// 会话粘性热生效（启停 / TTL / GC 周期）。ReconfigureHot：Redis 恢复放后台，
 	// 不让同步的 LoadBinds（上限 30s）拖住配置保存与配置锁。
 	if hot.session != nil {
-		hot.session.ReconfigureHot(newCfg.SessionTTL, newCfg.SessionGCInterval, newCfg.SessionSticky.Enabled)
+		hot.session.ReconfigureHotFP(newCfg.SessionTTL, newCfg.SessionGCInterval, newCfg.SessionSticky.Enabled, newCfg.SessionFingerprint)
 	}
 	// 上游身份/域名/开关/超时快照热生效（profiles / client_name / device_token /
 	// chat_base* / global.enabled / 各档超时）。三处 global 闸门同一次切换：auth 侧

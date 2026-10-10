@@ -60,6 +60,11 @@ type Router struct {
 	entries map[string]entry
 	cfg     Config
 
+	// fp 指纹救场索引（惰性构建；nil = 从未启用）。开关经 setFingerprint
+	// 随 reconfigure 热改。锁序约定：fingerprint.mu 先取后放，PeekForModel
+	// 在其外层调用（f.mu → r.mu 不嵌套，无死锁风险）。
+	fp *FingerprintIndex
+
 	ttl         atomic.Int64 // time.Duration
 	gcInterval  atomic.Int64 // time.Duration
 	enabled     atomic.Bool
@@ -83,36 +88,54 @@ func New(cfg Config) *Router {
 		cfg.GCInterval = defaultGCInterval
 	}
 	r := &Router{entries: map[string]entry{}, cfg: cfg}
+	r.fp = newFingerprintIndex(r)
 	r.ttl.Store(int64(cfg.TTL))
 	r.gcInterval.Store(int64(cfg.GCInterval))
 	r.enabled.Store(true)
 	return r
 }
 
-// Reconfigure 应用会话粘性参数（config session_sticky.enabled/ttl/gc_interval）。
+// Reconfigure 按配置应用会话粘性参数（config session_sticky.enabled/ttl/gc_interval/
+// fingerprint_enabled）。
 //
 // 语义：
 //   - enabled=false：立即停止分配与 GC（已有绑定保留在内存，TTL 内重新启用即恢复）；
 //   - enabled=true：如尚未从 redisstore 恢复过则**同步**恢复一次（装配期语义：
 //     开服前把粘性映射装好）；
-//   - GC 周期变化时重启 GC goroutine（ticker 周期在启动时固定，只能重建）。
+//   - GC 周期变化时重启 GC goroutine（ticker 周期在启动时固定，只能重建）；
+//   - fingerprintOn 控制派生键指纹救场（独立开关，仅粘性启用时有意义）。
 //
 // 运行期热改请用 ReconfigureHot（restore 不阻塞配置保存路径）。
 func (r *Router) Reconfigure(ttl, gcInterval time.Duration, enabled bool) {
-	r.reconfigure(ttl, gcInterval, enabled, false)
+	r.ReconfigureFingerprint(ttl, gcInterval, enabled, false)
 }
 
-// ReconfigureHot 同 Reconfigure，但把 Redis 恢复放后台执行。
+// ReconfigureFingerprint 带指纹救场开关的完整版（main 装配/热改调用；历史
+// 调用方 Reconfigure 保持三参签名零改动，开关缺省关）。
+func (r *Router) ReconfigureFingerprint(ttl, gcInterval time.Duration, enabled, fingerprintOn bool) {
+	r.reconfigureFingerprint(ttl, gcInterval, enabled, fingerprintOn, false)
+}
+
+// ReconfigureHot 同 ReconfigureFingerprint，但把 Redis 恢复放后台执行。
 //
 // 为什么：Store.LoadBinds 是同步网络读取（Upstash 场景专用上限 30s），而配置保存
 // 路径持有 config.FileTx，同步等待会让保存请求与后续保存排队最多 30s。代价是刚重新
 // 启用粘性的头几个请求可能先自行分配绑定（随后恢复的旧绑定仍会写入，只是对该会话
 // 未必及时）——粘性只是上游前缀缓存的优化，可接受。
 func (r *Router) ReconfigureHot(ttl, gcInterval time.Duration, enabled bool) {
-	r.reconfigure(ttl, gcInterval, enabled, true)
+	r.reconfigureFingerprint(ttl, gcInterval, enabled, false, true)
+}
+
+// ReconfigureHotFP 同 ReconfigureHot + 指纹开关（main 配置保存路径调用）。
+func (r *Router) ReconfigureHotFP(ttl, gcInterval time.Duration, enabled, fingerprintOn bool) {
+	r.reconfigureFingerprint(ttl, gcInterval, enabled, fingerprintOn, true)
 }
 
 func (r *Router) reconfigure(ttl, gcInterval time.Duration, enabled bool, asyncRestore bool) {
+	r.reconfigureFingerprint(ttl, gcInterval, enabled, false, asyncRestore)
+}
+
+func (r *Router) reconfigureFingerprint(ttl, gcInterval time.Duration, enabled, fingerprintOn, asyncRestore bool) {
 	if r == nil {
 		return
 	}
@@ -125,6 +148,7 @@ func (r *Router) reconfigure(ttl, gcInterval time.Duration, enabled bool, asyncR
 	prevInterval := time.Duration(r.gcInterval.Swap(int64(gcInterval)))
 	r.ttl.Store(int64(ttl))
 	r.enabled.Store(enabled)
+	r.setFingerprint(enabled && fingerprintOn)
 	if !enabled {
 		r.StopGC()
 		return
@@ -306,6 +330,27 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	}
 	r.cfg.Store.SetBind(key, uid, ttl)
 	return uid, true
+}
+
+// PeekForModel 只读借用校验：返回 key 当前绑定的账号，仅当命中且账号在该模型
+// 可用（不滚动 lastActive、不产生任何写入）。指纹救场专用：救场命中后由调用方
+// 把 uid Bind 到请求自己的键上，候选键本身不能被写入无主绑定（尤其候选键可能
+// 属于另一个 principal/realm 域，写入会造成跨域污染）。
+func (r *Router) PeekForModel(key, model string) (string, bool) {
+	if r == nil || !r.enabled.Load() || key == "" {
+		return "", false
+	}
+	now := time.Now()
+	r.mu.RLock()
+	e, found := r.entries[key]
+	r.mu.RUnlock()
+	if !found || expired(e, now, r.ttlNow()) {
+		return "", false
+	}
+	if !r.availableSet(model)[e.uid] {
+		return "", false
+	}
+	return e.uid, true
 }
 
 // touch 滚动 lastActive 并异步镜像（只在快路径命中时写最后一次）。

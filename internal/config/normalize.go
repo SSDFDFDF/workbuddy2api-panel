@@ -88,6 +88,8 @@ func (c *Config) normalize() error {
 	if c.SessionGCInterval, err = time.ParseDuration(c.SessionSticky.GCInterval); err != nil {
 		return fmt.Errorf("session_sticky.gc_interval: %w", err)
 	}
+	// 指纹救场开关：直接携带（bool 无需解析）。
+	c.SessionFingerprint = c.SessionSticky.FingerprintEnabled
 	// 快过期窗口：空 = 禁用（ExpiringSoonDur 0）；非空必须可解析（拼写错误 fail fast）。
 	if c.Pool.ExpiringSoon != "" {
 		if c.ExpiringSoonDur, err = time.ParseDuration(c.Pool.ExpiringSoon); err != nil {

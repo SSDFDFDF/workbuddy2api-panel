@@ -336,6 +336,10 @@ type Config struct {
 		Enabled    bool   `json:"enabled"`     // 默认 true
 		TTL        string `json:"ttl"`         // 会话绑定 TTL，默认 "30m"
 		GCInterval string `json:"gc_interval"` // 会话 GC 周期，默认 "5m"
+		// FingerprintEnabled 派生键指纹救场（默认 true）：派生键粘性未命中时，
+		// 用 user/assistant 历史窗口匹配找回该会话上一跳的账号（仅派生键会话，
+		// 显式会话键不受影响）。救场材料纯内存，不落盘不进上游。
+		FingerprintEnabled bool `json:"fingerprint_enabled"`
 	} `json:"session_sticky"`
 
 	// 出站代理接入（低侵入，见 internal/proxy 与 FORK_CHANGES.md）。
@@ -360,6 +364,10 @@ type Config struct {
 	DegradeCooldownMaxD    time.Duration `json:"-"`
 	SessionTTL             time.Duration `json:"-"`
 	SessionGCInterval      time.Duration `json:"-"`
+	// SessionFingerprint 指纹救场开关（session_sticky.fingerprint_enabled，
+	// normalize 阶段从 SessionSticky.FingerprintEnabled 携带；main 装配与
+	// 热改路径只拿归一化后的标量）。
+	SessionFingerprint bool `json:"-"`
 	BalanceRefreshInterval time.Duration `json:"-"` // 0 = 不启动（enabled=false）
 	ExpiringSoonDur        time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
@@ -508,6 +516,7 @@ func Default() *Config {
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
+	c.SessionSticky.FingerprintEnabled = true
 	// Resin 缺省未接入：URL/Platform 空，模式与认证版本给推荐值便于展示/落盘。
 	c.ResinMode = "reverse"
 	c.ResinAuthVersion = "V1"
