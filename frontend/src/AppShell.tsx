@@ -6,6 +6,7 @@ import { fmtUptime } from './fmt';
 import { KeyGate } from './components/KeyGate';
 import { AddAccountDialog } from './components/AddAccount';
 import { btnPrimary, btnGhost } from './components/buttons';
+import { Logo } from './components/Logo';
 
 export const VIEWS = [
   { id: 'accounts', title: '账号池', icon: 'M2.8 13.5c.6-2.6 2.7-4 5.2-4s4.6 1.4 5.2 4M5.4 5.5a2.6 2.6 0 1 0 5.2 0 2.6 2.6 0 1 0-5.2 0' },
@@ -59,12 +60,23 @@ export function AppShell({ children }: { children: (view: ViewId) => React.React
   return (
     <div className="grid min-h-screen grid-cols-[208px_1fr]">
       {/* 导航 */}
-      <nav className="sticky top-0 flex h-screen flex-col border-r border-[var(--line)] bg-[var(--surface)]">
-        <div className="border-b border-[var(--line-soft)] px-[18px] pt-5 pb-4">
-          <div className="text-[15px] font-semibold tracking-tight">WorkBuddy Manager</div>
-          <div className="mt-0.5 font-[family-name:var(--mono)] text-[11.5px] text-[var(--ink-3)]">v{d?.version || '-'}</div>
+      <nav className="sticky top-0 flex h-screen flex-col border-r border-[var(--line)] bg-[var(--surface)] shadow-xs">
+        <div className="border-b border-[var(--line-soft)] px-4 pt-4 pb-3.5">
+          <div className="flex items-center gap-2.5">
+            <div className="relative flex items-center justify-center rounded-xl transition-transform hover:scale-105">
+              <Logo size={32} />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[14.5px] font-semibold tracking-tight text-[var(--ink)]">WorkBuddy</div>
+              <div className="flex items-center gap-1.5 font-[family-name:var(--mono)] text-[11px] text-[var(--ink-3)]">
+                <span>Manager</span>
+                <span className="opacity-40">·</span>
+                <span>v{d?.version || '-'}</span>
+              </div>
+            </div>
+          </div>
         </div>
-        <ul className="flex-1 list-none px-2 py-2.5">
+        <ul className="flex-1 list-none px-2 py-2.5 space-y-0.5">
           {VIEWS.map((v) => (
             <li key={v.id}>
               <a
@@ -74,9 +86,9 @@ export function AppShell({ children }: { children: (view: ViewId) => React.React
                   go(v.id);
                 }}
                 className={
-                  'mb-0.5 flex items-center gap-2.5 rounded-lg px-[11px] py-2 text-[13.5px] no-underline ' +
+                  'flex items-center gap-2.5 rounded-lg px-[11px] py-2 text-[13px] font-medium no-underline transition-all duration-150 ' +
                   (view === v.id
-                    ? 'bg-[var(--accent-soft)] font-medium text-[var(--accent)]'
+                    ? 'bg-[var(--accent-soft)] text-[var(--accent)] shadow-xs'
                     : 'text-[var(--ink-2)] hover:bg-[var(--surface-2)] hover:text-[var(--ink)]')
                 }
               >
@@ -86,18 +98,30 @@ export function AppShell({ children }: { children: (view: ViewId) => React.React
             </li>
           ))}
         </ul>
-        <div className="border-t border-[var(--line-soft)] px-4 py-3 text-[11.5px] text-[var(--ink-3)]">
-          <div className="flex items-center gap-1.5">
+        <div className="border-t border-[var(--line-soft)] px-3.5 py-3 text-[11.5px] text-[var(--ink-3)] bg-[var(--surface-2)]/30">
+          <div className="flex items-center gap-2">
             <span
               className={
-                'h-[7px] w-[7px] shrink-0 rounded-full ' +
-                (healthy > 0 ? 'bg-[var(--ok)]' : total > 0 ? 'bg-[var(--warn)]' : 'bg-[var(--bad)]')
+                'relative flex h-2 w-2 shrink-0 items-center justify-center '
               }
-            />
-            <span>{healthy > 0 ? '服务正常' : total ? '无可用账号' : '待添加账号'}</span>
-          </div>
-          <div className="mt-1">
-            {d?.redis_mode === 'upstash' ? 'Redis 镜像' : '本地内存'}
+            >
+              <span
+                className={
+                  'absolute inline-flex h-full w-full rounded-full opacity-75 ' +
+                  (healthy > 0 ? 'bg-[var(--ok)] wb-pulse-anim' : total > 0 ? 'bg-[var(--warn)]' : 'bg-[var(--bad)]')
+                }
+              />
+              <span
+                className={
+                  'relative inline-flex h-1.5 w-1.5 rounded-full ' +
+                  (healthy > 0 ? 'bg-[var(--ok)]' : total > 0 ? 'bg-[var(--warn)]' : 'bg-[var(--bad)]')
+                }
+              />
+            </span>
+            <span className="font-medium text-[var(--ink-2)]">{healthy > 0 ? '服务正常' : total ? '无可用账号' : '待添加账号'}</span>
+            <span className="ml-auto text-[10.5px] opacity-70">
+              {d?.redis_mode === 'upstash' ? 'Redis 镜像' : '本地内存'}
+            </span>
           </div>
         </div>
       </nav>
@@ -136,6 +160,17 @@ export function AppShell({ children }: { children: (view: ViewId) => React.React
               setRefreshing(false);
             }}
           >
+            <svg
+              viewBox="0 0 16 16"
+              width="13"
+              height="13"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              className={refreshing ? 'wb-spin-anim' : ''}
+            >
+              <path d="M13.5 8A5.5 5.5 0 1 1 8 2.5c2 0 3.7 1.1 4.6 2.7M13.5 2v3.5H10" />
+            </svg>
             {refreshing ? '刷新中…' : '刷新'}
           </button>
           <button className={btnPrimary} onClick={() => setAdding(true)}>

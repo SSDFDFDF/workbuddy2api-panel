@@ -4,6 +4,12 @@ export function trimFixed(s: string): string {
   return s.includes('.') ? s.replace(/0+$/, '').replace(/\.$/, '') : s;
 }
 
+/** 千分位精确数字："12,345"。 */
+export function fmtNum(n: number | undefined | null): string {
+  const v = Number(n || 0);
+  return Number.isFinite(v) ? v.toLocaleString('zh-CN') : '—';
+}
+
 export function fmtTok(n: number | undefined | null): string {
   const v = Number(n || 0);
   if (v >= 1e9) return trimFixed((v / 1e9).toFixed(2)) + 'B';

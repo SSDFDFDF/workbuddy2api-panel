@@ -84,14 +84,18 @@ body {
   font-family: var(--mono);
 }
 
-/* 滚动条（WebKit）：细条、随主题。 */
+/* 滚动条（WebKit）：细条、随主题、平滑过渡。 */
 *::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
 }
 *::-webkit-scrollbar-thumb {
   background: var(--line);
-  border-radius: 4px;
+  border-radius: 9999px;
+  transition: background 0.2s ease;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--ink-3);
 }
 *::-webkit-scrollbar-track {
   background: transparent;
@@ -119,6 +123,18 @@ button {
 }
 
 /* keyframes：脉冲与 toast 动画（Tailwind 任意值内联不方便复用，集中在此）。 */
+@keyframes wb-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+.wb-spin-anim {
+  animation: wb-spin 0.8s linear infinite;
+}
+
 @keyframes wb-pulse {
   50% {
     opacity: 0.35;

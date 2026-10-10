@@ -5,14 +5,14 @@ import type { ReactNode } from 'react';
 /* Tag 语义标签（ok/warn/bad/mute/accent）。 */
 export function Tag({ tone = 'mute', children, title }: { tone?: 'ok' | 'warn' | 'bad' | 'mute' | 'accent'; children: ReactNode; title?: string }) {
   const map = {
-    ok: 'bg-[var(--ok-soft)] text-[var(--ok)]',
-    warn: 'bg-[var(--warn-soft)] text-[var(--warn)]',
-    bad: 'bg-[var(--bad-soft)] text-[var(--bad)]',
-    mute: 'bg-[var(--surface-2)] text-[var(--ink-3)]',
-    accent: 'bg-[var(--accent-soft)] text-[var(--accent)]',
+    ok: 'bg-[var(--ok-soft)] text-[var(--ok)] border-[var(--ok)]/20',
+    warn: 'bg-[var(--warn-soft)] text-[var(--warn)] border-[var(--warn)]/20',
+    bad: 'bg-[var(--bad-soft)] text-[var(--bad)] border-[var(--bad)]/20',
+    mute: 'bg-[var(--surface-2)] text-[var(--ink-3)] border-[var(--line)]',
+    accent: 'bg-[var(--accent-soft)] text-[var(--accent)] border-[var(--accent)]/20',
   } as const;
   return (
-    <span title={title} className={'inline-block rounded px-1.5 py-px text-[11px] leading-[1.5] font-medium ' + map[tone]}>
+    <span title={title} className={'inline-flex items-center rounded-md border px-1.5 py-0.5 text-[11px] leading-tight font-medium ' + map[tone]}>
       {children}
     </span>
   );
@@ -114,9 +114,9 @@ export function Kpi({
     mute: 'border-l-[var(--line)]',
   } as const;
   return (
-    <div className={'flex-1 rounded-xl border border-[var(--line)] border-l-[3px] bg-[var(--surface)] p-4 ' + map[tone]}>
-      <div className="text-[12px] text-[var(--ink-3)]">{k}</div>
-      <div className="tabular mt-1 text-[22px] font-semibold leading-tight">{v}</div>
+    <div className={'flex-1 rounded-xl border border-[var(--line)] border-l-[3px] bg-[var(--surface)] p-4 shadow-xs transition-all ' + map[tone]}>
+      <div className="text-[12px] font-medium text-[var(--ink-3)]">{k}</div>
+      <div className="tabular mt-1 text-[22px] font-semibold leading-tight text-[var(--ink)]">{v}</div>
       {children}
       {sub && <div className="mt-1.5 text-[11.5px] leading-snug text-[var(--ink-3)]">{sub}</div>}
     </div>

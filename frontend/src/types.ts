@@ -85,6 +85,8 @@ export interface RequestEvent {
   client_ip?: string;
   user_agent?: string;
   duration_ms?: number;
+  ttfb_ms?: number;
+  attempts?: number;
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
