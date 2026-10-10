@@ -31,6 +31,11 @@ type Request struct {
 	Chat    *forwarding.Request
 	Source  map[string]any
 	Mutated bool
+	// Dropped lists client fields that were accepted and ignored because the
+	// stateless Chat bridge cannot represent them (client telemetry, caching
+	// hints, newer protocol fields, client-side reasoning state). Keeping the
+	// list makes the lossy translation observable instead of silent.
+	Dropped []string
 	tools   *toolIndex
 }
 
@@ -38,25 +43,46 @@ func invalid(path, message string) error {
 	return &forwarding.InvalidRequest{Param: path, Message: message}
 }
 
-func fields(obj map[string]any, path, allowed string) error {
+// fields rejects any key outside allowed unless it is explicitly listed in
+// accept. Accepted keys are knowingly ignored: use this only for client-side
+// hints or newer fields whose loss does not change generation semantics.
+func fields(obj map[string]any, path, allowed string, accept ...string) error {
+	_, err := fieldsAccept(obj, path, allowed, accept...)
+	return err
+}
+
+// fieldsAccept is fields plus the accepted keys it ignored, in stable order.
+func fieldsAccept(obj map[string]any, path, allowed string, accept ...string) ([]string, error) {
 	set := map[string]bool{}
 	for _, k := range strings.Fields(allowed) {
 		set[k] = true
+	}
+	accepted := map[string]bool{}
+	for _, k := range accept {
+		for _, name := range strings.Fields(k) {
+			accepted[name] = true
+		}
 	}
 	keys := make([]string, 0, len(obj))
 	for k := range obj {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
+	var ignored []string
 	for _, k := range keys {
-		if !set[k] {
-			if path != "" {
-				k = path + "." + k
-			}
-			return invalid(k, "unsupported by the stateless Chat bridge")
+		if set[k] {
+			continue
 		}
+		if accepted[k] {
+			ignored = append(ignored, k)
+			continue
+		}
+		if path != "" {
+			k = path + "." + k
+		}
+		return nil, invalid(k, "unsupported by the stateless Chat bridge")
 	}
-	return nil
+	return ignored, nil
 }
 
 func object(v any, path string) (map[string]any, error) {
@@ -182,12 +208,13 @@ func Decode(kind Kind, raw []byte) (*Request, error) {
 	}
 	var dst map[string]any
 	var tools *toolIndex
+	var dropped []string
 	switch kind {
 	case Responses:
 		tools = newToolIndex()
-		dst, err = responsesRequest(src, tools)
+		dst, err = responsesRequest(src, tools, &dropped)
 	case Anthropic:
-		dst, err = anthropicRequest(src)
+		dst, err = anthropicRequest(src, &dropped)
 	default:
 		return nil, invalid("protocol", "unsupported protocol")
 	}
@@ -211,7 +238,7 @@ func Decode(kind Kind, raw []byte) (*Request, error) {
 	if err != nil {
 		return nil, mediaError(err)
 	}
-	return &Request{Kind: kind, Chat: chat, Source: src, Mutated: mutated, tools: tools}, nil
+	return &Request{Kind: kind, Chat: chat, Source: src, Mutated: mutated, tools: tools, Dropped: dropped}, nil
 }
 
 func function(name, description, schema any, path string) (map[string]any, error) {

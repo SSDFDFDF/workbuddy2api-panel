@@ -83,7 +83,12 @@ func checkMessage(m map[string]any) error {
 			if a, ok := v.([]any); !ok || len(a) > 0 {
 				return fmt.Errorf("upstream annotations are unsupported")
 			}
-		case "reasoning", "reasoning_content", "refusal":
+		case "reasoning", "reasoning_content":
+			// Upstream reasoning text is not representable in Responses or
+			// Messages (the Chat upstream has no signed or encrypted state), so it
+			// is ignored instead of failing the whole turn. Visible text and tool
+			// calls still pass the checks below.
+		case "refusal":
 			if v != "" {
 				return fmt.Errorf("upstream %s cannot be represented by this text/tool bridge", k)
 			}
@@ -382,6 +387,10 @@ func (b *responseBuilder) formatCompletion(completion *Completion) (map[string]a
 		}
 		return r, nil
 	}
+	// finish_reason:stop cannot distinguish a natural stop from a matched
+	// client stop_sequence: the Chat upstream strips the matched sequence and
+	// does not report it, so stop_reason stays end_turn and stop_sequence nil.
+	// Request-side stop_sequences are still forwarded as Chat `stop`.
 	stop := map[string]string{"stop": "end_turn", "length": "max_tokens", "tool_calls": "tool_use", "content_filter": "refusal"}[finish]
 	return map[string]any{"id": b.id, "type": "message", "role": "assistant", "model": b.req.Chat.Model,
 		"content": output, "stop_reason": stop, "stop_sequence": nil, "usage": usage}, nil

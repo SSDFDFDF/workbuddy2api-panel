@@ -78,7 +78,65 @@ type chatStat struct {
 	promptSHA    string
 	promptChars  int
 
+	// 跨协议接受但无法表达的客户端字段（opts 入口采集，出口写入 reqlog.Event）。
+	dropped []string
+
 	logged bool
+}
+
+// maxDroppedFields 归档事件保留的“被忽略字段”上限（推理历史等逐项路径会很多）。
+const maxDroppedFields = 8
+
+// droppedFields 归一化跨协议被忽略的客户端字段（去重、限长、下标折叠），
+// 只写入请求归档，不打 stdout 流水行。
+func droppedFields(list []string) []string {
+	if len(list) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(list))
+	out := make([]string, 0, len(list))
+	for _, s := range list {
+		key := collapseIndexes(s)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, key)
+		if len(out) == maxDroppedFields {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// collapseIndexes 把路径里的数组下标折叠为 []（input[3] → input[]、
+// messages[1].content[0] → messages[].content[]），同类别合并为一项。
+func collapseIndexes(s string) string {
+	if !strings.Contains(s, "[") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] != '[' {
+			b.WriteByte(s[i])
+			continue
+		}
+		j := i + 1
+		for j < len(s) && s[j] >= '0' && s[j] <= '9' {
+			j++
+		}
+		if j < len(s) && s[j] == ']' && j > i+1 {
+			b.WriteString("[]")
+			i = j
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 // newChatStat 以请求进入 handler 的时刻为起点构造统计对象；toks 默认 -1（usage 缺失）。
@@ -375,6 +433,7 @@ func (t *requestTrace) event(status int) reqlog.Event {
 		e.PromptPreset = s.promptPreset
 		e.PromptSHA = s.promptSHA
 		e.PromptChars = s.promptChars
+		e.Dropped = s.dropped
 	}
 	e.ClientIP = t.clientIP
 	e.UserAgent = t.userAgent

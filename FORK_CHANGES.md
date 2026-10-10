@@ -55,7 +55,7 @@ git log --oneline <已同步基线>..upstream/main     # 列出待判定提交�
 
 | # | 能力 | 行为差异 | 默认 |
 | --- | --- | --- | --- |
-| 1 | **转发契约（严格、不改写）** | 出站只做校验与编码：未知字段与大整数完整保留，无法表达的输入直接 400；删除系统提示词清洗、内容拦截降级重试、思考自动补档、effort 降抬档、GPT `max_tokens` 抬升、工具历史重排 | 生效（无开关） |
+| 1 | **转发契约（严格、不改写）** | 出站只做校验与编码：未知字段与大整数完整保留，无法表达的输入直接 400（跨协议入口的提示/状态字段另有「接受即丢」，见第 15 条）；删除系统提示词清洗、内容拦截降级重试、思考自动补档、effort 降抬档、GPT `max_tokens` 抬升、工具历史重排 | 生效（无开关） |
 | 2 | **响应统一管线** | 流式与非流式共用同一 SSE 解析与完成判定；HTTP 错误与 `error` 帧同一分类；按 choice index 独立聚合；错误帧/截断不再伪装成功；新增首模型事件/首生成/尾部阶段超时 | 生效 |
 | 3 | **重试与账号策略** | 仅「明确未受理」才换号；已生成/已提交一律不重放；限流与配额不跨账号绕过 | 生效 |
 | 4 | **系统提示词体系** | 组合位置 `none`/`replace`/`after`/`append`/`inject`（inject 对全部预设可用：客户端 system 套官方 `<user_custom_instructions>` 包装追加到网关正文末尾）+ 六种内置预设（`official-craft` / `official-ask` / `official-plan` / `official-quick` / `official-expert` 为**官方渲染产物逐字**——条件已按抓包解掉、变量已字面化或删除，`official-craft` 两份与实物抓包逐行核对；`default` 为自设计位，空 preset 回落它）+ 按账号域覆盖 + 面板预览；预设是**静态 MD 加载即用**，无模板标记、无运行期变量改写；导出工具见 [scripts/render-official-presets.py](scripts/render-official-presets.py)，官方明文模板原件归档见 [docs/official-templates/README.md](docs/official-templates/README.md) | `none` |
@@ -69,7 +69,7 @@ git log --oneline <已同步基线>..upstream/main     # 列出待判定提交�
 | 12 | **裸模型名默认域** | `model_default_realm = cn / global / auto(:cn,global) / auto:global,cn` | `cn` |
 | 13 | **客户端特征对齐** | 稳定设备/会话指纹、硬件特征离散化、`/v2/report` 桌面指纹、版本自检 | 启用 |
 | 14 | **面板版本配置** | 占位符来自后端内置基线（不硬编码）；「一键填入已拉取版本」；CLI 版本需人工核对 | 生效 |
-| 15 | **Responses / Anthropic 桥接** | `/v1/responses` 无状态文本 / function tools；`/v1/messages` 文本 / client tools。复用原有执行、重试、用量与日志；跨协议未知字段拒绝，原生 Chat 保留扩展。见 [兼容说明](docs/PROTOCOL_COMPATIBILITY.md) | 生效（限定子集） |
+| 15 | **Responses / Anthropic 桥接** | `/v1/responses` 无状态文本 / function tools；`/v1/messages` 文本 / client tools。复用原有执行、重试、用量与日志；原生 Chat 保留扩展。纯提示/遥测字段（`cache_control` / `metadata` / `include` / `client_metadata` / `service_tier` / `prompt_cache_key` / `stream_options` / `top_k` / `text.verbosity` 等）与客户端侧推理状态（Responses `reasoning` 历史、Anthropic `thinking`）接受即丢，丢弃项写入请求归档并在面板展示；近似变换显式可见（`is_error` → `[tool error]` 文本前缀、`stop_sequences` → Chat `stop`）；会改变语义或伪造能力的字段（`previous_response_id` / `conversation` / `background:true` / `text.format` 结构化输出 / `strict:true` / 白名单外未知字段）仍明确 400。见 [兼容说明](docs/PROTOCOL_COMPATIBILITY.md) | 生效（限定子集） |
 
 ---
 
@@ -82,12 +82,34 @@ git log --oneline <已同步基线>..upstream/main     # 列出待判定提交�
 同理不要带回写死下限的降级改写（如上游 `fd3e142` 的 GPT `max_tokens` 抬升），它属 §2 第 1 条
 「转发契约」的删除范围。
 
-跨协议兼容不得引入模型名猜测式补丁：不自动删除不支持参数、不搬移 system、
+跨协议兼容不得引入模型名猜测式补丁：不按模型名增删参数、不搬移 system、
 不改写 Schema、不伪造 reasoning / 工具结果、不将截断转为成功。
 工具空 identity 续传与名称方言解析仅由新协议消费者显式启用；非空 ID 冲突仍报错，原生 Chat 不变。
 名称的重复 / 累计 / 分片解释仅在唯一匹配本次工具声明时采用；未声明、缺失和歧义均失败。
 长流正文与工具参数改用增量缓冲，保留快照冲突规则与原生流式已发送正文的释放行为。
 缓存计数桥接只映射已观测字段，不把 cache miss 当 cache write。
+
+跨协议入口的接受即丢分两类，且都必须记账：
+
+- **纯提示/遥测类**：`cache_control`、`metadata`、`service_tier`、`top_k`、`include`、
+  `truncation:auto`、`client_metadata`、`prompt_cache_key`、`stream_options`、
+  `safety_identifier`、`top_logprobs`、`text.verbosity`、Responses message `phase`。
+  丢弃不改变任何生成语义（缓存/路由/遥测提示或额外输出字段）。
+- **客户端侧推理状态**：Responses `reasoning` 历史项、Anthropic `thinking` /
+  `redacted_thinking` 块与 `thinking:{type:"enabled"}`。Chat 上游没有签名/加密状态可回放，
+  丢弃意味着模型按可见消息**重新推理**、推理链不延续（这是有损取舍，不是无损转换）。
+
+近似变换必须显式可见，不得伪装：`tool_result.is_error:true` 转成内容前缀 `[tool error]`
+（Chat 无工具失败标志）；`stop_sequences` 透传 Chat `stop`，但响应只能给
+`stop_reason:end_turn` 与 `stop_sequence:null`（上游不回报命中了哪个序列）；
+`reasoning.effort` 透传 Chat `reasoning_effort`，但响应不回推理文本。
+被丢弃字段统一进 `protocol.Request.Dropped` → `reqlog.Event.dropped`（去重、数组下标折叠为
+`input[]`、上限 8 项，只写归档不打 stdout）→ 面板「丢弃字段」列与搜索。
+仍拒绝：`previous_response_id`/`conversation`、`background:true`、`text.format` 非 `text`、
+`strict:true`、非空 namespace `description`、白名单外的未知字段——丢失它们会改变请求、
+对话或能力语义。
+入口头不做协议合规断言：`anthropic-version` 缺失/任意值均放行，`anthropic-beta` 不再拒绝
+（两者都不上行，真正的 beta 语义字段仍按上述规则逐字段处理）。
 
 协议 P0 优化：`protocol.Completion` 将原始记账数据与有序块引用分开，流式/非流式共用
 `collect` 与块格式化；不新增跨块正文/参数复制。保留工具后文本、混合快照的严格拒绝，
@@ -106,7 +128,9 @@ namespace/name，保留子项描述、schema 与 call_id。重复、别名冲突
 历史显式携带 namespace 即可重建身份，不再要求重新声明；历史身份碰撞索引与本轮工具声明
 分离，不使用会话缓存、不补造 schema、不给历史工具增加调用权限。缺省/null namespace 代表
 平面历史，不因本轮 namespace 局部同名而改写或拒绝。声明/历史或历史之间实际别名碰撞仍拒绝。
-非空分组说明/custom/deferred 等不能等价表达的语义仍拒绝，不注入提示词。
+非空分组说明/custom/deferred 等不能等价表达的语义仍拒绝，不注入提示词；
+缺省/null 的 namespace `description` 按空串处理（不再要求显式 `"description":""`），
+`strict` 同样允许省略（官方默认即 `false`，`strict:true` 仍拒绝）。
 function_call_output 支持 input_text 数组（包括 []），保留块顺序；Anthropic tool_result 也支持
 content:[]。空数组保持原形，不作为 null、缺失结果或虚构文本；普通消息内容校验不随之放宽。
 新协议在最终交付工具前校验 none/required/指定函数/禁止并行；违规上游结果不交付工具，
@@ -122,7 +146,7 @@ content:[]。空数组保持原形，不作为 null、缺失结果或虚构文�
 | cc-switch：Moonshot `$ref` 兄弟字段改为 `allOf` | 不采用：原补丁限定直连 Moonshot 的 Responses→Chat，不能套用到 WorkBuddy |
 | CLIProxyAPI / cc-switch：namespace 展平与身份恢复 | 借鉴请求级双向身份索引；采用长度前缀 / 稳定摘要别名并检查声明与历史碰撞，历史身份不增加本轮权限；不采用 first-wins 去重、截短名称、猜测 namespace 或丢弃分组说明 |
 | CLIProxyAPI / cc-switch：块状态、工具项 incomplete | 借鉴状态与终止分类；不补工具名、不修复 JSON、不在 EOF 上猜测 length；截断工具只在 Responses 终帧提供诊断信息 |
-| CLIProxyAPI / cc-switch：budget→effort、档位钳位；Kimi / DeepSeek 工具历史 reasoning 补全 | 不采用：不自动升降档、不补造推理；新协议暂不支持 thinking，原 Chat 保留已有字段 |
+| CLIProxyAPI / cc-switch：budget→effort、档位钳位；Kimi / DeepSeek 工具历史 reasoning 补全 | 不采用：不自动升降档、不补造推理；新协议接受 `thinking:{type:"enabled"}` 与历史 reasoning 但丢弃状态（不补造思维链），原 Chat 保留已有字段 |
 
 厂商直连补丁不等于 WorkBuddy 能力；后续采用补丁须提供真实上游脱敏请求 / 原始帧依据与回归测试。
 
@@ -162,7 +186,7 @@ content:[]。空数组保持原形，不作为 null、缺失结果或虚构文�
 | Responses / Messages | **新增** `internal/protocol/`、`internal/server/protocol.go`；`internal/server/{handler,logging}.go`；`upstream.ConsumeCompletion` 共享消费接口 |
 | 图片形状与校验 | **新增** `internal/media/`、`internal/protocol/content.go`；`internal/forwarding/request.go`（Parse 归一）、`internal/server/handler.go`（hasImage 判定） |
 | 工具结果图片策略 | **新增** `internal/media/{policy,hoist}.go`；`internal/protocol/request.go`（Decode 按入口策略）、`internal/server/protocol.go`（Mutated 重序列化）、`cmd/server/{config,main}.go` |
-| 图片转码/压缩 | **新增** `internal/media/image.go`（解码/缩放/JPEG 阶梯，依赖 `golang.org/x/image`）；`cmd/server/{config,main}.go`；面板表单项（`internal/panel/{index.html,js/30-config.js}`） |
+| 图片转码/压缩 | **新增** `internal/media/image.go`（解码/缩放/JPEG 阶梯，依赖 `golang.org/x/image`）；`cmd/server/{config,main}.go`；面板表单项（`frontend/src/{configSchema.ts,views/ConfigView.tsx}`） |
 | 重试与账号策略 | `internal/server/handler.go`、`internal/upstream/client.go` |
 | 系统提示词 | `internal/prompt/`（预设库与组合逻辑）、`internal/config/prompt.go` + `internal/config/prompt_preview.go`（配置解析与面板预览）（官方明文模板原件归档见 [docs/official-templates/README.md](docs/official-templates/README.md)，重新导出：`make templates-export`） |
 | 指纹改写 | **新增** `internal/scrub/` |
@@ -170,7 +194,8 @@ content:[]。空数组保持原形，不作为 null、缺失结果或虚构文�
 | 缓存键 / 配置容错 | `internal/upstream/cache_key.go`、`cmd/server/{config,config_warnings,main}.go` |
 | 出站代理 | `internal/proxy/`、`internal/auth/auth.go`、`internal/upstream/proxy.go` |
 | 裸模型名默认域 | `internal/server/resolve_model.go` |
-| 面板 | `internal/panel/{index.html,app.css,js/*.js,config.go,panel.go}` |
+| 请求归档 / 被丢弃字段 | `internal/reqlog/reqlog.go`（`Event.dropped`）、`internal/server/logging.go`（归一化：去重 / 下标折叠 / 上限 8）；面板 `frontend/src/views/LogsView.tsx`（列 + 搜索 + tooltip） |
+| 面板 | 源码 `frontend/src/`（React + Vite 工程）；构建产物 `internal/panel/web/`（固定三件套，`go:embed`，见 `web_embed.go`）；后端 `internal/panel/{config.go,panel.go,web_embed.go}` |
 
 ## 6. 未验证项（静态检查不能替代真实上游验收）
 
@@ -180,6 +205,12 @@ content:[]。空数组保持原形，不作为 null、缺失结果或虚构文�
 **外链图片代抓有意不实现**（网关不是图片托管服务；代抓引入 SSRF/隐私/尾延迟成本，且本项目客户端不产生该形态）：外链请求明确 400 + 请客户端内联。若日后真遇官方自家 CDN 外链，正确修法是**白名单透传**（不下载）而非代抓。
 Responses / Messages 已覆盖本地假上游及官方 Python SDK 的文本 / 工具 / 图片（含工具结果图片默认抬升）/ 两轮回传 / SSE，
 仍未做真实 WorkBuddy 和完整 Codex / Claude Code 端到端验收；不能将协议测试视为模型能力证明。
+
+本轮宽松化的依据是本机 Codex CLI `0.153.4` 与 Claude Code `2.1.198` 二进制 + openai/codex 源码的请求形态取证
+（`include:["reasoning.encrypted_content"]` 恒发、`store:false`、`reasoning:{effort,summary}`、`client_metadata` 等请求字段；
+`stop_sequences:["</block>"]`、`is_error:true`、`cache_control`/`metadata` 等），仍非真实上游验收：
+Chat `stop` 字段的接受度、各 `reasoning_effort` 档位在真实模型上的行为、`thinking:enabled` 接受后的实际输出、
+`[tool error]` 前缀对模型判断的影响，均未实测。
 
 ## 7. 验证
 

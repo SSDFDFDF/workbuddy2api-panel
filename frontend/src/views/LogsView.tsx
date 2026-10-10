@@ -31,6 +31,25 @@ function creditCell(e: RequestEvent) {
   return Number.isFinite(v) ? v.toFixed(2) : <span className="text-[var(--ink-3)]">—</span>;
 }
 
+/* 丢弃字段：跨协议入口接受但无法表达的客户端字段（如 Codex 的 include / reasoning 历史）。
+   推理历史会折叠为 input[]，通常 1-2 项，超出折叠为 +N，完整列表在 title 里。 */
+function droppedCell(e: RequestEvent) {
+  const list = e.dropped || [];
+  if (!list.length) return <span className="text-[var(--ink-3)]">—</span>;
+  const shown = list.slice(0, 2);
+  const rest = list.length - shown.length;
+  return (
+    <span className="flex max-w-[190px] items-center gap-1" title={list.join(' · ')}>
+      {shown.map((k) => (
+        <Tag key={k} tone="warn">
+          <span className="tabular block max-w-[120px] truncate">{k}</span>
+        </Tag>
+      ))}
+      {rest > 0 && <span className="text-[11px] text-[var(--ink-3)]">+{rest}</span>}
+    </span>
+  );
+}
+
 function rowTip(e: RequestEvent): string {
   const label = { success: '成功', http_error: 'HTTP 错误', stream_error: '流错误', interrupted: '中断' }[String(e.outcome || '')] || e.outcome || '—';
   const bits = [
@@ -44,6 +63,7 @@ function rowTip(e: RequestEvent): string {
     fmtTok(Number(e.total_tokens || 0) || Number(e.prompt_tokens || 0) + Number(e.completion_tokens || 0)) + ' tok',
     e.credit_known ? Number(e.credit).toFixed(2) + ' credit' : 'credit —',
     cacheRateText(e.cache_hit_tokens, e.cache_miss_tokens) === '—' ? '' : '命中 ' + cacheRateText(e.cache_hit_tokens, e.cache_miss_tokens),
+    e.dropped?.length ? '丢弃 ' + e.dropped.join(' · ') : '',
     e.request_id || '—',
     e.prompt_mode ? `prompt=${e.prompt_mode}${e.prompt_preset ? ' ' + e.prompt_preset : ''}${e.prompt_chars ? ' ' + e.prompt_chars + ' 字' : ''}${e.prompt_sha256 ? ' sha ' + e.prompt_sha256 : ''}` : '',
   ];
@@ -111,7 +131,7 @@ export function LogsView() {
   const reqFiltered = (reqRows || []).filter((e) => {
     if (outcome && String(e.outcome || '') !== outcome) return false;
     if (q) {
-      const text = [e.client_ip, e.user_agent, e.model, e.account, e.request_id, e.prompt_preset, e.prompt_mode, e.prompt_sha256]
+      const text = [e.client_ip, e.user_agent, e.model, e.account, e.request_id, e.prompt_preset, e.prompt_mode, e.prompt_sha256, ...(e.dropped || [])]
         .filter(Boolean)
         .join(' ')
         .toLowerCase();
@@ -145,7 +165,7 @@ export function LogsView() {
           )}
         </header>
         <div className="flex flex-wrap items-center gap-2 border-y border-[var(--line-soft)] px-4 py-2.5">
-          <input type="search" className={reqCls + ' w-[220px]'} placeholder="搜索 IP / UA / 模型 / 账号 / 请求 ID" value={q} onChange={(e) => setQ(e.target.value.trim())} aria-label="搜索请求记录" />
+          <input type="search" className={reqCls + ' w-[220px]'} placeholder="搜索 IP / UA / 模型 / 账号 / 请求 ID / 丢弃字段" value={q} onChange={(e) => setQ(e.target.value.trim())} aria-label="搜索请求记录" />
           <select className="wb-select px-2 py-1.5 text-[12.5px]" value={outcome} onChange={(e) => setOutcome(e.target.value)} aria-label="按结果筛选">
             <option value="">全部结果</option>
             <option value="success">成功</option>
@@ -180,6 +200,7 @@ export function LogsView() {
                 <th className="px-3 py-2 font-medium">耗时</th>
                 <th className="px-3 py-2 font-medium">Token</th>
                 <th className="px-3 py-2 font-medium">积分</th>
+                <th className="px-3 py-2 font-medium">丢弃字段</th>
                 <th className="px-3 py-2 font-medium">请求 ID</th>
               </tr>
             </thead>
@@ -207,6 +228,7 @@ export function LogsView() {
                   <td className="tabular px-3 py-1.5">{fmtMs(e.duration_ms)}</td>
                   <td className="tabular px-3 py-1.5">{tokenCell(e)}</td>
                   <td className="tabular px-3 py-1.5">{creditCell(e)}</td>
+                  <td className="px-3 py-1.5">{droppedCell(e)}</td>
                   <td className="px-3 py-1.5">
                     {e.request_id ? (
                       <span className="tabular block max-w-[120px] truncate font-[family-name:var(--mono)] text-[11px] text-[var(--ink-3)]">{e.request_id}</span>
@@ -218,7 +240,7 @@ export function LogsView() {
               ))}
               {!reqFiltered.length && (
                 <tr>
-                  <td colSpan={10}>
+                  <td colSpan={11}>
                     <Empty>{reqRows?.length ? '没有符合当前筛选条件的请求记录' : '暂无请求记录'}</Empty>
                   </td>
                 </tr>

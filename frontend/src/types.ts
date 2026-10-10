@@ -97,6 +97,8 @@ export interface RequestEvent {
   prompt_sha256?: string;
   cache_hit_tokens?: number;
   cache_miss_tokens?: number;
+  // dropped：跨协议入口（Responses / Messages）接受但无法表达、因此被忽略的客户端字段。
+  dropped?: string[];
 }
 
 export interface RequestMetrics {

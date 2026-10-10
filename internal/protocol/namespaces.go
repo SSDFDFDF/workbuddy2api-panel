@@ -77,8 +77,8 @@ func (idx *toolIndex) add(m map[string]any, namespace, path string) (map[string]
 	if m["type"] != "function" {
 		return nil, invalid(path+".type", "only client function tools are supported")
 	}
-	if m["strict"] != false {
-		return nil, invalid(path+".strict", "explicit strict:false required; schema-constrained generation is not verified")
+	if err := optionalFalse(m, "strict"); err != nil {
+		return nil, invalid(path+".strict", "strict:true is not supported; schema-constrained generation is not verified")
 	}
 	t, err := function(m["name"], m["description"], m["parameters"], path)
 	if err != nil {
@@ -131,8 +131,8 @@ func (idx *toolIndex) declarations(v any) ([]any, error) {
 			return nil, invalid(p+".name", "duplicate namespace declaration")
 		}
 		namespaces[ns] = true
-		if m["description"] != "" {
-			return nil, invalid(p+".description", "explicit empty namespace description required; group instructions cannot be represented by Chat")
+		if v := m["description"]; v != nil && v != "" {
+			return nil, invalid(p+".description", "group instructions cannot be represented by Chat; omit the description or use an empty string")
 		}
 		children, ok := m["tools"].([]any)
 		if !ok || len(children) == 0 {

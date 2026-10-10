@@ -204,7 +204,7 @@ func stripIDs(v any) {
 func TestStreamFailuresAndIncomplete(t *testing.T) {
 	prefix := `data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}` + "\n\n"
 	for _, kind := range []Kind{Responses, Anthropic} {
-		for _, raw := range []string{"", "data: [DONE]\n\n", prefix, prefix + "data: not-json\n\n", prefix + `data: {"error":{"code":6004,"message":"rate limited"}}` + "\n\n", `data: {"choices":[{"index":0,"delta":{"reasoning_content":"secret"},"finish_reason":"stop"}]}` + "\n\n", strings.Replace(strings.Replace(toolsStream, `"finish_reason":"tool_calls"`, `"finish_reason":"length"`, 1), `"name":"other"`, `"name":"unknown"`, 1)} {
+		for _, raw := range []string{"", "data: [DONE]\n\n", prefix, prefix + "data: not-json\n\n", prefix + `data: {"error":{"code":6004,"message":"rate limited"}}` + "\n\n", strings.Replace(strings.Replace(toolsStream, `"finish_reason":"tool_calls"`, `"finish_reason":"length"`, 1), `"name":"other"`, `"name":"unknown"`, 1)} {
 			rec := httptest.NewRecorder()
 			if err := Stream(rec, strings.NewReader(raw), testRequest(t, kind), nil); err == nil {
 				t.Fatalf("accepted invalid stream %s", raw)
@@ -225,6 +225,24 @@ func TestStreamFailuresAndIncomplete(t *testing.T) {
 		}
 		if !strings.Contains(rec.Body.String(), want) {
 			t.Fatal(rec.Body.String())
+		}
+	}
+}
+
+func TestUpstreamReasoningDropped(t *testing.T) {
+	// Upstream reasoning text has no Responses/Messages representation; it is
+	// ignored while the visible text still reaches the client.
+	raw := `data: {"id":"x","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"inner monologue "}}]}` + "\n\n" +
+		`data: {"choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":"stop"}]}` + "\n\n" +
+		`data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1}}` + "\n\ndata: [DONE]\n\n"
+	for _, kind := range []Kind{Responses, Anthropic} {
+		rec := httptest.NewRecorder()
+		if err := Stream(rec, strings.NewReader(raw), testRequest(t, kind), nil); err != nil {
+			t.Fatal(err)
+		}
+		body := rec.Body.String()
+		if !strings.Contains(body, "answer") || strings.Contains(body, "inner monologue") {
+			t.Fatal(body)
 		}
 	}
 }

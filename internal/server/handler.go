@@ -718,6 +718,9 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream)
+	// 跨协议入口被忽略的客户端字段（如 Codex 的 include/reasoning 历史/客户端遥测）：
+	// 只写请求归档，用于回答“它发了什么被我们丢了”。
+	st.dropped = droppedFields(request.Dropped)
 	if tr := requestTraceFrom(r); tr != nil {
 		tr.stat = st
 		// 来源在 ServeHTTP 入口采集（此时才知道开关与请求头），此处转交给统计对象，

@@ -87,6 +87,15 @@ func TestAnthropicImageContent(t *testing.T) {
 	}
 }
 
+func TestAnthropicImageCacheControlDropped(t *testing.T) {
+	r := mustDecode(t, Anthropic, `{"model":"x","max_tokens":10,"messages":[{"role":"user","content":[`+
+		`{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="},"cache_control":{"type":"ephemeral"}}]}]}`)
+	raw, _ := json.Marshal(r.Chat.Object)
+	if strings.Contains(string(raw), "cache_control") {
+		t.Fatalf("cache_control forwarded: %s", raw)
+	}
+}
+
 func TestAnthropicImageRejections(t *testing.T) {
 	for _, tc := range []struct {
 		name, message, want string
@@ -94,7 +103,6 @@ func TestAnthropicImageRejections(t *testing.T) {
 		{"url-source", `{"role":"user","content":[{"type":"image","source":{"type":"url","url":"https://example.test/x.png"}}]}`, "url image sources"},
 		{"file-source", `{"role":"user","content":[{"type":"image","source":{"type":"file","file_id":"f"}}]}`, "file image sources"},
 		{"assistant", `{"role":"assistant","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}]}`, "only supported in user messages"},
-		{"cache-control", `{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="},"cache_control":{"type":"ephemeral"}}]}`, "cache_control"},
 		{"bad-media-type", `{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"text/plain","data":"aGk="}}]}`, "image/*"},
 		{"bad-base64", `{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"!!!"}}]}`, "invalid base64"},
 		{"tool-document", `{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"aGk="}}]}]}`, "no file part"},

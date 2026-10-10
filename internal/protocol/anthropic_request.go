@@ -7,10 +7,15 @@ import (
 	"workbuddy_manager/internal/jsondoc"
 )
 
-func anthropicRequest(src map[string]any) (map[string]any, error) {
-	if err := fields(src, "", "model messages system max_tokens stream temperature top_p tools tool_choice thinking stop_sequences"); err != nil {
+func anthropicRequest(src map[string]any, dropped *[]string) (map[string]any, error) {
+	// metadata/service_tier are client telemetry and routing hints; top_k and a
+	// top-level cache_control are advisory. None has an upstream Chat
+	// equivalent; they are accepted and reported in Dropped.
+	ignored, err := fieldsAccept(src, "", "model messages system max_tokens stream temperature top_p tools tool_choice thinking stop_sequences", "metadata service_tier top_k cache_control")
+	if err != nil {
 		return nil, err
 	}
+	*dropped = append(*dropped, ignored...)
 	if n, ok := jsondoc.Int(src["max_tokens"]); !ok || n <= 0 {
 		return nil, invalid("max_tokens", "positive integer required")
 	}
@@ -26,18 +31,50 @@ func anthropicRequest(src map[string]any) (map[string]any, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err = fields(m, "thinking", "type"); err != nil {
+		if err = fields(m, "thinking", "type budget_tokens"); err != nil {
 			return nil, err
 		}
-		if m["type"] != "disabled" {
-			return nil, invalid("thinking", "only disabled is supported; signed thinking is unavailable")
+		switch m["type"] {
+		case "disabled":
+			dst["thinking"] = map[string]any{"type": "disabled"}
+		case "enabled":
+			// Signed thinking state cannot be replayed by the Chat bridge (the
+			// upstream emits unsigned reasoning text). The request is accepted so
+			// thinking-enabled clients keep working, but the budget/state is
+			// dropped and responses carry no thinking blocks. The model still
+			// reasons per its own defaults.
+			if v := m["budget_tokens"]; v != nil {
+				if n, ok := jsondoc.Int(v); !ok || n <= 0 {
+					return nil, invalid("thinking.budget_tokens", "positive integer required")
+				}
+			}
+			*dropped = append(*dropped, "thinking")
+		default:
+			return nil, invalid("thinking.type", "disabled or enabled expected")
 		}
-		dst["thinking"] = m
 	}
 	if v := src["stop_sequences"]; v != nil {
 		a, ok := v.([]any)
-		if !ok || len(a) != 0 {
-			return nil, invalid("stop_sequences", "custom stop reasons cannot be recovered from the Chat upstream")
+		if !ok {
+			return nil, invalid("stop_sequences", "array required")
+		}
+		if len(a) > 0 {
+			stop := make([]any, 0, len(a))
+			for i, item := range a {
+				s, err := nonempty(item, fmt.Sprintf("stop_sequences[%d]", i))
+				if err != nil {
+					return nil, err
+				}
+				stop = append(stop, s)
+			}
+			// Pass the sequences through as Chat `stop`: honoring the client's
+			// stop request matters more than the response-side approximation.
+			// The upstream strips the matched sequence and only reports
+			// finish_reason:stop, so the Messages response cannot set
+			// stop_reason:"stop_sequence"/stop_sequence and maps it to end_turn
+			// instead (see response.go stopReason). Claude Code auto_mode sends
+			// stop_sequences:["</block>"].
+			dst["stop"] = stop
 		}
 	}
 	if v := src["tools"]; v != nil {
@@ -52,7 +89,7 @@ func anthropicRequest(src map[string]any) (map[string]any, error) {
 			if err != nil {
 				return nil, err
 			}
-			if err = fields(m, p, "type name description input_schema strict"); err != nil {
+			if err = fields(m, p, "type name description input_schema strict cache_control"); err != nil {
 				return nil, err
 			}
 			if v := m["type"]; v != nil && v != "custom" {
@@ -168,7 +205,7 @@ func anthropicRequest(src map[string]any) (map[string]any, error) {
 				if role != "assistant" {
 					return nil, invalid(bp, "tool_use requires assistant role")
 				}
-				if err = fields(b, bp, "type id name input"); err != nil {
+				if err = fields(b, bp, "type id name input cache_control"); err != nil {
 					return nil, err
 				}
 				args, err := object(b["input"], bp+".input")
@@ -189,11 +226,16 @@ func anthropicRequest(src map[string]any) (map[string]any, error) {
 				if role != "user" || len(parts) != 0 {
 					return nil, invalid(bp, "tool_result must precede user text and images")
 				}
-				if err = fields(b, bp, "type tool_use_id content is_error"); err != nil {
+				if err = fields(b, bp, "type tool_use_id content is_error cache_control"); err != nil {
 					return nil, err
 				}
-				if err = optionalFalse(b, "is_error"); err != nil {
-					return nil, invalid(bp+".is_error", "Chat has no equivalent tool failure flag")
+				failed := false
+				if v, exists := b["is_error"]; exists && v != nil {
+					bv, ok := v.(bool)
+					if !ok {
+						return nil, invalid(bp+".is_error", "boolean required")
+					}
+					failed = bv
 				}
 				id, err := nonempty(b["tool_use_id"], bp+".tool_use_id")
 				if err != nil {
@@ -206,9 +248,20 @@ func anthropicRequest(src map[string]any) (map[string]any, error) {
 						return nil, err
 					}
 				}
+				if failed {
+					content = markToolError(content)
+				}
 				messages = append(messages, map[string]any{"role": "tool", "tool_call_id": id, "content": content})
+			case "thinking", "redacted_thinking":
+				if role != "assistant" {
+					return nil, invalid(bp, "thinking blocks require assistant role")
+				}
+				// Signed/opaque reasoning history cannot be represented in Chat;
+				// accept and drop it so thinking-enabled clients can replay their
+				// full transcript. The model re-reasons from the visible messages.
+				*dropped = append(*dropped, bp)
 			default:
-				return nil, invalid(bp+".type", "only text, image, tool_use and successful text/image tool_result are supported")
+				return nil, invalid(bp+".type", "only text, image, tool_use, thinking and tool_result are supported")
 			}
 		}
 		if len(parts) > 0 || len(calls) > 0 {
@@ -224,4 +277,22 @@ func anthropicRequest(src map[string]any) (map[string]any, error) {
 	}
 	dst["messages"] = messages
 	return dst, nil
+}
+
+// markToolError makes an Anthropic is_error:true tool result visible to the
+// model. Chat has no structured tool-failure flag, so the failure is expressed
+// as a text marker. This is an explicit, visible lossy translation: the client
+// keeps its own is_error state locally and replays it on the next turn.
+func markToolError(content any) any {
+	switch v := content.(type) {
+	case string:
+		if v == "" {
+			return "[tool error]"
+		}
+		return "[tool error] " + v
+	case []any:
+		return append([]any{map[string]any{"type": "text", "text": "[tool error]"}}, v...)
+	default:
+		return "[tool error]"
+	}
 }

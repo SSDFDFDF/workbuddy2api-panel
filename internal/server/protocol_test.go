@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -86,6 +87,8 @@ func TestProtocolEndpointsAndAccounting(t *testing.T) {
 }
 
 func TestMessagesAuthAndValidation(t *testing.T) {
+	// version/beta headers are informational and ignored (see protocol.go);
+	// only credential conflicts and duplicates fail.
 	cases := []struct {
 		name, key, bearer, version, beta string
 		code                             int
@@ -96,12 +99,12 @@ func TestMessagesAuthAndValidation(t *testing.T) {
 		{"conflict", "wrong", "Bearer secret", "2023-06-01", "", 401},
 		{"conflict2", "secret", "Bearer wrong", "2023-06-01", "", 401},
 		{"missing", "", "", "2023-06-01", "", 401},
-		{"bad-version", "secret", "", "future", "", 400},
-		{"missing-version", "secret", "", "", "", 400},
-		{"beta", "secret", "", "2023-06-01", "tools-beta", 400},
+		{"any-version", "secret", "", "future", "", 200},
+		{"no-version", "secret", "", "", "", 200},
+		{"beta-header", "secret", "", "2023-06-01", "tools-beta", 200},
 		{"duplicate-key", "secret", "", "2023-06-01", "", 401},
 		{"duplicate-bearer", "", "Bearer secret", "2023-06-01", "", 401},
-		{"duplicate-version", "secret", "", "2023-06-01", "", 400},
+		{"duplicate-version", "secret", "", "2023-06-01", "", 200},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -175,12 +178,100 @@ func TestProtocolNoReplayOnTruncation(t *testing.T) {
 	}
 }
 
+func TestCodexStyleResponsesRequestAccepted(t *testing.T) {
+	// Codex sends reasoning history, include, client_metadata and other hints on
+	// every request. They must be accepted, never forwarded, and the response
+	// reasoning text must not leak into the client body.
+	sse := `data: {"choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"secret thoughts "}}]}` + "\n\n" +
+		`data: {"choices":[{"index":0,"delta":{"content":"你好"},"finish_reason":"stop"}]}` + "\n\n" +
+		`data: {"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":1}}` + "\n\ndata: [DONE]\n\n"
+	up := &upstream.Client{ChatBaseCN: "https://fake.example", HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(r.Body)
+		var obj map[string]any
+		if err := json.Unmarshal(body, &obj); err != nil {
+			t.Fatal(err)
+		}
+		if obj["reasoning_effort"] != "medium" {
+			t.Fatalf("effort not forwarded: %s", body)
+		}
+		msgs, _ := obj["messages"].([]any)
+		if len(msgs) != 1 || msgs[0].(map[string]any)["role"] != "user" {
+			t.Fatalf("reasoning history not dropped: %s", body)
+		}
+		for _, k := range []string{"client_metadata", "service_tier", "prompt_cache_key", "include", "reasoning", "truncation"} {
+			if _, exists := obj[k]; exists {
+				t.Fatalf("dropped field %s forwarded: %s", k, body)
+			}
+		}
+		// stream_options is the encoder's own include_usage contract, not the
+		// client's dropped value.
+		if so, _ := obj["stream_options"].(map[string]any); so["include_usage"] != true {
+			t.Fatalf("wrong stream_options: %s", body)
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(sse))}, nil
+	})}}
+	logs := reqlog.New(reqlog.Config{})
+	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}), Upstream: up, APIKey: "secret", RequestLog: logs})
+	body := `{"model":"cn:glm-5.2","store":false,"stream":true,"input":[` +
+		`{"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"zzz"},` +
+		`{"role":"user","content":"hi"}],` +
+		`"include":["reasoning.encrypted_content"],"client_metadata":{"x":"1"},` +
+		`"service_tier":"priority","prompt_cache_key":"k","stream_options":{"include_usage":true},` +
+		`"text":{"verbosity":"low"},"reasoning":{"effort":"medium","summary":"auto"}}`
+	r := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(body))
+	r.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	if rec.Code != 200 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	out := rec.Body.String()
+	if !strings.Contains(out, "你好") || strings.Contains(out, "secret thoughts") {
+		t.Fatal(out)
+	}
+	// 归档事件要能回答“客户端发了什么被我们丢了”。
+	s := logs.Snapshot()
+	if len(s.Recent) != 1 {
+		t.Fatalf("events=%d", len(s.Recent))
+	}
+	want := []string{"client_metadata", "prompt_cache_key", "service_tier", "stream_options", "include", "text.verbosity", "reasoning.summary", "input[]"}
+	if !reflect.DeepEqual(s.Recent[0].Dropped, want) {
+		t.Fatalf("dropped=%v want %v", s.Recent[0].Dropped, want)
+	}
+}
+
+func TestAnthropicStopSequencesReachUpstream(t *testing.T) {
+	// The translated Chat `stop` field is an extension Parse must preserve: it
+	// is not a declared forwarding field, only the outbound body proves it.
+	up := &upstream.Client{ChatBaseCN: "https://fake.example", HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(r.Body)
+		var obj map[string]any
+		if err := json.Unmarshal(body, &obj); err != nil {
+			t.Fatal(err)
+		}
+		stop, _ := obj["stop"].([]any)
+		if len(stop) != 2 || stop[0] != "</block>" || stop[1] != "END" {
+			t.Fatalf("stop not forwarded: %s", body)
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(sseOK))}, nil
+	})}}
+	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}), Upstream: up, APIKey: "secret"})
+	body := `{"model":"cn:glm-5.2","max_tokens":100,"stream":false,"messages":[{"role":"user","content":"hi"}],"stop_sequences":["</block>","END"]}`
+	r := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body))
+	r.Header.Set("X-Api-Key", "secret")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	if rec.Code != 200 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+}
+
 func TestUnsupportedProtocolInputNeverReachesUpstream(t *testing.T) {
 	up := newFakeUpstream(t, func(string) (int, string, bool) { t.Fatal("invalid request reached upstream"); return 200, sseOK, true })
 	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u", AccessToken: "a", ExpiresAt: 9999999999}), Upstream: up})
 	for path, body := range map[string]string{
 		"/v1/responses": `{"model":"x","input":"hi","store":false,"previous_response_id":"other-user-response"}`,
-		"/v1/messages":  `{"model":"x","max_tokens":1,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":100}}`,
+		"/v1/messages":  `{"model":"x","max_tokens":1,"messages":[{"role":"user","content":"hi"}],"context_management":{"edits":[]}}`,
 	} {
 		r := httptest.NewRequest("POST", path, strings.NewReader(body))
 		r.Header.Set("Anthropic-Version", "2023-06-01")

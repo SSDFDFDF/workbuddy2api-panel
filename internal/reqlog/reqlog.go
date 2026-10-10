@@ -85,6 +85,10 @@ type Event struct {
 	ClientIP        string `json:"client_ip,omitempty"`
 	UserAgent       string `json:"user_agent,omitempty"`
 
+	// Dropped 是跨协议入口（Responses / Messages）接受但无法表达、因此被忽略的
+	// 客户端字段，已去重与限长。用途是真实客户端排障：回答“它发了什么被我们丢了”。
+	Dropped []string `json:"dropped,omitempty"`
+
 	// 出站提示词指纹（仅在 prompt.mode 非 none 时填）。
 	//
 	// 为什么需要：11128/内容审核类问题复盘时必须能回答"这次到底发出去的是什么形状"。

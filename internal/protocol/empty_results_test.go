@@ -22,7 +22,9 @@ func TestEmptyToolResults(t *testing.T) {
 			{"missing", ``, "", kind == Anthropic}, // Messages permits omitted content.
 			{"wrong-type", `{}`, nil, false},
 			{"bad-block", `[{"type":"TEXT_TYPE"}]`, nil, false},
-			{"lost-extension", `[{"type":"TEXT_TYPE","text":"","cache_control":{}}]`, nil, false},
+			// cache_control is an advisory Messages caching hint: accepted and dropped
+			// there, but not a Responses field (input_text must not lose it silently).
+			{"cache-control", `[{"type":"TEXT_TYPE","text":"","cache_control":{}}]`, []any{map[string]any{"type": "text", "text": ""}}, kind == Anthropic},
 		} {
 			t.Run(string(kind)+"/"+tc.label, func(t *testing.T) {
 				field, blockType := "output", "input_text"

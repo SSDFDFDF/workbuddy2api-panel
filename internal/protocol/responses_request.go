@@ -2,14 +2,22 @@ package protocol
 
 import "fmt"
 
-func responsesRequest(src map[string]any, tools *toolIndex) (map[string]any, error) {
-	if err := fields(src, "", "model input instructions stream store previous_response_id conversation background tools tool_choice parallel_tool_calls max_output_tokens temperature top_p metadata text reasoning include truncation"); err != nil {
+func responsesRequest(src map[string]any, tools *toolIndex, dropped *[]string) (map[string]any, error) {
+	// The accepted-but-ignored list holds client telemetry, routing/caching
+	// hints and newer official parameters with no Chat equivalent. Codex sends
+	// client_metadata/service_tier/prompt_cache_key/stream_options on every
+	// request; dropping them keeps real clients working without pretending the
+	// bridge honors them.
+	ignored, err := fieldsAccept(src, "", "model input instructions stream store previous_response_id conversation background tools tool_choice parallel_tool_calls max_output_tokens temperature top_p metadata text reasoning include truncation", "client_metadata service_tier prompt_cache_key stream_options safety_identifier top_logprobs")
+	if err != nil {
 		return nil, err
 	}
-	// The official default is true. Requiring an explicit opt-out avoids falsely
-	// acknowledging persistence on a stateless gateway.
-	if src["store"] != false {
-		return nil, invalid("store", "explicit store:false is required; response storage is not implemented")
+	*dropped = append(*dropped, ignored...)
+	// The official default is true, but the gateway is stateless: omission/null
+	// means the client does not rely on retrieval, while an explicit true would
+	// falsely acknowledge persistence that does not exist.
+	if err := optionalFalse(src, "store"); err != nil {
+		return nil, invalid("store", "only false or omission is supported; response storage is not implemented")
 	}
 	for _, k := range []string{"previous_response_id", "conversation"} {
 		if src[k] != nil {
@@ -19,13 +27,35 @@ func responsesRequest(src map[string]any, tools *toolIndex) (map[string]any, err
 	if err := optionalFalse(src, "background"); err != nil {
 		return nil, err
 	}
-	if v := src["truncation"]; v != nil && v != "disabled" {
-		return nil, invalid("truncation", "only disabled is supported")
+	if v := src["truncation"]; v != nil {
+		s, err := stringValue(v, "truncation")
+		if err != nil {
+			return nil, err
+		}
+		if s != "auto" && s != "disabled" {
+			return nil, invalid("truncation", "auto or disabled expected")
+		}
+		// The gateway never truncates server-side (stateless, no stored
+		// history); auto is the official default and is ignored.
+		if s == "auto" {
+			*dropped = append(*dropped, "truncation")
+		}
 	}
 	if v := src["include"]; v != nil {
 		a, ok := v.([]any)
-		if !ok || len(a) != 0 {
-			return nil, invalid("include", "only an empty array is supported")
+		if !ok {
+			return nil, invalid("include", "array required")
+		}
+		for i, item := range a {
+			if _, err := stringValue(item, fmt.Sprintf("include[%d]", i)); err != nil {
+				return nil, err
+			}
+		}
+		// include only requests extra output fields (for example
+		// reasoning.encrypted_content). The stateless bridge can produce none of
+		// them, so a non-empty list is accepted and ignored like an empty one.
+		if len(a) > 0 {
+			*dropped = append(*dropped, "include")
 		}
 	}
 	if v := src["text"]; v != nil {
@@ -33,8 +63,15 @@ func responsesRequest(src map[string]any, tools *toolIndex) (map[string]any, err
 		if err != nil {
 			return nil, err
 		}
-		if err = fields(m, "text", "format"); err != nil {
+		if err = fields(m, "text", "format", "verbosity"); err != nil {
 			return nil, err
+		}
+		if v := m["verbosity"]; v != nil {
+			if _, err = stringValue(v, "text.verbosity"); err != nil {
+				return nil, err
+			}
+			// No verified Chat verbosity control exists; the hint is dropped.
+			*dropped = append(*dropped, "text.verbosity")
 		}
 		if v := m["format"]; v != nil {
 			f, err := object(v, "text.format")
@@ -58,13 +95,32 @@ func responsesRequest(src map[string]any, tools *toolIndex) (map[string]any, err
 		if err != nil {
 			return nil, err
 		}
-		if err = fields(m, "reasoning", "effort"); err != nil {
+		if err = fields(m, "reasoning", "effort summary context"); err != nil {
 			return nil, err
 		}
-		if m["effort"] != "none" {
-			return nil, invalid("reasoning", "only effort:none is supported; reasoning state is not translatable")
+		// summary/context shape reasoning output, which this bridge cannot
+		// return; they are dropped rather than rejected. effort still steers the
+		// upstream model even though the reasoning text is not delivered.
+		for _, k := range []string{"summary", "context"} {
+			if v := m[k]; v != nil {
+				if _, err = stringValue(v, "reasoning."+k); err != nil {
+					return nil, err
+				}
+				*dropped = append(*dropped, "reasoning."+k)
+			}
 		}
-		dst["reasoning_effort"] = "none"
+		if v := m["effort"]; v != nil {
+			s, err := stringValue(v, "reasoning.effort")
+			if err != nil {
+				return nil, err
+			}
+			switch s {
+			case "none", "off", "minimal", "low", "medium", "high", "xhigh":
+				dst["reasoning_effort"] = s
+			default:
+				return nil, invalid("reasoning.effort", "none, off, minimal, low, medium, high or xhigh expected")
+			}
+		}
 	}
 	if v := src["max_output_tokens"]; v != nil {
 		dst["max_tokens"] = v
@@ -145,8 +201,18 @@ func responsesRequest(src map[string]any, tools *toolIndex) (map[string]any, err
 			}
 			switch m["type"] {
 			case nil, "message":
-				if err = fields(m, p, "type role content id status"); err != nil {
+				if err = fields(m, p, "type role content id status", "phase"); err != nil {
 					return nil, err
+				}
+				if v := m["phase"]; v != nil {
+					// ResponseItem.Message.phase classifies assistant text as
+					// commentary/partial_answer/final_answer. It only orders output for
+					// the producing provider, which Chat cannot express; accept any
+					// string for forward compatibility and drop it.
+					if _, err = stringValue(v, p+".phase"); err != nil {
+						return nil, err
+					}
+					*dropped = append(*dropped, p+".phase")
 				}
 				if v := m["id"]; v != nil {
 					if _, err = nonempty(v, p+".id"); err != nil {
@@ -225,6 +291,13 @@ func responsesRequest(src map[string]any, tools *toolIndex) (map[string]any, err
 				}
 				messages = append(messages, map[string]any{"role": "tool", "tool_call_id": id, "content": output})
 				assistant = nil
+			case "reasoning":
+				// Client-side reasoning state (summary/content/encrypted_content)
+				// has no Chat representation. Accept and drop it so consumers that
+				// replay their full history (Codex sends encrypted reasoning items
+				// every turn) keep working; the model re-reasons from the visible
+				// messages.
+				*dropped = append(*dropped, p)
 			default:
 				return nil, invalid(p+".type", "unsupported input item")
 			}

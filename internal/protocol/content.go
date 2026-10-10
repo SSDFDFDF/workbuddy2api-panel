@@ -23,6 +23,12 @@ func mediaError(err error) error {
 // output_text 额外允许空 annotations/logprobs。
 func textPartFrom(m map[string]any, path, typ string) (map[string]any, error) {
 	allowed := "type text"
+	if typ == "text" {
+		// Messages cache_control is an advisory caching hint with no Chat
+		// upstream equivalent; accept and drop it. Responses text blocks stay
+		// strict (cache_control is not a Responses field).
+		allowed += " cache_control"
+	}
 	if typ == "output_text" {
 		allowed += " annotations logprobs"
 		for _, key := range []string{"annotations", "logprobs"} {
@@ -143,7 +149,7 @@ func anthropicImagePart(b map[string]any, path string) (map[string]any, error) {
 	default:
 		return nil, invalid(path+".source.type", "base64 source required")
 	}
-	if err := fields(b, path, "type source"); err != nil {
+	if err := fields(b, path, "type source cache_control"); err != nil {
 		return nil, err
 	}
 	if err := fields(src, path+".source", "type media_type data"); err != nil {

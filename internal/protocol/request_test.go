@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -60,13 +61,14 @@ func TestUnsupportedAndInvalidRequests(t *testing.T) {
 		kind        Kind
 		body, param string
 	}{
-		{Responses, `{"model":"x","input":"hi"}`, "store"},
 		{Responses, `{"model":"x","store":true,"input":"hi"}`, "store"},
 		{Responses, `{"model":"x","store":false,"input":"hi","previous_response_id":"resp_x"}`, "previous_response_id"},
 		{Responses, `{"model":"x","store":false,"input":"hi","background":true}`, "background"},
-		{Responses, `{"model":"x","store":false,"input":"hi","reasoning":{"effort":"high"}}`, "reasoning"},
+		{Responses, `{"model":"x","store":false,"input":"hi","reasoning":{"effort":"extreme"}}`, "reasoning.effort"},
+		{Responses, `{"model":"x","store":false,"input":"hi","truncation":"always"}`, "truncation"},
+		{Responses, `{"model":"x","store":false,"input":"hi","include":["reasoning.encrypted_content",3]}`, "include[1]"},
+		{Responses, `{"model":"x","store":false,"input":"hi","text":{"verbosity":true}}`, "text.verbosity"},
 		{Responses, `{"model":"x","store":false,"input":"hi","text":{"format":{"type":"json_object"}}}`, "text.format"},
-		{Responses, `{"model":"x","store":false,"input":"hi","tools":[{"type":"function","name":"f","parameters":{"type":"object"}}]}`, "strict"},
 		{Responses, `{"model":"x","store":false,"input":[{"role":"user","content":[{"type":"input_image","image_url":"http://x"}]}]}`, "input"},
 		{Responses, `{"model":"x","store":false,"input":[{"type":"function_call_output","call_id":"missing","output":"ok"}]}`, "tool_call_id"},
 		{Responses, `{"model":"x","store":false,"input":"hi","unexpected":false}`, "unexpected"},
@@ -75,10 +77,11 @@ func TestUnsupportedAndInvalidRequests(t *testing.T) {
 		{Responses, `{"model":"x","model":"y","store":false,"input":"hi"}`, "duplicate"},
 		{Anthropic, `{"model":"x","messages":[{"role":"user","content":"hi"}]}`, "max_tokens"},
 		{Anthropic, `{"model":"x","max_tokens":1,"messages":[{"role":"system","content":"hi"}]}`, "role"},
-		{Anthropic, `{"model":"x","max_tokens":1,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":1}}`, "thinking"},
-		{Anthropic, `{"model":"x","max_tokens":1,"messages":[{"role":"user","content":"hi"}],"system":[{"type":"text","text":"rules","cache_control":{"type":"ephemeral"}}]}`, "cache_control"},
-		{Anthropic, `{"model":"x","max_tokens":1,"messages":[{"role":"user","content":"hi"}],"stop_sequences":["END"]}`, "stop_sequences"},
-		{Anthropic, `{"model":"x","max_tokens":1,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"bad","is_error":true}]}]}`, "is_error"},
+		{Anthropic, `{"model":"x","max_tokens":1,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"}}`, "thinking.type"},
+		{Anthropic, `{"model":"x","max_tokens":1,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":0}}`, "thinking.budget_tokens"},
+		{Anthropic, `{"model":"x","max_tokens":1,"messages":[{"role":"user","content":"hi"}],"stop_sequences":"END"}`, "stop_sequences"},
+		{Anthropic, `{"model":"x","max_tokens":1,"messages":[{"role":"user","content":"hi"}],"stop_sequences":["END",""]}`, "stop_sequences[1]"},
+		{Anthropic, `{"model":"x","max_tokens":1,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"bad","is_error":"yes"}]}]}`, "is_error"},
 		{Anthropic, `{"model":"x","max_tokens":1,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"a","name":"f","input":{}},{"type":"text","text":"after"}]}]}`, "order"},
 	}
 	for _, tt := range cases {
@@ -89,6 +92,177 @@ func TestUnsupportedAndInvalidRequests(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRelaxedDefaultsAccepted(t *testing.T) {
+	// Omitted store and omitted tool strict follow the official defaults
+	// (true is still rejected for store; strict:true is still rejected).
+	r := mustDecode(t, Responses, `{"model":"x","input":"hi","tools":[{"type":"function","name":"f","parameters":{"type":"object"}}]}`)
+	if tools := r.Chat.Object["tools"].([]any); len(tools) != 1 {
+		t.Fatal(tools)
+	}
+	for _, body := range []string{
+		`{"model":"x","store":true,"input":"hi"}`,
+		`{"model":"x","store":false,"input":"hi","tools":[{"type":"function","name":"f","parameters":{"type":"object"},"strict":true}]}`,
+	} {
+		if _, err := Decode(Responses, []byte(body)); err == nil {
+			t.Fatalf("accepted %s", body)
+		}
+	}
+}
+
+func TestAnthropicAdvisoryFieldsDropped(t *testing.T) {
+	// metadata and cache_control are accepted and dropped: they are client-side
+	// telemetry / caching hints with no Chat upstream meaning.
+	r := mustDecode(t, Anthropic, `{"model":"x","max_tokens":1,"metadata":{"user_id":"u"},`+
+		`"system":[{"type":"text","text":"rules","cache_control":{"type":"ephemeral"}}],`+
+		`"tools":[{"name":"f","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}],`+
+		`"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}`)
+	raw, _ := json.Marshal(r.Chat.Object)
+	if strings.Contains(string(raw), "cache_control") || strings.Contains(string(raw), "metadata") {
+		t.Fatalf("advisory fields forwarded: %s", raw)
+	}
+	if r.Chat.Object["messages"].([]any)[0].(map[string]any)["role"] != "system" {
+		t.Fatal(r.Chat.Object)
+	}
+}
+
+func TestClientHintsAndReasoningDropped(t *testing.T) {
+	// Codex sends these on every Responses request; none has a Chat
+	// representation, so they are accepted, ignored and reported in Dropped.
+	r := mustDecode(t, Responses, `{"model":"x","store":false,"input":"hi","service_tier":"priority",`+
+		`"client_metadata":{"x":"1"},"prompt_cache_key":"k","stream_options":{"include_usage":true},`+
+		`"safety_identifier":"s","top_logprobs":5,"include":["reasoning.encrypted_content"],`+
+		`"truncation":"auto","text":{"verbosity":"low"},`+
+		`"reasoning":{"effort":"high","summary":"auto","context":"current_turn"}}`)
+	if r.Chat.Object["reasoning_effort"] != "high" {
+		t.Fatal("effort not translated", r.Chat.Object)
+	}
+	raw, _ := json.Marshal(r.Chat.Object)
+	for _, k := range []string{"service_tier", "client_metadata", "prompt_cache_key", "stream_options", "safety_identifier", "top_logprobs", "include", "truncation", "verbosity"} {
+		if strings.Contains(string(raw), `"`+k) {
+			t.Fatalf("%s forwarded: %s", k, raw)
+		}
+	}
+	if strings.Contains(string(raw), `"reasoning":`) {
+		t.Fatalf("reasoning object forwarded: %s", raw)
+	}
+	for _, k := range []string{"service_tier", "client_metadata", "prompt_cache_key", "stream_options", "safety_identifier", "top_logprobs", "include", "truncation", "text.verbosity", "reasoning.summary", "reasoning.context"} {
+		if !containsString(r.Dropped, k) {
+			t.Fatalf("dropped list missing %s: %v", k, r.Dropped)
+		}
+	}
+}
+
+func TestResponsesReasoningHistoryDropped(t *testing.T) {
+	r := mustDecode(t, Responses, `{"model":"x","store":false,"input":[`+
+		`{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"hmm"}],"encrypted_content":"zzz"},`+
+		`{"role":"user","content":"hi"}]}`)
+	msgs := r.Chat.Object["messages"].([]any)
+	if len(msgs) != 1 || msgs[0].(map[string]any)["role"] != "user" {
+		t.Fatal(msgs)
+	}
+	if !containsString(r.Dropped, "input[0]") {
+		t.Fatalf("dropped list missing reasoning item: %v", r.Dropped)
+	}
+}
+
+func TestAnthropicThinkingAcceptedAndDropped(t *testing.T) {
+	r := mustDecode(t, Anthropic, `{"model":"x","max_tokens":10,"thinking":{"type":"enabled","budget_tokens":2048},"messages":[`+
+		`{"role":"user","content":"hi"},`+
+		`{"role":"assistant","content":[`+
+		`{"type":"thinking","thinking":"hmm","signature":"sig"},`+
+		`{"type":"redacted_thinking","data":"opaque"},`+
+		`{"type":"tool_use","id":"a","name":"f","input":{}}]},`+
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"boom","is_error":true}]}]}`)
+	if _, exists := r.Chat.Object["thinking"]; exists {
+		t.Fatal("thinking forwarded", r.Chat.Object)
+	}
+	msgs := r.Chat.Object["messages"].([]any)
+	if len(msgs) != 3 {
+		t.Fatal(msgs)
+	}
+	if calls, _ := msgs[1].(map[string]any)["tool_calls"].([]any); len(calls) != 1 {
+		t.Fatal(msgs[1])
+	}
+	if got := msgs[2].(map[string]any)["content"]; got != "[tool error] boom" {
+		t.Fatal(got)
+	}
+	for _, k := range []string{"thinking", "messages[1].content[0]", "messages[1].content[1]"} {
+		if !containsString(r.Dropped, k) {
+			t.Fatalf("dropped list missing %s: %v", k, r.Dropped)
+		}
+	}
+}
+
+func TestAnthropicToolErrorMarker(t *testing.T) {
+	for _, tc := range []struct {
+		name, content string
+		want          any
+	}{
+		{"string", `,"content":"boom"`, "[tool error] boom"},
+		{"empty-string", `,"content":""`, "[tool error]"},
+		{"omitted", ``, "[tool error]"},
+		{"empty-array", `,"content":[]`, []any{map[string]any{"type": "text", "text": "[tool error]"}}},
+		{"text-array", `,"content":[{"type":"text","text":"detail"}]`, []any{
+			map[string]any{"type": "text", "text": "[tool error]"},
+			map[string]any{"type": "text", "text": "detail"},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"model":"x","max_tokens":10,"messages":[` +
+				`{"role":"assistant","content":[{"type":"tool_use","id":"a","name":"f","input":{}}]},` +
+				`{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","is_error":true` + tc.content + `}]}]}`
+			r := mustDecode(t, Anthropic, body)
+			got := r.Chat.Object["messages"].([]any)[1].(map[string]any)["content"]
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("content=%#v want %#v", got, tc.want)
+			}
+		})
+	}
+	ok := mustDecode(t, Anthropic, `{"model":"x","max_tokens":10,"messages":[`+
+		`{"role":"assistant","content":[{"type":"tool_use","id":"a","name":"f","input":{}}]},`+
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","is_error":false,"content":"fine"}]}]}`)
+	if got := ok.Chat.Object["messages"].([]any)[1].(map[string]any)["content"]; got != "fine" {
+		t.Fatal(got)
+	}
+}
+
+func TestAnthropicStopSequencesForwarded(t *testing.T) {
+	r := mustDecode(t, Anthropic, `{"model":"x","max_tokens":10,"messages":[{"role":"user","content":"hi"}],"stop_sequences":["</block>","END"]}`)
+	stop, ok := r.Chat.Object["stop"].([]any)
+	if !ok || len(stop) != 2 || stop[0] != "</block>" || stop[1] != "END" {
+		t.Fatal(r.Chat.Object)
+	}
+	empty := mustDecode(t, Anthropic, `{"model":"x","max_tokens":10,"messages":[{"role":"user","content":"hi"}],"stop_sequences":[]}`)
+	if _, exists := empty.Chat.Object["stop"]; exists {
+		t.Fatal(empty.Chat.Object)
+	}
+}
+
+func TestResponsesMessagePhaseAcceptedAndDropped(t *testing.T) {
+	r := mustDecode(t, Responses, `{"model":"x","store":false,"input":[`+
+		`{"role":"assistant","phase":"final_answer","content":"done"},`+
+		`{"role":"user","content":"ok"}]}`)
+	msgs := r.Chat.Object["messages"].([]any)
+	if len(msgs) != 2 || msgs[0].(map[string]any)["role"] != "assistant" {
+		t.Fatal(msgs)
+	}
+	if !containsString(r.Dropped, "input[0].phase") {
+		t.Fatalf("dropped list missing phase: %v", r.Dropped)
+	}
+	if _, err := Decode(Responses, []byte(`{"model":"x","store":false,"input":[{"role":"assistant","phase":7,"content":"done"}]}`)); err == nil || !strings.Contains(err.Error(), "phase") {
+		t.Fatalf("non-string phase accepted: %v", err)
+	}
+}
+
+func containsString(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestResponsesAssistantTextForms(t *testing.T) {
@@ -128,7 +302,6 @@ func TestResponsesAssistantTextForms(t *testing.T) {
 		`{"role":"assistant","content":[{"type":"input_image","image_url":"https://example.com/x.png"}]}`,
 		`{"role":"assistant","content":[{"type":"input_text","text":42}]}`,
 		`{"role":"assistant","content":[{"type":"input_text","text":"hi","cache_control":{"type":"ephemeral"}}]}`,
-		`{"role":"assistant","phase":"commentary","content":[{"type":"input_text","text":"hi"}]}`,
 	} {
 		if _, err := Decode(Responses, []byte(`{"model":"x","store":false,"input":[`+item+`]}`)); err == nil {
 			t.Fatal("lost unsupported history information", item)

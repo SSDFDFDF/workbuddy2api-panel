@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -224,6 +225,25 @@ func TestClientIPForLogFallsBackToRemoteAddr(t *testing.T) {
 }
 
 // 超长 UA 落盘前截断：UA 是客户端可控自由文本，不截断会把归档行撑爆。
+func TestDroppedFieldsNormalization(t *testing.T) {
+	got := droppedFields([]string{
+		"client_metadata", "include", "input[0]", "input[3]", "messages[1].content[0]",
+		"input[5]", "include", "",
+	})
+	want := []string{"client_metadata", "include", "input[]", "messages[].content[]"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+	if droppedFields(nil) != nil {
+		t.Fatal("empty list must stay nil")
+	}
+	// 上限：逐项上报不会撑爆归档字段。
+	many := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i"}
+	if len(droppedFields(many)) != maxDroppedFields {
+		t.Fatal(droppedFields(many))
+	}
+}
+
 func TestCaptureClientInfoTruncatesUserAgent(t *testing.T) {
 	tr := &requestTrace{}
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)

@@ -56,8 +56,6 @@ func TestNamespaceDeclarationsChoiceAndHistory(t *testing.T) {
 func TestNamespaceRejectedSemantics(t *testing.T) {
 	for _, tools := range []string{
 		strings.Replace(nsTools, `"description":""`, `"description":"group rules"`, 1),
-		strings.Replace(nsTools, `"description":"",`, "", 1),
-		strings.Replace(nsTools, `"description":""`, `"description":null`, 1),
 		strings.Replace(nsTools, `"name":"crm"`, `"name":"crm.x"`, 1),
 		strings.Replace(nsTools, `"name":"crm"`, `"name":"中文"`, 1),
 		strings.Replace(nsTools, `"name":"lookup"`, `"name":"`+strings.Repeat("x", 65)+`"`, 1),
@@ -90,6 +88,21 @@ func TestNamespaceRejectedSemantics(t *testing.T) {
 		body := `{"model":"x","store":false,"input":[{"type":"function_call","call_id":"a","name":"old","arguments":"{}"},{"type":"function_call_output","call_id":"a","output":` + output + `}]}`
 		if _, err := Decode(Responses, []byte(body)); err == nil {
 			t.Fatal("lost tool result data", body)
+		}
+	}
+}
+
+func TestNamespaceOptionalDescriptionAndStrict(t *testing.T) {
+	// Omitting description/strict follows the official defaults; dropping an
+	// empty description loses nothing, and strict:false still means the same.
+	for _, tools := range []string{
+		strings.Replace(nsTools, `,"description":""`, ``, 1),
+		strings.Replace(nsTools, `"description":""`, `"description":null`, 1),
+		strings.Replace(nsTools, `,"strict":false`, ``, 1),
+	} {
+		r := mustDecode(t, Responses, `{"model":"x","store":false,"input":"hi","tools":`+tools+`}`)
+		if r.tools.byChat["ns_3_crm_lookup"] != (toolIdentity{name: "lookup", namespace: "crm"}) {
+			t.Fatal("alias missing", tools)
 		}
 	}
 }

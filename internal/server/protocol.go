@@ -49,14 +49,10 @@ func (h *Handler) withMessagesAuth(next http.HandlerFunc) http.HandlerFunc {
 			out.Error(w, 401, "invalid_api_key", "missing or invalid API key")
 			return
 		}
-		if vs := r.Header.Values("Anthropic-Version"); len(vs) != 1 || vs[0] != "2023-06-01" {
-			out.Error(w, 400, "invalid_request", "anthropic-version: 2023-06-01 is required")
-			return
-		}
-		if len(r.Header.Values("Anthropic-Beta")) > 0 {
-			out.Error(w, 400, "unsupported_parameter", "anthropic-beta features are not supported")
-			return
-		}
+		// anthropic-version / anthropic-beta are client-facing protocol
+		// declarations that never reach the Chat upstream. The bridge implements
+		// the 2023-06-01 subset and ignores unknown versions/beta tags; actual
+		// unsupported features are rejected per-field during decoding.
 		next(w, r)
 	}
 }
