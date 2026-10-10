@@ -1,11 +1,11 @@
-/* StackedBars 时序堆叠柱图（全站唯一时间序列图表）：真实时间轴、
-   均值线、峰值标注、日界分隔、逐柱 tooltip。prompt/completion 两段。 */
-import { useMemo } from 'react';
+/* StackedBars 时序堆叠柱图：简洁明了的时间序列用量图表。
+   真实时间轴、清晰网格、双段堆叠（Prompt 读入 / Completion 产出）、交互悬浮 Tooltip。 */
+import { useMemo, useState, useRef } from 'react';
 import { fmtTok } from '../fmt';
 
 export interface ChartPoint {
   t: number; // 毫秒
-  raw: string; // 原始标签（tooltip 首行）
+  raw: string; // 原始标签
   pt: number;
   ct: number;
   tt: number;
@@ -13,46 +13,65 @@ export interface ChartPoint {
   scope?: string;
 }
 
-function tickLabel(p: { t: number; scope?: string }): string {
+function formatTickLabel(p: { t: number; scope?: string }): string {
   const d = new Date(p.t);
   const p2 = (n: number) => String(n).padStart(2, '0');
-  return p.scope === 'day' ? `${d.getMonth() + 1}-${p2(d.getDate())}` : p2(d.getHours()) + ':00';
+  return p.scope === 'day' ? `${d.getMonth() + 1}-${p2(d.getDate())}` : `${p2(d.getHours())}:00`;
+}
+
+function formatFullTime(p: ChartPoint): string {
+  const d = new Date(p.t);
+  const p2 = (n: number) => String(n).padStart(2, '0');
+  const dateStr = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+  if (p.scope === 'day') return dateStr;
+  return `${dateStr} ${p2(d.getHours())}:${p2(d.getMinutes())}`;
 }
 
 export function StackedBars({ pts, tick }: { pts: ChartPoint[]; tick?: (p: { t: number; scope?: string }) => string }) {
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
   const geo = useMemo(() => {
     if (!pts.length) return null;
-    const W = 1200;
-    const H = 120;
-    const PL = 48;
-    const PR = 12;
-    const PT = 10;
-    const PB = 22;
+    const W = 1000;
+    const H = 150;
+    const PL = 46;
+    const PR = 16;
+    const PT = 14;
+    const PB = 24;
     const iw = W - PL - PR;
     const ih = H - PT - PB;
     const t0 = pts[0].t;
     const span = Math.max(1, pts[pts.length - 1].t - t0);
-    const max = Math.max(1, ...pts.map((p) => p.tt));
-    const peak = pts.reduce((a, b) => (b.tt > a.tt ? b : a), pts[0]);
-    const avg = pts.reduce((s, p) => s + p.tt, 0) / pts.length;
+    const maxVal = Math.max(1, ...pts.map((p) => p.tt));
 
+    // 计算柱宽：留出适度间距，不拥挤也不过于纤细
     let minGap = Infinity;
     for (let i = 1; i < pts.length; i++) minGap = Math.min(minGap, pts[i].t - pts[i - 1].t);
     if (!isFinite(minGap) || minGap <= 0) minGap = span;
-    const bw = Math.max(2, Math.min(30, iw * (minGap / span) * 0.7));
+    const rawBw = iw * (minGap / span) * 0.65;
+    const bw = Math.max(3.5, Math.min(22, rawBw));
 
     const xOf = (t: number) => PL + bw / 2 + ((t - t0) / span) * Math.max(1, iw - bw);
-    const yOf = (v: number) => PT + ih - ih * (v / max);
-    return { W, H, PL, PR, PT, PB, iw: 0, ih, t0, span, max, peak, avg, bw, xOf, yOf };
+    const yOf = (v: number) => PT + ih - ih * (v / maxVal);
+
+    return { W, H, PL, PR, PT, PB, iw, ih, t0, span, maxVal, bw, xOf, yOf };
   }, [pts]);
 
-  if (!geo) return null;
-  const { W, H, PL, PR, PT, ih, max, peak, avg, bw, xOf, yOf } = geo;
-  const yBase = PT + ih;
-  const tl = tick || tickLabel;
+  if (!geo || !pts.length) {
+    return (
+      <div className="flex h-32 items-center justify-center text-[12.5px] text-[var(--ink-3)]">
+        暂无时序数据
+      </div>
+    );
+  }
 
-  // x 轴刻度：等距取 6 个位置，取最近实际柱子做标签。
-  const TICKS = Math.min(6, pts.length);
+  const { W, H, PL, PR, PT, ih, maxVal, bw, xOf } = geo;
+  const yBase = PT + ih;
+  const tl = tick || formatTickLabel;
+
+  // X 轴刻度：等距选取 5-6 个关键时间点
+  const TICKS = Math.min(6, Math.max(2, pts.length));
   const used = new Set<number>();
   const ticks: { x: number; anchor: 'start' | 'middle' | 'end'; text: string }[] = [];
   for (let k = 0; k < TICKS; k++) {
@@ -69,104 +88,200 @@ export function StackedBars({ pts, tick }: { pts: ChartPoint[]; tick?: (p: { t: 
     if (used.has(bi)) continue;
     used.add(bi);
     const cx = xOf(pts[bi].t);
-    const anchor = cx < PL + 14 ? 'start' : cx > W - PR - 14 ? 'end' : 'middle';
+    const anchor = cx < PL + 20 ? 'start' : cx > W - PR - 20 ? 'end' : 'middle';
     ticks.push({ x: Math.max(PL, Math.min(W - PR, cx)), anchor, text: tl({ t: pts[bi].t, scope: pts[bi].scope }) });
   }
 
-  // 跨日分隔线
-  const dayLines: string[] = [];
-  let prevDay: number | null = null;
-  for (const p of pts) {
-    const d = new Date(p.t).getDate();
-    if (prevDay !== null && d !== prevDay) dayLines.push(xOf(p.t).toFixed(1));
-    prevDay = d;
-  }
-
-  const px = xOf(peak.t);
-  const py = yOf(peak.tt);
-  const peakAnchor = px > W - PR - 90 ? 'end' : 'middle';
+  // 悬浮点与 Tooltip 位置
+  const activePt = hoverIdx !== null && pts[hoverIdx] ? pts[hoverIdx] : null;
+  const activeX = activePt ? xOf(activePt.t) : 0;
+  const tooltipLeftPercent = activePt ? (activeX / W) * 100 : 0;
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" preserveAspectRatio="xMidYMid meet">
-      <defs>
-        <linearGradient id="usGradP" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" style={{ stopColor: 'var(--accent)', stopOpacity: 1 }} />
-          <stop offset="1" style={{ stopColor: 'var(--accent)', stopOpacity: 0.6 }} />
-        </linearGradient>
-        <linearGradient id="usGradC" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" style={{ stopColor: 'var(--ok)', stopOpacity: 1 }} />
-          <stop offset="1" style={{ stopColor: 'var(--ok)', stopOpacity: 0.6 }} />
-        </linearGradient>
-      </defs>
+    <div
+      ref={containerRef}
+      className="relative select-none"
+      onMouseLeave={() => setHoverIdx(null)}
+    >
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        className="w-full overflow-visible"
+        role="img"
+        preserveAspectRatio="xMidYMid meet"
+      >
+        <defs>
+          <linearGradient id="tokGradPrompt" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="var(--accent)" stopOpacity="0.95" />
+            <stop offset="100%" stopColor="var(--accent)" stopOpacity="0.6" />
+          </linearGradient>
+          <linearGradient id="tokGradCompletion" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="var(--ok)" stopOpacity="0.95" />
+            <stop offset="100%" stopColor="var(--ok)" stopOpacity="0.6" />
+          </linearGradient>
+        </defs>
 
-      {/* y 轴网格 + 刻度 */}
-      {Array.from({ length: 4 }, (_, i) => {
-        const y = PT + ih - (ih * i) / 3;
-        return (
-          <g key={i}>
-            <line className="stroke-[var(--line-soft)]" x1={PL} y1={y} x2={W - PR} y2={y} />
-            <text className="fill-[var(--ink-3)] text-[10px] tabular" x={PL - 5} y={y + 3} textAnchor="end">
-              {fmtTok((max * i) / 3)}
-            </text>
-          </g>
-        );
-      })}
+        {/* Y 轴刻度 + 水平背景虚线 */}
+        {[0, 1, 2, 3].map((step) => {
+          const y = PT + ih - (ih * step) / 3;
+          const val = (maxVal * step) / 3;
+          return (
+            <g key={step}>
+              <line
+                x1={PL}
+                y1={y}
+                x2={W - PR}
+                y2={y}
+                stroke="var(--line-soft)"
+                strokeDasharray={step === 0 ? undefined : '3 3'}
+                strokeOpacity={step === 0 ? 0.9 : 0.6}
+              />
+              <text
+                x={PL - 6}
+                y={y + 3.5}
+                textAnchor="end"
+                className="fill-[var(--ink-3)] text-[10px] tabular"
+              >
+                {fmtTok(val)}
+              </text>
+            </g>
+          );
+        })}
 
-      {/* 均值线 */}
-      {avg > 0 && avg < max && (
-        <g>
-          <line className="stroke-[var(--warn)]" strokeDasharray="4 3" opacity="0.7" x1={PL} y1={yOf(avg)} x2={W - PR} y2={yOf(avg)} />
-          <text className="fill-[var(--warn)] text-[10px] tabular" x={PL + 5} y={yOf(avg) - 3} textAnchor="start">
-            均值 {fmtTok(avg)}
+        {/* 悬浮列背景高亮柱 */}
+        {activePt && (
+          <rect
+            x={activeX - bw * 1.2}
+            y={PT}
+            width={bw * 2.4}
+            height={ih}
+            fill="var(--accent)"
+            opacity={0.08}
+            rx={3}
+          />
+        )}
+
+        {/* 柱状条绘制（双段堆叠） */}
+        {pts.map((p, i) => {
+          const x = xOf(p.t) - bw / 2;
+          const isHovered = hoverIdx === i;
+          const hTot = p.tt > 0 ? Math.max(2, ih * (p.tt / maxVal)) : 0;
+          const hP = p.tt > 0 ? (p.pt ? Math.max(1, (hTot * p.pt) / p.tt) : 0) : 0;
+          const hC = p.tt > 0 ? Math.max(0, hTot - hP) : 0;
+
+          return (
+            <g
+              key={i}
+              className="cursor-pointer transition-opacity duration-150"
+              style={{ opacity: hoverIdx === null || isHovered ? 1 : 0.6 }}
+              onMouseEnter={() => setHoverIdx(i)}
+            >
+              {/* 隐藏的透明触发区域，方便鼠标交互 */}
+              <rect
+                x={xOf(p.t) - bw * 1.5}
+                y={PT}
+                width={bw * 3}
+                height={ih}
+                fill="transparent"
+              />
+
+              {/* 读入 Prompt 柱 */}
+              {hP > 0 && (
+                <rect
+                  x={x.toFixed(1)}
+                  y={(yBase - hP).toFixed(1)}
+                  width={bw.toFixed(1)}
+                  height={hP.toFixed(1)}
+                  fill="url(#tokGradPrompt)"
+                  rx={hC > 0 ? 0 : 2}
+                />
+              )}
+
+              {/* 产出 Completion 柱 */}
+              {hC > 0 && (
+                <rect
+                  x={x.toFixed(1)}
+                  y={(yBase - hP - hC).toFixed(1)}
+                  width={bw.toFixed(1)}
+                  height={hC.toFixed(1)}
+                  fill="url(#tokGradCompletion)"
+                  rx={2}
+                />
+              )}
+            </g>
+          );
+        })}
+
+        {/* X 轴底部基线 */}
+        <line x1={PL} y1={yBase} x2={W - PR} y2={yBase} stroke="var(--line)" />
+
+        {/* X 轴时间刻度文字 */}
+        {ticks.map((t, i) => (
+          <text
+            key={i}
+            x={t.x.toFixed(1)}
+            y={yBase + 16}
+            textAnchor={t.anchor}
+            className="fill-[var(--ink-3)] text-[10.5px] tabular"
+          >
+            {t.text}
           </text>
-        </g>
+        ))}
+      </svg>
+
+      {/* 现代悬浮 Tooltip 气泡 */}
+      {activePt && (
+        <div
+          className="pointer-events-none absolute top-1 z-30 -translate-x-1/2 rounded-lg border border-[var(--line)] bg-[var(--surface)]/95 px-3 py-2 text-[11.5px] shadow-lg backdrop-blur"
+          style={{
+            left: `${Math.max(16, Math.min(84, tooltipLeftPercent))}%`,
+          }}
+        >
+          <div className="mb-1 border-b border-[var(--line-soft)] pb-1 font-medium text-[var(--ink)]">
+            {formatFullTime(activePt)}
+          </div>
+          <div className="flex items-center justify-between gap-3 text-[12px] font-semibold text-[var(--ink)]">
+            <span>总计 Token</span>
+            <span className="tabular text-[var(--accent)]">{activePt.tt.toLocaleString()}</span>
+          </div>
+          <div className="mt-1 flex flex-col gap-0.5 text-[11px] text-[var(--ink-2)]">
+            <div className="flex items-center justify-between gap-3">
+              <span className="inline-flex items-center gap-1.5">
+                <i className="h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
+                读 (Prompt)
+              </span>
+              <span className="tabular font-medium text-[var(--ink)]">
+                {activePt.pt.toLocaleString()}{' '}
+                <span className="text-[10px] text-[var(--ink-3)]">
+                  ({activePt.tt ? Math.round((activePt.pt / activePt.tt) * 100) : 0}%)
+                </span>
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <span className="inline-flex items-center gap-1.5">
+                <i className="h-1.5 w-1.5 rounded-full bg-[var(--ok)]" />
+                取 (Completion)
+              </span>
+              <span className="tabular font-medium text-[var(--ink)]">
+                {activePt.ct.toLocaleString()}{' '}
+                <span className="text-[10px] text-[var(--ink-3)]">
+                  ({activePt.tt ? Math.round((activePt.ct / activePt.tt) * 100) : 0}%)
+                </span>
+              </span>
+            </div>
+            {activePt.req > 0 && (
+              <div className="flex items-center justify-between gap-3 text-[var(--ink-3)]">
+                <span>请求次数</span>
+                <span className="tabular">{activePt.req} 次</span>
+              </div>
+            )}
+          </div>
+        </div>
       )}
-
-      {/* 柱子（每柱一个 <g> 包住 <title>，tooltip 跟随该柱） */}
-      {pts.map((p, i) => {
-        const x = xOf(p.t) - bw / 2;
-        const hTot = ih * (p.tt / max);
-        const hP = p.tt ? hTot * (p.pt / p.tt) : 0;
-        const hC = Math.max(p.tt && p.ct ? 1 : 0, hTot - hP);
-        return (
-          <g key={i}>
-            <title>
-              {p.raw}  {fmtTok(p.pt)} prompt / {fmtTok(p.ct)} completion / {p.req} 次
-            </title>
-            {hP > 0 && (
-              <rect className="usbar" x={x.toFixed(2)} y={(yBase - hP).toFixed(2)} width={bw.toFixed(2)} height={hP.toFixed(2)} fill="url(#usGradP)" {...(hC > 0 ? {} : { rx: 1.5 })} />
-            )}
-            {hC > 0 && (
-              <rect className="usbar" x={x.toFixed(2)} y={(yBase - hP - hC).toFixed(2)} width={bw.toFixed(2)} height={hC.toFixed(2)} fill="url(#usGradC)" rx={1.5} />
-            )}
-          </g>
-        );
-      })}
-
-      {/* 峰值标注 */}
-      <text className="fill-[var(--ink-2)] text-[11px] tabular font-medium" x={Math.max(PL, Math.min(W - PR, px)).toFixed(1)} y={Math.max(10, py - 5).toFixed(1)} textAnchor={peakAnchor}>
-        峰值 {fmtTok(peak.tt)}
-      </text>
-
-      {/* 基线 */}
-      <line className="stroke-[var(--line)]" x1={PL} y1={yBase} x2={W - PR} y2={yBase} />
-
-      {/* x 轴刻度 */}
-      {ticks.map((t, i) => (
-        <text key={i} className="fill-[var(--ink-3)] text-[11px] tabular" x={t.x.toFixed(1)} y={PT + ih + 15} textAnchor={t.anchor}>
-          {t.text}
-        </text>
-      ))}
-
-      {/* 日界分隔 */}
-      {dayLines.map((x, i) => (
-        <line key={i} className="stroke-[var(--line-soft)]" x1={x} y1={PT} x2={x} y2={PT + ih} opacity="0.45" />
-      ))}
-    </svg>
+    </div>
   );
 }
 
-/** 后端 series 点 → ChartPoint（丢掉解析失败的点，不让 NaN 传染）。 */
+/** 后端 series 点 → ChartPoint（丢弃无效点，防御 NaN）。 */
 export function toChartPoints(
   series: { t: string; scope?: string; prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; requests?: number }[],
 ): ChartPoint[] {

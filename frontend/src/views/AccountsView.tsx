@@ -96,24 +96,26 @@ function AccountRow({ s, onAction, onTasks, proxyConfigured }: { s: OverviewAcco
       : '积分';
 
   return (
-    <tr className={rowCls} title={'uid: ' + s.uid}>
-      <td className="w-[3px] p-0">
-        <i className={'block h-full w-[3px] rounded ' + (frozen || s.paused ? 'bg-[var(--warn)]' : s.disabled ? 'bg-[var(--bad)]' : 'bg-[var(--ok)]')} />
-      </td>
-      <td>
-        <div className="font-medium">
-          {s.nickname || <span className="text-[var(--ink-3)]">未命名</span>}
-          {s.realm === 'global' && <RealmTag>国际版</RealmTag>}
-          {s.enterprise && <RealmTag>企业版</RealmTag>}
+    <tr className={'transition-colors hover:bg-[var(--surface-2)]/50 ' + rowCls} title={'uid: ' + s.uid}>
+      <td className="px-3.5 py-2.5">
+        <div className="flex items-center gap-1.5">
+          <span className={'h-2 w-2 rounded-full shrink-0 ' + (frozen || s.paused ? 'bg-[var(--warn)]' : s.disabled ? 'bg-[var(--bad)]' : 'bg-[var(--ok)]')} />
+          <div className="min-w-0">
+            <div className="font-medium text-[var(--ink)]">
+              {s.nickname || <span className="text-[var(--ink-3)]">未命名</span>}
+              {s.realm === 'global' && <RealmTag>国际版</RealmTag>}
+              {s.enterprise && <RealmTag>企业版</RealmTag>}
+            </div>
+            <div className="font-[family-name:var(--mono)] text-[11px] text-[var(--ink-3)]">{s.uid.length > 16 ? s.uid.slice(0, 16) + '…' : s.uid}</div>
+          </div>
         </div>
-        <div className="font-[family-name:var(--mono)] text-[11px] text-[var(--ink-3)]">{s.uid.length > 16 ? s.uid.slice(0, 16) + '…' : s.uid}</div>
       </td>
-      <td>
+      <td className="px-3.5 py-2.5">
         {tag}
         {s.reason && <div className="mt-0.5 text-[11.5px] text-[var(--ink-3)]">{s.reason}</div>}
         <RateLimits rows={s.rate_limited_models} />
       </td>
-      <td className="tabular" title={credTip}>
+      <td className="tabular px-3.5 py-2.5" title={credTip}>
         {unlimited ? '不限' : s.credits == null ? '—' : <>{s.credits}{s.credits_total && s.credits_total > 0 ? <span className="text-[var(--ink-3)]">/{s.credits_total}</span> : null}</>}
         {!unlimited && pct > 0 && (
           <div className="mt-1">
@@ -121,18 +123,18 @@ function AccountRow({ s, onAction, onTasks, proxyConfigured }: { s: OverviewAcco
           </div>
         )}
       </td>
-      <td className="tabular">
+      <td className="tabular px-3.5 py-2.5">
         {s.success_count || 0} <span className="text-[var(--ink-3)]">/</span> <span className="text-[var(--bad)]">{s.err_total || 0}</span>
       </td>
-      <td className="tabular">{s.in_flight || 0}</td>
-      <td className="tabular text-[12px]">
+      <td className="tabular px-3.5 py-2.5 text-[var(--ink)]">{s.in_flight || 0}</td>
+      <td className="tabular px-3.5 py-2.5 text-[12px] text-[var(--ink-2)]">
         <span title={`最近一次：${tu.request_count || 0} 次 / ${fmtTok(tu.total_tokens)} / ${fmtLocalDateTime(Date.now())}`}>
           {tu.request_count || 0} 次 · {tu.total_tokens == null ? '—' : fmtTok(tu.total_tokens)}
         </span>
       </td>
-      <td className="tabular text-[var(--ink-3)]">{ago(s.last_success)}</td>
-      <td>
-        <div className="flex flex-wrap gap-1.5">
+      <td className="tabular px-3.5 py-2.5 text-[var(--ink-3)]">{ago(s.last_success)}</td>
+      <td className="px-3.5 py-2.5 text-right">
+        <div className="flex flex-wrap justify-end gap-1.5">
           {!s.enterprise && (
             <button className={btnXsGhost} onClick={() => onAction('checkin', s)} title={s.checkin_done ? '今日已签到；点击可重新签到并刷新余额' : undefined}>
               {s.checkin_done ? '已签' : '签到'}
@@ -202,25 +204,25 @@ function ModelLocksTable({ rows }: { rows: { model: string; realm?: string; stat
     return ms ? dur(Math.max(0, Math.round((ms - Date.now()) / 1000))) : '—';
   };
   return (
-    <tbody>
+    <tbody className="divide-y divide-[var(--line-soft)]/60">
       {list.map((r, i) => {
         const st = STATE[r.state || ''] || ['mute', r.state || '—'];
         return (
-          <tr key={i}>
-            <td className="font-[family-name:var(--mono)] text-[12.5px]">{r.model}</td>
-            <td>
+          <tr key={i} className="transition-colors hover:bg-[var(--surface-2)]/50">
+            <td className="px-3.5 py-2.5 font-[family-name:var(--mono)] text-[12.5px] text-[var(--ink)] font-medium">{r.model}</td>
+            <td className="px-3.5 py-2.5">
               <RealmTag>{r.realm === 'global' ? '国际版' : '国内版'}</RealmTag>
             </td>
-            <td>
+            <td className="px-3.5 py-2.5">
               <Tag tone={st[0]}>{st[1]}</Tag>
             </td>
-            <td className="tabular">
+            <td className="tabular px-3.5 py-2.5">
               {r.servable || 0} / {r.total || 0}
             </td>
-            <td className="tabular">{r.locked || 0}</td>
-            <td className="tabular">{left(r.unlock_at || r.fully_unlock_at)}</td>
-            <td className="tabular">{left(r.fully_unlock_at)}</td>
-            <td className="max-w-[240px] text-[12px] text-[var(--ink-3)]">{r.reason || '—'}</td>
+            <td className="tabular px-3.5 py-2.5">{r.locked || 0}</td>
+            <td className="tabular px-3.5 py-2.5">{left(r.unlock_at || r.fully_unlock_at)}</td>
+            <td className="tabular px-3.5 py-2.5">{left(r.fully_unlock_at)}</td>
+            <td className="max-w-[240px] px-3.5 py-2.5 text-[12px] text-[var(--ink-3)]">{r.reason || '—'}</td>
           </tr>
         );
       })}
@@ -289,9 +291,9 @@ export function AccountsView() {
       <ExpiryCard packages={packages} onLoaded={setPackages} />
 
       {/* 账号表 */}
-      <div className="rounded-xl border border-[var(--line)] bg-[var(--surface)]">
-        <header className="flex items-center gap-2.5 px-4 py-3">
-          <h3 className="text-[14px] font-semibold">账号池</h3>
+      <div className="rounded-xl border border-[var(--line)] bg-[var(--surface)] shadow-xs overflow-hidden">
+        <header className="flex flex-wrap items-center gap-2.5 px-4 py-3 border-b border-[var(--line-soft)] bg-[var(--surface)]">
+          <h3 className="text-[14px] font-semibold text-[var(--ink)]">账号池</h3>
           <span className="flex-1" />
           {d?.in_flight_full ? <span className="text-[12px] text-[var(--warn)]">{d.in_flight_full} 个账号在途占满</span> : null}
           <button className={btnXs} onClick={() => void batch('checkin_all', '全部签到已开始，结果见日志')}>
@@ -310,16 +312,15 @@ export function AccountsView() {
         <div className="overflow-x-auto">
           <table className="w-full border-collapse text-[13px]">
             <thead>
-              <tr className="border-y border-[var(--line-soft)] bg-[var(--surface-2)]/50 text-left text-[11.5px] font-semibold text-[var(--ink-2)]">
-                <th className="w-[3px]" aria-hidden="true" />
-                <th className="px-3.5 py-2.5">账号</th>
-                <th className="px-3.5 py-2.5">状态</th>
-                <th className="px-3.5 py-2.5">积分</th>
-                <th className="px-3.5 py-2.5">成功 / 失败</th>
-                <th className="px-3.5 py-2.5">在途</th>
-                <th className="px-3.5 py-2.5">用量</th>
-                <th className="px-3.5 py-2.5">最近成功</th>
-                <th className="px-3.5 py-2.5 text-right">操作</th>
+              <tr className="border-b border-[var(--line-soft)] bg-[var(--surface-2)]/50 text-left text-[11.5px] font-semibold text-[var(--ink-2)]">
+                <th className="px-3.5 py-2.5 font-medium">账号</th>
+                <th className="px-3.5 py-2.5 font-medium">状态</th>
+                <th className="px-3.5 py-2.5 font-medium">积分</th>
+                <th className="px-3.5 py-2.5 font-medium">成功 / 失败</th>
+                <th className="px-3.5 py-2.5 font-medium">在途</th>
+                <th className="px-3.5 py-2.5 font-medium">用量</th>
+                <th className="px-3.5 py-2.5 font-medium">最近成功</th>
+                <th className="px-3.5 py-2.5 text-right font-medium">操作</th>
               </tr>
             </thead>
             {pagedAccounts.length ? (
@@ -331,7 +332,7 @@ export function AccountsView() {
             ) : (
               <tbody>
                 <tr>
-                  <td colSpan={9}>
+                  <td colSpan={8}>
                     <Empty big="账号池是空的">点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</Empty>
                   </td>
                 </tr>
@@ -354,24 +355,24 @@ export function AccountsView() {
       </div>
 
       {/* 模型锁池 */}
-      <div className="rounded-xl border border-[var(--line)] bg-[var(--surface)]">
-        <header className="flex items-center gap-2.5 px-4 py-3">
-          <h3 className="text-[14px] font-semibold">
+      <div className="rounded-xl border border-[var(--line)] bg-[var(--surface)] shadow-xs overflow-hidden">
+        <header className="flex flex-wrap items-center gap-2.5 px-4 py-3 border-b border-[var(--line-soft)] bg-[var(--surface)]">
+          <h3 className="text-[14px] font-semibold text-[var(--ink)]">
             模型锁池 <span className="ml-1 text-[12px] font-normal text-[var(--ink-3)]">哪些模型不能用、还要锁多久</span>
           </h3>
         </header>
         <div className="overflow-x-auto">
           <table className="w-full border-collapse text-[13px]">
             <thead>
-              <tr className="border-y border-[var(--line-soft)] text-left text-[11.5px] text-[var(--ink-3)]">
-                <th className="px-3 py-2 font-medium">模型</th>
-                <th className="px-3 py-2 font-medium">域</th>
-                <th className="px-3 py-2 font-medium">状态</th>
-                <th className="px-3 py-2 font-medium">可选 / 总数</th>
-                <th className="px-3 py-2 font-medium">锁定账号</th>
-                <th className="px-3 py-2 font-medium">最早解锁</th>
-                <th className="px-3 py-2 font-medium">全池解锁</th>
-                <th className="px-3 py-2 font-medium">原因</th>
+              <tr className="border-b border-[var(--line-soft)] bg-[var(--surface-2)]/50 text-left text-[11.5px] font-semibold text-[var(--ink-2)]">
+                <th className="px-3.5 py-2.5 font-medium">模型</th>
+                <th className="px-3.5 py-2.5 font-medium">域</th>
+                <th className="px-3.5 py-2.5 font-medium">状态</th>
+                <th className="px-3.5 py-2.5 font-medium">可选 / 总数</th>
+                <th className="px-3.5 py-2.5 font-medium">锁定账号</th>
+                <th className="px-3.5 py-2.5 font-medium">最早解锁</th>
+                <th className="px-3.5 py-2.5 font-medium">全池解锁</th>
+                <th className="px-3.5 py-2.5 font-medium">原因</th>
               </tr>
             </thead>
             <ModelLocksTable rows={d?.model_locks} />

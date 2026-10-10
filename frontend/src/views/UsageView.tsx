@@ -207,24 +207,28 @@ export function UsageView() {
               />
             </div>
 
-            {/* Token 时序图（缩小紧凑视图） */}
-            <div className="mt-3.5 rounded-lg border border-[var(--line-soft)] bg-[var(--surface-2)]/40 p-3">
-              <div className="mb-2 flex items-center gap-2 text-[11.5px] text-[var(--ink-3)]">
-                <span className="font-semibold text-[var(--ink-2)]">Token 时序</span>
+            {/* Token 时序图（简洁明了视图） */}
+            <div className="mt-3.5 rounded-lg border border-[var(--line-soft)] bg-[var(--surface-2)]/30 p-3.5">
+              <div className="mb-2.5 flex flex-wrap items-center gap-3 text-[12px] text-[var(--ink-3)]">
+                <span className="font-semibold text-[var(--ink)]">Token 时序</span>
                 {pts.length ? (
-                  <span className="tabular">
-                    {pts.length} 个点 · 峰值 {fmtTok(peak ? peak.tt : 0)} · 均值 {fmtTok(avg)}
+                  <span className="tabular text-[11.5px] text-[var(--ink-3)]">
+                    {pts.length} 个时间桶 · 峰值 <span className="font-medium text-[var(--ink-2)]">{fmtTok(peak ? peak.tt : 0)}</span> · 均值 <span className="font-medium text-[var(--ink-2)]">{fmtTok(avg)}</span>
                   </span>
                 ) : (
                   <span>—</span>
                 )}
                 <span className="flex-1" />
-                <span className="flex items-center gap-1.5 tabular text-[11px]">
-                  <i className="h-2 w-2 rounded-xs bg-[var(--accent)]" />读 (Prompt)
-                  <i className="ml-2 h-2 w-2 rounded-xs bg-[var(--ok)]" />取 (Completion)
+                <span className="flex items-center gap-3 tabular text-[11px]">
+                  <span className="inline-flex items-center gap-1.5 text-[var(--ink-2)]">
+                    <i className="h-2 w-2 rounded-xs bg-[var(--accent)]" />读 (Prompt)
+                  </span>
+                  <span className="inline-flex items-center gap-1.5 text-[var(--ink-2)]">
+                    <i className="h-2 w-2 rounded-xs bg-[var(--ok)]" />取 (Completion)
+                  </span>
                 </span>
               </div>
-              <div className="max-h-[140px] overflow-hidden">
+              <div>
                 {pts.length ? <StackedBars pts={pts} /> : <Empty>暂无用量数据，发起一次对话后再刷新。</Empty>}
               </div>
             </div>
