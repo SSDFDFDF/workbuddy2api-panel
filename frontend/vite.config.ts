@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { mockApi } from './vite-mock';
 
 /* stripCrossorigin：清掉 vite 注入的 crossorigin 属性。
    面板是同源资源（go:embed 下发，无 CDN/CORS），crossorigin 只会让浏览器
@@ -32,28 +33,37 @@ function stripCrossorigin(): Plugin {
 // - base: './' 让资源引用为相对路径（Go 端按 /panel/ 前缀分发）；
 // - 固定文件名：嵌入清单稳定，CSP script-src 'self' 直接命中；
 // - emptyOutDir：构建即唯一真相。
-export default defineConfig({
-  plugins: [react(), tailwindcss(), stripCrossorigin()],
-  base: './',
-  build: {
-    outDir: '../internal/panel/web',
-    emptyOutDir: true,
-    assetsInlineLimit: 0,
-    cssCodeSplit: false,
-    rollupOptions: {
-      output: {
-        entryFileNames: 'app.js',
-        chunkFileNames: 'app.js',
-        assetFileNames: 'app.css',
-        // 单入口单 chunk：面板逻辑不大，拆 chunk 只会让 CSP 名单与 embed 清单复杂化。
-        inlineDynamicImports: true,
+export default defineConfig(({ mode }) => {
+  const isMock = mode === 'mock';
+  const plugins: Plugin[] = [react(), tailwindcss(), stripCrossorigin()];
+  
+  if (isMock) {
+    plugins.push(mockApi());
+  }
+
+  return {
+    plugins,
+    base: './',
+    build: {
+      outDir: '../internal/panel/web',
+      emptyOutDir: true,
+      assetsInlineLimit: 0,
+      cssCodeSplit: false,
+      rollupOptions: {
+        output: {
+          entryFileNames: 'app.js',
+          chunkFileNames: 'app.js',
+          assetFileNames: 'app.css',
+          // 单入口单 chunk：面板逻辑不大，拆 chunk 只会让 CSP 名单与 embed 清单复杂化。
+          inlineDynamicImports: true,
+        },
       },
     },
-  },
-  server: {
-    // 本地开发代理：前端跑在 5173，API 转发到本机 Go 网关。
-    proxy: {
-      '/panel/api': 'http://127.0.0.1:7863',
+    server: {
+      // 本地开发代理：前端跑在 5173，API 转发到本机 Go 网关（Mock 模式除外）。
+      proxy: isMock ? undefined : {
+        '/panel/api': 'http://127.0.0.1:7863',
+      },
     },
-  },
+  };
 });

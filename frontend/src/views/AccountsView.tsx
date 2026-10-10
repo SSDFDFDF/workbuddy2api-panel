@@ -5,7 +5,7 @@ import { api } from '../api';
 import { accountAction } from '../actions';
 import { toast } from '../toast';
 import type { OverviewAccount, PackageAccount } from '../types';
-import { Kpi, Tag, RealmTag, SegBar, Empty, Pager } from '../components/ui';
+import { Kpi, Tag, RealmTag, Empty, Pager } from '../components/ui';
 import { Dialog } from '../components/Dialog';
 import { btnXs, btnXsGhost, btnXsPrimary } from '../components/buttons';
 import { TasksDialog } from './TasksDialog';
@@ -62,10 +62,10 @@ function LimitsDialog({ uid, rows, onClose }: { uid: string; rows: NonNullable<O
       <table className="w-full border-collapse text-[12.5px]">
         <thead>
           <tr className="border-b border-[var(--line-soft)] text-left text-[11.5px] text-[var(--ink-2)]">
-            <th className="px-2 py-1.5 font-medium">模型</th>
-            <th className="px-2 py-1.5 font-medium">状态</th>
-            <th className="px-2 py-1.5 font-medium">剩余</th>
-            <th className="px-2 py-1.5 font-medium">解封时刻</th>
+            <th className="px-2 py-1.5 font-medium whitespace-nowrap">模型</th>
+            <th className="px-2 py-1.5 font-medium whitespace-nowrap">状态</th>
+            <th className="px-2 py-1.5 font-medium whitespace-nowrap">剩余</th>
+            <th className="px-2 py-1.5 font-medium whitespace-nowrap">解封时刻</th>
             <th className="px-2 py-1.5 font-medium">上游原因</th>
           </tr>
         </thead>
@@ -74,13 +74,13 @@ function LimitsDialog({ uid, rows, onClose }: { uid: string; rows: NonNullable<O
             const x = limitInfo(r);
             return (
               <tr key={i}>
-                <td className="px-2 py-1.5 font-[family-name:var(--mono)] text-[var(--ink)]">{r.model}</td>
-                <td className="px-2 py-1.5">
+                <td className="px-2 py-1.5 font-[family-name:var(--mono)] text-[var(--ink)] whitespace-nowrap">{r.model}</td>
+                <td className="px-2 py-1.5 whitespace-nowrap">
                   <Tag tone={x.locked ? 'bad' : 'warn'}>{x.label}</Tag>
                 </td>
-                <td className="tabular px-2 py-1.5">{x.left > 0 ? dur(x.left) : '—'}</td>
-                <td className="tabular px-2 py-1.5 text-[var(--ink-2)]">{x.at || '—'}</td>
-                <td className="max-w-[220px] px-2 py-1.5 text-[11.5px] text-[var(--ink-3)]">{r.reason || '—'}</td>
+                <td className="tabular px-2 py-1.5 whitespace-nowrap">{x.left > 0 ? dur(x.left) : '—'}</td>
+                <td className="tabular px-2 py-1.5 text-[var(--ink-2)] whitespace-nowrap">{x.at || '—'}</td>
+                <td className="max-w-[220px] px-2 py-1.5 text-[11.5px] text-[var(--ink-3)] truncate" title={r.reason || undefined}>{r.reason || '—'}</td>
               </tr>
             );
           })}
@@ -103,7 +103,7 @@ function ModelLimits({ uid, rows }: { uid: string; rows: OverviewAccount['rate_l
   const more = list.length - shown.length;
   return (
     <>
-      <div className="flex flex-col gap-1">
+      <div className="flex flex-col gap-1 min-w-[160px] max-w-[240px]">
         {shown.map((r, i) => (
           <LimitChip key={i} r={r} onClick={() => setOpen(true)} />
         ))}
@@ -169,47 +169,61 @@ function AccountRow({ s, onAction, onTasks, proxyConfigured }: { s: OverviewAcco
       ? `${s.enterprise ? '企业版剩余' : '剩余'} ${s.credits ?? '—'} / ${s.credits_total}（${pct}%）`
       : '积分';
 
+  let credColorCls = '';
+  if (!unlimited && s.credits != null) {
+    if (s.credits_total && s.credits_total > 0) {
+      if (pct <= 10) credColorCls = 'text-[var(--bad)] font-medium';
+      else if (pct <= 30) credColorCls = 'text-[var(--warn)] font-medium';
+    } else if (s.credits <= 0) {
+      credColorCls = 'text-[var(--bad)] font-medium';
+    }
+  }
+
   return (
     <tr className={'transition-colors hover:bg-[var(--surface-2)]/50 ' + rowCls} title={'uid: ' + s.uid}>
-      <td className="px-3.5 py-2.5">
-        <div className="flex items-center gap-1.5">
+      <td className="px-3.5 py-1.5 align-middle whitespace-nowrap">
+        <div className="flex items-center gap-2">
           <span className={'h-2 w-2 rounded-full shrink-0 ' + (frozen || s.paused ? 'bg-[var(--warn)]' : s.disabled ? 'bg-[var(--bad)]' : 'bg-[var(--ok)]')} />
           <div className="min-w-0">
-            <div className="font-medium text-[var(--ink)]">
+            <div className="font-medium text-[var(--ink)] flex items-center gap-1.5">
               {s.nickname || <span className="text-[var(--ink-3)]">未命名</span>}
               {s.realm === 'global' && <RealmTag>国际版</RealmTag>}
               {s.enterprise && <RealmTag>企业版</RealmTag>}
             </div>
-            <div className="font-[family-name:var(--mono)] text-[11px] text-[var(--ink-3)]">{s.uid.length > 16 ? s.uid.slice(0, 16) + '…' : s.uid}</div>
+            <div className="font-[family-name:var(--mono)] text-[11px] text-[var(--ink-3)] mt-0.5">{s.uid.length > 16 ? s.uid.slice(0, 16) + '…' : s.uid}</div>
           </div>
         </div>
       </td>
-      <td className="px-3.5 py-2.5">
+      <td className="px-3.5 py-1.5 align-middle whitespace-nowrap">
         {tag}
-        {s.reason && <div className="mt-0.5 text-[11.5px] text-[var(--ink-3)]">{s.reason}</div>}
+        {s.reason && <div className="mt-1 text-[11px] text-[var(--ink-3)] max-w-[120px] truncate" title={s.reason}>{s.reason}</div>}
       </td>
-      <td className="px-3.5 py-2.5 align-top">
+      <td className="px-3.5 py-1.5 align-middle">
         <ModelLimits uid={s.uid} rows={s.rate_limited_models} />
       </td>
-      <td className="tabular px-3.5 py-2.5" title={credTip}>
-        {unlimited ? '不限' : s.credits == null ? '—' : <>{s.credits}{s.credits_total && s.credits_total > 0 ? <span className="text-[var(--ink-3)]">/{s.credits_total}</span> : null}</>}
-        {!unlimited && pct > 0 && (
-          <div className="mt-1">
-            <SegBar segs={[{ value: pct, title: credTip }]} total={100} />
-          </div>
+      <td className="tabular px-3.5 py-1.5 align-middle whitespace-nowrap" title={credTip}>
+        {unlimited ? (
+          '不限'
+        ) : s.credits == null ? (
+          '—'
+        ) : (
+          <>
+            <span className={credColorCls || undefined}>{s.credits}</span>
+            {s.credits_total && s.credits_total > 0 ? <span className="text-[var(--ink-3)]">/{s.credits_total}</span> : null}
+          </>
         )}
       </td>
-      <td className="tabular px-3.5 py-2.5">
+      <td className="tabular px-3.5 py-1.5 align-middle whitespace-nowrap">
         {s.success_count || 0} <span className="text-[var(--ink-3)]">/</span> <span className="text-[var(--bad)]">{s.err_total || 0}</span>
       </td>
-      <td className="tabular px-3.5 py-2.5 text-[var(--ink)]">{s.in_flight || 0}</td>
-      <td className="tabular px-3.5 py-2.5 text-[12px] text-[var(--ink-2)]">
+      <td className="tabular px-3.5 py-1.5 align-middle text-[var(--ink)] whitespace-nowrap">{s.in_flight || 0}</td>
+      <td className="tabular px-3.5 py-1.5 align-middle text-[12px] text-[var(--ink-2)] whitespace-nowrap">
         <span title={`最近一次：${tu.request_count || 0} 次 / ${fmtTok(tu.total_tokens)} / ${fmtLocalDateTime(Date.now())}`}>
           {tu.request_count || 0} 次 · {tu.total_tokens == null ? '—' : fmtTok(tu.total_tokens)}
         </span>
       </td>
-      <td className="tabular px-3.5 py-2.5 text-[var(--ink-3)]">{ago(s.last_success)}</td>
-      <td className="px-3.5 py-2.5 text-right">
+      <td className="tabular px-3.5 py-1.5 align-middle text-[var(--ink-3)] whitespace-nowrap">{ago(s.last_success)}</td>
+      <td className="px-3.5 py-1.5 align-middle text-right min-w-[200px]">
         <div className="flex flex-wrap justify-end gap-1.5">
           {!s.enterprise && (
             <button className={btnXsGhost} onClick={() => onAction('checkin', s)} title={s.checkin_done ? '今日已签到；点击可重新签到并刷新余额' : undefined}>
@@ -290,20 +304,20 @@ function ModelLocksTable({ rows }: { rows: { model: string; realm?: string; stat
         const st = STATE[r.state || ''] || ['mute', r.state || '—'];
         return (
           <tr key={i} className="transition-colors hover:bg-[var(--surface-2)]/50">
-            <td className="px-3.5 py-2.5 font-[family-name:var(--mono)] text-[12.5px] text-[var(--ink)] font-medium">{r.model}</td>
-            <td className="px-3.5 py-2.5">
+            <td className="px-3.5 py-1.5 font-[family-name:var(--mono)] text-[12.5px] text-[var(--ink)] font-medium whitespace-nowrap">{r.model}</td>
+            <td className="px-3.5 py-1.5 whitespace-nowrap">
               <RealmTag>{r.realm === 'global' ? '国际版' : '国内版'}</RealmTag>
             </td>
-            <td className="px-3.5 py-2.5">
+            <td className="px-3.5 py-1.5 whitespace-nowrap">
               <Tag tone={st[0]}>{st[1]}</Tag>
             </td>
-            <td className="tabular px-3.5 py-2.5">
+            <td className="tabular px-3.5 py-1.5 whitespace-nowrap">
               {r.servable || 0} / {r.total || 0}
             </td>
-            <td className="tabular px-3.5 py-2.5">{r.locked || 0}</td>
-            <td className="tabular px-3.5 py-2.5">{cell(left(r.unlock_at || r.fully_unlock_at))}</td>
-            <td className="tabular px-3.5 py-2.5">{cell(left(r.fully_unlock_at))}</td>
-            <td className="max-w-[240px] px-3.5 py-2.5 text-[12px] text-[var(--ink-3)]">{r.reason || '—'}</td>
+            <td className="tabular px-3.5 py-1.5 whitespace-nowrap">{r.locked || 0}</td>
+            <td className="tabular px-3.5 py-1.5 whitespace-nowrap">{cell(left(r.unlock_at || r.fully_unlock_at))}</td>
+            <td className="tabular px-3.5 py-1.5 whitespace-nowrap">{cell(left(r.fully_unlock_at))}</td>
+            <td className="max-w-[240px] px-3.5 py-1.5 text-[12px] text-[var(--ink-3)] truncate" title={r.reason || undefined}>{r.reason || '—'}</td>
           </tr>
         );
       })}
@@ -394,15 +408,15 @@ export function AccountsView() {
           <table className="w-full border-collapse text-[13px]">
             <thead>
               <tr className="border-b border-[var(--line-soft)] bg-[var(--surface-2)]/50 text-left text-[11.5px] font-semibold text-[var(--ink-2)]">
-                <th className="px-3.5 py-2.5 font-medium">账号</th>
-                <th className="px-3.5 py-2.5 font-medium">状态</th>
-                <th className="px-3.5 py-2.5 font-medium">模型限流</th>
-                <th className="px-3.5 py-2.5 font-medium">积分</th>
-                <th className="px-3.5 py-2.5 font-medium">成功 / 失败</th>
-                <th className="px-3.5 py-2.5 font-medium">在途</th>
-                <th className="px-3.5 py-2.5 font-medium">用量</th>
-                <th className="px-3.5 py-2.5 font-medium">最近成功</th>
-                <th className="px-3.5 py-2.5 text-right font-medium">操作</th>
+                <th className="px-3.5 py-1.5 font-medium whitespace-nowrap">账号</th>
+                <th className="px-3.5 py-1.5 font-medium whitespace-nowrap">状态</th>
+                <th className="px-3.5 py-1.5 font-medium w-[220px]">模型限流</th>
+                <th className="px-3.5 py-1.5 font-medium w-[120px]">积分</th>
+                <th className="px-3.5 py-1.5 font-medium whitespace-nowrap">成功 / 失败</th>
+                <th className="px-3.5 py-1.5 font-medium whitespace-nowrap">在途</th>
+                <th className="px-3.5 py-1.5 font-medium whitespace-nowrap">用量</th>
+                <th className="px-3.5 py-1.5 font-medium whitespace-nowrap">最近成功</th>
+                <th className="px-3.5 py-1.5 text-right font-medium min-w-[200px]">操作</th>
               </tr>
             </thead>
             {pagedAccounts.length ? (
@@ -447,14 +461,14 @@ export function AccountsView() {
           <table className="w-full border-collapse text-[13px]">
             <thead>
               <tr className="border-b border-[var(--line-soft)] bg-[var(--surface-2)]/50 text-left text-[11.5px] font-semibold text-[var(--ink-2)]">
-                <th className="px-3.5 py-2.5 font-medium">模型</th>
-                <th className="px-3.5 py-2.5 font-medium">域</th>
-                <th className="px-3.5 py-2.5 font-medium">状态</th>
-                <th className="px-3.5 py-2.5 font-medium">可选 / 总数</th>
-                <th className="px-3.5 py-2.5 font-medium">锁定账号</th>
-                <th className="px-3.5 py-2.5 font-medium">最早解锁</th>
-                <th className="px-3.5 py-2.5 font-medium">全池解锁</th>
-                <th className="px-3.5 py-2.5 font-medium">原因</th>
+                <th className="px-3.5 py-1.5 font-medium whitespace-nowrap">模型</th>
+                <th className="px-3.5 py-1.5 font-medium whitespace-nowrap">域</th>
+                <th className="px-3.5 py-1.5 font-medium whitespace-nowrap">状态</th>
+                <th className="px-3.5 py-1.5 font-medium whitespace-nowrap">可选 / 总数</th>
+                <th className="px-3.5 py-1.5 font-medium whitespace-nowrap">锁定账号</th>
+                <th className="px-3.5 py-1.5 font-medium whitespace-nowrap">最早解锁</th>
+                <th className="px-3.5 py-1.5 font-medium whitespace-nowrap">全池解锁</th>
+                <th className="px-3.5 py-1.5 font-medium">原因</th>
               </tr>
             </thead>
             <ModelLocksTable rows={d?.model_locks} />
