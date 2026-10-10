@@ -90,8 +90,30 @@ export const STR_LIST_CFG = new Set([
   'growth_autotasks_disabled', 'growth_autotasks_only', 'growth_autotasks_order', 'growth_autotasks_mp_codes',
 ]);
 
-/* 下拉但值是数字的字段（Go 侧 int）。 */
-export const NUMERIC_CFG = new Set(['media_image_max_dimension']);
+/* Go 侧是数字的字段（int / int64 / float64）：DOM 的 input.value 永远是字符串，
+   不一转 Number 就下发，Go 的 json.Unmarshal 会报「cannot unmarshal string into
+   Go struct field .xxx of type int」。而面板保存是**整张表单一起提交**，任一项
+   类型错就全盘 400（用户只改了一个开关也会看到某条无关字段的报错）。
+   守护：internal/panel/config_schema_test.go 按 Go 侧真实类型核对本集合。 */
+export const NUMERIC_CFG = new Set([
+  // 数字输入框
+  'package_detail_limit',
+  'balance_refresh_minutes',
+  'max_in_flight',
+  'max_in_flight_global',
+  'breaker_threshold',
+  'degrade_threshold',
+  'credit_floor',
+  'idle_weight_per_hour',
+  'idle_weight_max',
+  'timeout_seconds',
+  'header_timeout_seconds',
+  'idle_timeout_seconds',
+  'max_inflight_requests',
+  'max_inflight_bytes_mb',
+  // 值是数字的下拉框
+  'media_image_max_dimension',
+]);
 
 /* 手工处理字段（结构化，不走通用回填/收集）。 */
 export const MANUAL_CFG = new Set(['fingerprint_rules_text']);
