@@ -735,9 +735,18 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 	// 默认零值 Blocked=false = 按既有的"没有可用账号"口径报错。
 	var modelBlock pool.ModelBlockStatus
 
-	// 会话粘性：从请求体提取会话键并解析绑定号（找不到/无效则 stickyUID 为空，走普通轮换）。
-	// ExtractKey 与粘性开关解耦（issue #35 侧）：关闭粘性时会话头族的聚合主键仍按
-	// 会话级（RequestIDForKey(sessKey)），不悄悄退化成轮级——提取本身与粘性无关。
+	// 会话粘性：会话键按三级回退提取（75c0a78 断链后恢复）：
+	//   1. conversation 维度键：peek.ConversationID（body 顶层/metadata 的
+	//      conversation_id/conversationId + X-Conversation-ID 头，forwarding.Parse
+	//      已解析校验）；
+	//   2. 客户端会话头：session.HeaderSessionKey（Claude Code / Codex / OpenCode /
+	//      pi 等客户端的自定义会话头，带来源命名空间前缀）；
+	//   3. body 会话键与派生回退：session.BodyKey（非标准 JSON 键位链 →
+	//      prompt_cache_key → 内容派生键，一次解析完成；带 user_id 的请求不派生
+	//      ——P1-anti-monopoly 契约）。
+	// 提取与粘性开关解耦（issue #35 侧）：关闭粘性时会话头族的聚合主键仍按
+	// 会话级（RequestIDForKey(sessKey)），不悄悄退化成轮级。
+	//
 	// 调用方主体命名空间：API key 是唯一可区分的主体边界。未配置 key 时
 	// 没有主体边界可言，principalID 留空（不编造隔离，且粘性键跨升级保持稳定）。
 	principalID := ""
@@ -745,13 +754,25 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 		sum := sha256.Sum256([]byte(key))
 		principalID = hex.EncodeToString(sum[:16])
 	}
+	// convKey 是去除了 realm/model/principal 维度的"裸会话键"；粘性键 = 维度前缀 +
+	// 裸键。裸键可能来自客户端头/body 键位/派生键，语义隔离靠结构保证：
+	// chatMeta.ConversationID 只读 peek.ConversationID（从不读 convKey），上游
+	// X-Conversation-ID / acp 派生 / 缓存键材料只认真正的会话 id，不伪造。
+	convKey := ""
+	if peek.ConversationID != "" {
+		convKey = peek.ConversationID
+	} else if v := session.HeaderSessionKey(r.Header); v != "" {
+		convKey = v
+	} else {
+		convKey = session.BodyKey(body, peek.PromptCacheKey)
+	}
 	sessKey := ""
 	stickyUID := ""
-	if peek.ConversationID != "" {
+	if convKey != "" {
 		// 在候选域中按优先级检查既有会话绑定（避免多轮对话因自动轮转发生跨域漂移）。
 		if h.cfg.Session != nil {
 			for _, cr := range candidateRealms {
-				k := cr + ":" + bareModel + ":" + peek.ConversationID
+				k := cr + ":" + bareModel + ":" + convKey
 				if principalID != "" {
 					k = principalID + ":" + k
 				}
@@ -763,7 +784,7 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 			}
 		}
 		if sessKey == "" {
-			sessKey = primaryRealm + ":" + bareModel + ":" + peek.ConversationID
+			sessKey = primaryRealm + ":" + bareModel + ":" + convKey
 			if principalID != "" {
 				sessKey = principalID + ":" + sessKey
 			}
@@ -1209,8 +1230,10 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 				h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
 				// 粘性跟随最终成功号：本轮成功的账号成为该会话的粘性绑定（覆盖旧绑定）。
 				// 若 sticky 号失败、轮换到别的号成功，这里把会话重绑到新号，多轮对话下一跳不再随机抽。
-				if peek.ConversationID != "" && h.cfg.Session != nil {
-					actualSessKey := acct.Realm() + ":" + bareModel + ":" + peek.ConversationID
+				// convKey 含 prompt_cache_key/派生键回退（75c0a78 断链恢复）：非 conversation
+				// 维度键的会话同样要跟随成功号。
+				if convKey != "" && h.cfg.Session != nil {
+					actualSessKey := acct.Realm() + ":" + bareModel + ":" + convKey
 					if principalID != "" {
 						actualSessKey = principalID + ":" + actualSessKey
 					}
@@ -1302,8 +1325,9 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 		// 非流式同理：聚合成功（无 error 帧、非空流）才算这一跳成功，事后才记成功/绑粘性。
 		h.cfg.Pool.NoteSuccess(acct.UID)
 		h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
-		if peek.ConversationID != "" && h.cfg.Session != nil {
-			actualSessKey := acct.Realm() + ":" + bareModel + ":" + peek.ConversationID
+		// 粘性跟随最终成功号（非流式同理）：convKey 含回退链（见流式分支注释）。
+		if convKey != "" && h.cfg.Session != nil {
+			actualSessKey := acct.Realm() + ":" + bareModel + ":" + convKey
 			if principalID != "" {
 				actualSessKey = principalID + ":" + actualSessKey
 			}

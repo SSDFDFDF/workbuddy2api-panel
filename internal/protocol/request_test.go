@@ -128,8 +128,12 @@ func TestAnthropicAdvisoryFieldsDropped(t *testing.T) {
 }
 
 func TestClientHintsAndReasoningDropped(t *testing.T) {
-	// Codex sends these on every Responses request; none has a Chat
+	// Codex sends these on every Responses request; most have no Chat
 	// representation, so they are accepted, ignored and reported in Dropped.
+	// prompt_cache_key is the exception: it is hoisted into the Chat document
+	// (session sticky key + upstream prefix cache, matching native Chat
+	// passthrough where the client value always wins) and is therefore NOT in
+	// Dropped.
 	r := mustDecode(t, Responses, `{"model":"x","store":false,"input":"hi","service_tier":"priority",`+
 		`"client_metadata":{"x":"1"},"prompt_cache_key":"k","stream_options":{"include_usage":true},`+
 		`"safety_identifier":"s","top_logprobs":5,"include":["reasoning.encrypted_content"],`+
@@ -138,8 +142,11 @@ func TestClientHintsAndReasoningDropped(t *testing.T) {
 	if r.Chat.Object["reasoning_effort"] != "high" {
 		t.Fatal("effort not translated", r.Chat.Object)
 	}
+	if r.Chat.PromptCacheKey != "k" {
+		t.Fatal("prompt_cache_key not hoisted to Chat request", r.Chat.PromptCacheKey)
+	}
 	raw, _ := json.Marshal(r.Chat.Object)
-	for _, k := range []string{"service_tier", "client_metadata", "prompt_cache_key", "stream_options", "safety_identifier", "top_logprobs", "include", "truncation", "verbosity"} {
+	for _, k := range []string{"service_tier", "client_metadata", "stream_options", "safety_identifier", "top_logprobs", "include", "truncation", "verbosity"} {
 		if strings.Contains(string(raw), `"`+k) {
 			t.Fatalf("%s forwarded: %s", k, raw)
 		}
@@ -147,10 +154,13 @@ func TestClientHintsAndReasoningDropped(t *testing.T) {
 	if strings.Contains(string(raw), `"reasoning":`) {
 		t.Fatalf("reasoning object forwarded: %s", raw)
 	}
-	for _, k := range []string{"service_tier", "client_metadata", "prompt_cache_key", "stream_options", "safety_identifier", "top_logprobs", "include", "truncation", "text.verbosity", "reasoning.summary", "reasoning.context"} {
+	for _, k := range []string{"service_tier", "client_metadata", "stream_options", "safety_identifier", "top_logprobs", "include", "truncation", "text.verbosity", "reasoning.summary", "reasoning.context"} {
 		if !containsString(r.Dropped, k) {
 			t.Fatalf("dropped list missing %s: %v", k, r.Dropped)
 		}
+	}
+	if containsString(r.Dropped, "prompt_cache_key") {
+		t.Fatalf("prompt_cache_key should be adopted, not dropped: %v", r.Dropped)
 	}
 }
 

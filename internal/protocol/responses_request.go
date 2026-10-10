@@ -8,9 +8,24 @@ func responsesRequest(src map[string]any, tools *toolIndex, dropped *[]string) (
 	// client_metadata/service_tier/prompt_cache_key/stream_options on every
 	// request; dropping them keeps real clients working without pretending the
 	// bridge honors them.
+	//
+	// prompt_cache_key 例外：会话粘性键链路需要它（session.BodyKey 的
+	// prompt_cache_key 级，pi-ai/Codex 类客户端把会话 ID 放这里而非 conversation
+	// 维度）。在“忽略”之前把它提升为 Chat 顶层字段，forwarding.Parse 会照常校验
+	// 并落到 Request.PromptCacheKey——否则跨协议请求丢键，同会话每笔独立轮换。
 	ignored, err := fieldsAccept(src, "", "model input instructions stream store previous_response_id conversation background tools tool_choice parallel_tool_calls max_output_tokens temperature top_p metadata text reasoning include truncation", "client_metadata service_tier prompt_cache_key stream_options safety_identifier top_logprobs")
 	if err != nil {
 		return nil, err
+	}
+	// prompt_cache_key 从“被忽略”名单除名（提升为路由线索，见下方 dst 构造处）；
+	// 必须在 *dropped append 之前完成，否则归档事件仍把它记成丢弃。
+	if v, ok := src["prompt_cache_key"].(string); ok && v != "" {
+		for i, k := range ignored {
+			if k == "prompt_cache_key" {
+				ignored = append(ignored[:i], ignored[i+1:]...)
+				break
+			}
+		}
 	}
 	*dropped = append(*dropped, ignored...)
 	// The official default is true, but the gateway is stateless: omission/null
@@ -87,6 +102,13 @@ func responsesRequest(src map[string]any, tools *toolIndex, dropped *[]string) (
 		}
 	}
 	dst := map[string]any{"model": src["model"]}
+	// prompt_cache_key 提升（除名逻辑见函数头 fieldsAccept 处）：会话粘性键链路
+	// 需要它（session.BodyKey 的 prompt_cache_key 级，pi-ai/Codex 类客户端把会话
+	// ID 放这里而非 conversation 维度）。提升为 Chat 顶层字段后由 forwarding.Parse
+	// 校验并落到 Request.PromptCacheKey——否则跨协议请求丢键，同会话每笔独立轮换。
+	if v, ok := src["prompt_cache_key"].(string); ok && v != "" {
+		dst["prompt_cache_key"] = v
+	}
 	if v, ok := src["stream"]; ok {
 		dst["stream"] = v
 	}

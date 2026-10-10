@@ -475,7 +475,7 @@ func ExtractKey(body []byte) string {
 }
 
 // hasUserIDKey 报告已解析 body 是否携带 user 维度标识（metadata.user_id 或顶层
-// user_id，非空字符串才算）。只用于派生回退闸（ExtractKey）；解析失败按无处理。
+// user_id，非空字符串才算）。只用于派生回退闸（ExtractKey / BodyKey）；解析失败按无处理。
 func hasUserIDKey(obj map[string]any) bool {
 	if meta, ok := obj["metadata"].(map[string]any); ok {
 		if strOrEmpty(meta["user_id"]) != "" {

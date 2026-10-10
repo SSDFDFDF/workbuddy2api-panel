@@ -1914,3 +1914,217 @@ func TestPromptRulesHotSwap(t *testing.T) {
 		t.Fatal("空规则应视为不改写")
 	}
 }
+
+// TestChatStickyPromptCacheKeyFallback 75c0a78 断链恢复回归：pi-ai 驱动客户端把
+// 会话 ID 放 prompt_cache_key（而非 conversation_id），同会话两笔请求必须粘同一账号，
+// 且成功后绑定跟随（bindStore 镜像里出现该键）。
+func TestChatStickyPromptCacheKeyFallback(t *testing.T) {
+	st := newBindStore()
+	sess := session.New(session.Config{
+		TTL:       time.Minute,
+		Store:     st,
+		Available: func() []string { return []string{"good"} },
+	})
+	p := testPoolWith(&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999})
+	picked := 0
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			picked++
+			// 语义隔离：prompt_cache_key 不得被伪造为上游 X-Conversation-ID。
+			if got := r.Header.Get("X-Conversation-ID"); got != "" {
+				t.Errorf("X-Conversation-ID should stay empty for prompt_cache_key sessions, got %q", got)
+			}
+			return &http.Response{
+				StatusCode: 200,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(sseOK)),
+			}, nil
+		})},
+		ChatBaseCN:    "https://fake.example",
+		BillingBaseCN: "https://fake.example",
+	}
+	h := NewHandler(Config{Pool: p, Upstream: up, Session: sess, SoftCooldown: time.Minute})
+
+	body := `{"model":"glm-5.2","messages":[{"role":"user","content":"你好"}],"prompt_cache_key":"pi-sess-1"}`
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("request %d: code=%d body=%s", i, rec.Code, rec.Body)
+		}
+	}
+	if picked != 2 {
+		t.Fatalf("expected 2 upstream calls, got %d", picked)
+	}
+	// 第二笔必须走粘性路径绑定同一号（镜像键 = cn:模型:pi-sess-1）。
+	if uid, ok := st.lastUID("cn:glm-5.2:pi-sess-1"); !ok || uid != "good" {
+		t.Fatalf("prompt_cache_key session should bind to good, got %s ok=%v", uid, ok)
+	}
+}
+
+// TestChatStickyDerivedKeyFallback 派生键回退：客户端不发任何会话标识时，
+// 同一会话（system + 首条 user 相同）多笔请求粘同一账号；换会话（不同首条 user）
+// 键不同。带 user_id 的请求不派生（契约），不粘。
+func TestChatStickyDerivedKeyFallback(t *testing.T) {
+	st := newBindStore()
+	sess := session.New(session.Config{
+		TTL:       time.Minute,
+		Store:     st,
+		Available: func() []string { return []string{"good"} },
+	})
+	p := testPoolWith(&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999})
+	up := newFakeUpstream(t, func(auth string) (int, string, bool) {
+		return 200, sseOK, true
+	})
+	h := NewHandler(Config{Pool: p, Upstream: up, Session: sess, SoftCooldown: time.Minute})
+
+	post := func(body string) {
+		t.Helper()
+		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+		}
+	}
+	// 同一会话两轮（历史追加，首条 user 不变）→ 派生键稳定 → 同一键绑定。
+	post(`{"model":"glm-5.2","messages":[{"role":"user","content":"第一问"}]}`)
+	post(`{"model":"glm-5.2","messages":[{"role":"user","content":"第一问"},{"role":"assistant","content":"答"},{"role":"user","content":"第二问"}]}`)
+	// 键是派生哈希（d- 前缀）：验证恰好一条绑定且指向 good。
+	if n := len(st.binds); n != 1 {
+		t.Fatalf("derived-key session should create exactly 1 binding, got %d (%v)", n, st.binds)
+	}
+	for k, uid := range st.binds {
+		if uid != "good" {
+			t.Fatalf("derived binding %q -> %s, want good", k, uid)
+		}
+	}
+
+	// 带 user_id 的请求不派生 → 无新绑定（仍在 1 条）。
+	post(`{"model":"glm-5.2","user_id":"u1","messages":[{"role":"user","content":"另一个会话"}]}`)
+	if n := len(st.binds); n != 1 {
+		t.Fatalf("user_id request should not derive a sticky key, bindings=%d (%v)", n, st.binds)
+	}
+}
+
+// TestChatStickyConversationIDTakesPriority 优先级回归：conversation_id 在场时
+// prompt_cache_key 不抢占粘性键（显式会话键优先，对齐 ExtractKey 第 1-4 级）。
+func TestChatStickyConversationIDTakesPriority(t *testing.T) {
+	st := newBindStore()
+	sess := session.New(session.Config{
+		TTL:       time.Minute,
+		Store:     st,
+		Available: func() []string { return []string{"good"} },
+	})
+	p := testPoolWith(&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999})
+	up := newFakeUpstream(t, func(auth string) (int, string, bool) {
+		return 200, sseOK, true
+	})
+	h := NewHandler(Config{Pool: p, Upstream: up, Session: sess, SoftCooldown: time.Minute})
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}],"metadata":{"conversation_id":"conv-9"},"prompt_cache_key":"pc-9"}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	if _, ok := st.lastUID("cn:glm-5.2:conv-9"); !ok {
+		t.Fatalf("conversation_id should win as sticky key, binds=%v", st.binds)
+	}
+	if _, ok := st.lastUID("cn:glm-5.2:pc-9"); ok {
+		t.Fatalf("prompt_cache_key should not create a parallel binding, binds=%v", st.binds)
+	}
+}
+
+// TestChatStickyClientSessionHeaders 客户端自定义会话头键位（ 实抓
+// 口径）：Claude Code / Codex / OpenCode / PI / 通用头携带稳定会话标识时，
+// 同会话两笔请求粘同一账号；conversation_id 优先级仍最高。
+func TestChatStickyClientSessionHeaders(t *testing.T) {
+	cases := []struct {
+		name   string
+		header map[string]string
+		// wantKeySuffix 是期望出现在粘性键尾部的会话标识（含命名空间前缀）。
+		wantKeySuffix string
+	}{
+		{"claude-code", map[string]string{"X-Claude-Code-Session-Id": "cc-sess-1"}, "claude:cc-sess-1"},
+		{"codex", map[string]string{"Session-Id": "cx-sess-1"}, "codex:cx-sess-1"},
+		{"opencode", map[string]string{"X-Session-Affinity": "ses_aff1"}, "affinity:ses_aff1"},
+		{"pi-client", map[string]string{"X-Client-Request-Id": "pi-req-1"}, "clientreq:pi-req-1"},
+		{"generic", map[string]string{"X-Session-ID": "gen-1"}, "hdr:gen-1"},
+		{"pi-slot", map[string]string{"X-Slot-Session-Id": "slot-9"}, "slot:slot-9"},
+		{"task", map[string]string{"X-Task-Id": "tk-1"}, "task:tk-1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newBindStore()
+			sess := session.New(session.Config{
+				TTL:       time.Minute,
+				Store:     st,
+				Available: func() []string { return []string{"good"} },
+			})
+			p := testPoolWith(&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999})
+			up := newFakeUpstream(t, func(auth string) (int, string, bool) {
+				return 200, sseOK, true
+			})
+			h := NewHandler(Config{Pool: p, Upstream: up, Session: sess, SoftCooldown: time.Minute})
+			for i := 0; i < 2; i++ {
+				req := httptest.NewRequest("POST", "/v1/chat/completions",
+					strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`))
+				for k, v := range tc.header {
+					req.Header.Set(k, v)
+				}
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, req)
+				if rec.Code != 200 {
+					t.Fatalf("request %d: code=%d body=%s", i, rec.Code, rec.Body)
+				}
+			}
+			wantKey := "cn:glm-5.2:" + tc.wantKeySuffix
+			if uid, ok := st.lastUID(wantKey); !ok || uid != "good" {
+				t.Fatalf("header session should bind via %q, got binds=%v", wantKey, st.binds)
+			}
+		})
+	}
+}
+
+// TestChatStickyClaudeCodeUserIDSession Claude Code 的 metadata.user_id
+// （user_{hash}_session_{uuid} 形态）：session 段提取为粘性键——这是 /v1/messages
+// 主力客户端唯一的会话信号；非该格式的 user_id 仍不参与（反垄断契约不回归）。
+func TestChatStickyClaudeCodeUserIDSession(t *testing.T) {
+	st := newBindStore()
+	sess := session.New(session.Config{
+		TTL:       time.Minute,
+		Store:     st,
+		Available: func() []string { return []string{"good"} },
+	})
+	p := testPoolWith(&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999})
+	up := newFakeUpstream(t, func(auth string) (int, string, bool) {
+		return 200, sseOK, true
+	})
+	h := NewHandler(Config{Pool: p, Upstream: up, Session: sess, SoftCooldown: time.Minute})
+
+	post := func(body string) {
+		t.Helper()
+		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+		}
+	}
+	// Claude Code 形态：同 session uuid 两笔（account hash 不同也算同会话）。
+	post(`{"model":"glm-5.2","metadata":{"user_id":"user_abc123_session_550e8400-e29b-41d4-a716-446655440000"},"messages":[{"role":"user","content":"hi"}]}`)
+	post(`{"model":"glm-5.2","metadata":{"user_id":"user_def456_session_550e8400-e29b-41d4-a716-446655440000"},"messages":[{"role":"user","content":"第二轮"}]}`)
+	if uid, ok := st.lastUID("cn:glm-5.2:claude:550e8400-e29b-41d4-a716-446655440000"); !ok || uid != "good" {
+		t.Fatalf("claude session uuid should bind, binds=%v", st.binds)
+	}
+
+	// 非 Claude 格式 user_id：不提取、不派生（反垄断契约保持）。
+	st2binds := len(st.binds)
+	post(`{"model":"glm-5.2","metadata":{"user_id":"plain-user"},"messages":[{"role":"user","content":"another"}]}`)
+	if len(st.binds) != st2binds {
+		t.Fatalf("plain user_id must not create binding, binds=%v", st.binds)
+	}
+}

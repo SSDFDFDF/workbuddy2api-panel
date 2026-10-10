@@ -198,10 +198,15 @@ func TestCodexStyleResponsesRequestAccepted(t *testing.T) {
 		if len(msgs) != 1 || msgs[0].(map[string]any)["role"] != "user" {
 			t.Fatalf("reasoning history not dropped: %s", body)
 		}
-		for _, k := range []string{"client_metadata", "service_tier", "prompt_cache_key", "include", "reasoning", "truncation"} {
+		// prompt_cache_key 现在被桥提升为 Chat 顶层字段（粘性键 + 上游前缀缓存，
+		// 与原生 Chat 透传口径一致）：不再断言它被丢弃。
+		for _, k := range []string{"client_metadata", "service_tier", "include", "reasoning", "truncation"} {
 			if _, exists := obj[k]; exists {
 				t.Fatalf("dropped field %s forwarded: %s", k, body)
 			}
+		}
+		if obj["prompt_cache_key"] != "k" {
+			t.Fatalf("prompt_cache_key should reach upstream (hoisted by bridge): %s", body)
 		}
 		// stream_options is the encoder's own include_usage contract, not the
 		// client's dropped value.
@@ -234,7 +239,7 @@ func TestCodexStyleResponsesRequestAccepted(t *testing.T) {
 	if len(s.Recent) != 1 {
 		t.Fatalf("events=%d", len(s.Recent))
 	}
-	want := []string{"client_metadata", "prompt_cache_key", "service_tier", "stream_options", "include", "text.verbosity", "reasoning.summary", "input[]"}
+	want := []string{"client_metadata", "service_tier", "stream_options", "include", "text.verbosity", "reasoning.summary", "input[]"}
 	if !reflect.DeepEqual(s.Recent[0].Dropped, want) {
 		t.Fatalf("dropped=%v want %v", s.Recent[0].Dropped, want)
 	}

@@ -25,6 +25,15 @@ type Request struct {
 	Stream         bool
 	N              int
 	ConversationID string
+	// PromptCacheKey 是 body 顶层 prompt_cache_key 的原值（≤1024 字节，Parse 已
+	// 校验）。语义是 OpenAI 系的"同一会话复用同一前缀"，与会话粘性同源：
+	// pi-ai 驱动客户端（dsh 等）把会话 ID 放这个字段而非 conversation_id，
+	// handler 据此作粘性键回退（session.BodyKey 的 prompt_cache_key 级，
+	// 75c0a78 断链后恢复）。
+	// 与 ConversationID 的语义边界：本字段只参与网关侧路由（粘性键），
+	// **不**注入上游 X-Conversation-ID / 缓存键材料（上游按对话聚合的判据
+	// 不受它污染——conversation 维度键优先且互不混用）。
+	PromptCacheKey string
 }
 
 // Parse validates known fields without filtering unknown extensions or repairing history.
@@ -106,6 +115,7 @@ func Parse(raw []byte) (*Request, error) {
 		if !good || len(s) > 1024 {
 			return nil, invalid("prompt_cache_key", "string up to 1024 bytes required")
 		}
+		r.PromptCacheKey = s
 	}
 	if err := reasoning(obj); err != nil {
 		return nil, err
