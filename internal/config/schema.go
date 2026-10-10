@@ -22,10 +22,18 @@ const (
 	defaultMaxInflightBytesMB  = 256
 )
 
+// CurrentVersion 本程序写文件时使用的配置结构版本（config_version 字段的取值）。
+//
+// 它只是一个标记 + 一道单向守卫，不再是迁移链的终点：读取时不按版本号做任何
+// 形态转换（旧版本号 = 照当前结构读，认识的键生效、其余忽略），只有比它更新的
+// 版本会被拒绝。schema 发生不兼容变更时手动 +1 即可，无需配套迁移代码。
+const CurrentVersion = 3
+
 // Config 顶层配置。
 type Config struct {
-	// ConfigVersion 配置结构版本（见 migrate.go：一次性版本迁移，不是长期归一化）。
-	// 由 Migrate 写入/校验，用户无需手工维护；缺省视为 VersionUnversioned。
+	// ConfigVersion 配置文件的结构版本：本程序写文件时固定写 CurrentVersion。
+	// 读取时不做任何版本转换，只在「文件声明的版本比程序新」时拒绝启动
+	//（旧程序读新配置会静默丢掉不认识的键，那种数据损失必须 fail fast）。
 	ConfigVersion int    `json:"config_version"`
 	Listen        string `json:"listen"`  // ":7863"
 	APIKey        string `json:"api_key"` // 空 = 不鉴权
@@ -55,7 +63,7 @@ type Config struct {
 	//
 	// 上限与合法性在 normalize 阶段校验（超量/非法 → 启动或保存报错）。
 	// 改动**热生效**（与 FingerprintRewrite 同步），无需重启。
-	FingerprintRules []scrub.Rule `json:"fingerprint_rules"`
+	FingerprintRules []scrub.Rule `json:"fingerprint_rules,omitempty"`
 
 	Panel struct {
 		// PackageDetailLimit 积分构成页单账号默认展示的最近到期包数；<=0 回落 5。
@@ -252,7 +260,7 @@ type Config struct {
 		//	append  客户端开头 system/developer 块之后插网关提示词（客户端在前）
 		//	after   网关提示词置首，客户端开头块紧随其后（后组合，客户端内容不丢）
 		//
-		// 空串 = inject（不是 none）。历史别名照收（custom→replace、passthrough→none）。
+		// 空串 = inject（不是 none）；其余取值一律报错（无旧别名兼容）。
 		Mode string `json:"mode"`
 		// Preset 内置预设名（面板下拉由 prompt.Presets() 生成，前端不硬编码）：
 		// official-craft / official-ask / official-plan / official-quick / official-expert，
@@ -268,7 +276,7 @@ type Config struct {
 		// Profiles 按账号域覆盖上列各项（键：cn / global）。mode 逐项回落到顶层；
 		// 素材（preset/file/text）为整体覆盖（任一非空则本域完全
 		// 用自己那三项）。用于“同一网关同时对 CN 与 Global 账号使用不同提示词”。
-		Profiles map[string]PromptProfile `json:"profiles"`
+		Profiles map[string]PromptProfile `json:"profiles,omitempty"`
 	} `json:"prompt"`
 
 	// PromptText 默认域解析后的系统提示词文本（历史字段，保留兼容）。
@@ -280,14 +288,9 @@ type Config struct {
 	// handler 按请求 realm 从快照选规则。
 	PromptRules map[string]prompt.Rule `json:"-"`
 
-	// Warnings 载入期的配置告警（未知键、被忽略的已知非法项）。运行期元数据：
-	// 不从文件读入（runtimeMetaKeys）、也不落盘，供启动日志与面板 `_warnings` 展示。
+	// Warnings 载入期的配置告警（未知键、被忽略的非法项）。运行期元数据：
+	// 不从文件读入、也不落盘（保存前显式清空），供启动日志与面板 `_warnings` 展示。
 	Warnings []string `json:"_warnings,omitempty"`
-
-	// Migrations 本次加载实际执行过的版本迁移（步骤摘要 + 逐条改动说明）。
-	// 只出现一次：迁移立即回写磁盘，旧形态不会留在文件里反复迁移。
-	// 运行期元数据（同 Warnings：不读入、不落盘）。
-	Migrations []string `json:"_migrations,omitempty"`
 
 	Upstash struct {
 		URL   string `json:"url"`   // 空 = 纯内存模式；支持完整 rediss:// URL 或 https://xxx.upstash.io host
@@ -385,22 +388,22 @@ type Config struct {
 type GrowthAutotasks struct {
 	// Disabled 屏蔽的任务 code 黑名单（trim 后精确匹配，大小写敏感）。
 	// 缺省空 = 不屏蔽任何内置动作。
-	Disabled []string `json:"disabled"`
+	Disabled []string `json:"disabled,omitempty"`
 	// Only 白名单：非空时只有列出的 code 参与自动化；同时命中 Disabled 时
 	// Disabled 优先（= 屏蔽）。缺省空 = 不启用白名单。
-	Only []string `json:"only"`
+	Only []string `json:"only,omitempty"`
 	// Order 执行顺序覆盖：列出的 code 按本列表次序执行，未列出的排在其后
 	//（按内置依赖序）。缺省空 = 完全按内置序（先解锁依赖项）。
-	Order []string `json:"order"`
+	Order []string `json:"order,omitempty"`
 	// MPCodes 小程序口径专属任务码：**裸值 = 整体覆盖**内置表，前缀 "+" =
 	// 追加到内置表。运行时由「默认列表 vs mp 列表」差集探测到的码始终并入，
 	// 因此只有探测不到的场景（列表失败/任务刚上线）才需要在此登记。
-	MPCodes []string `json:"mp_codes"`
+	MPCodes []string `json:"mp_codes,omitempty"`
 	// AllowUnknownClaim 对「上游已下发但无判据动作实现」的任务只做
 	// accept + 达标领奖（绝不伪造事件）；缺省 false = 未实现的任务不参与自动化。
 	AllowUnknownClaim bool `json:"allow_unknown_claim"`
 	// Tasks 逐任务参数覆盖（键 = task_code）。缺省空 = 全部用内置默认。
-	Tasks map[string]GrowthTaskPolicy `json:"tasks"`
+	Tasks map[string]GrowthTaskPolicy `json:"tasks,omitempty"`
 }
 
 // GrowthTaskPolicy 单个任务的自动化参数覆盖（growth.autotasks.tasks.<code>）。

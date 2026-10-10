@@ -1,14 +1,15 @@
-// load.go 从文件/JSON 加载配置、版本迁移、环境变量覆盖、首次运行生成推荐配置。
+// load.go 从文件/JSON 加载配置、环境变量覆盖、首次运行生成推荐配置。
 //
-// 来源分层（优先级由低到高）：Default → File（含版本迁移）→ Env(WB2A_*)。
+// 来源分层（优先级由低到高）：Default → File → Env(WB2A_*)。
 // -config 只决定读哪个文件，不参与字段覆盖。
 //
-// 读取路径（Load）：
+// 读取路径（Load）：读文件 → 反序列化到 Default()（**只认已知键**）→ env 覆盖 → normalize。
 //
-//	读文件 → 识别 config_version → 迁移到 CurrentVersion → 立即回写（快照旧文件）
-//	      → 解析 + 归一化 → env 覆盖
-//
-// 迁移与归一化的分工见 migrate.go 的文件头（纪律：normalize 只认当前版本）。
+// 口径（刻意从简）：
+//   - 不做版本迁移、不归一化旧形态、不在读时回写磁盘；文件里不认识的键直接
+//     忽略（只告警），下次保存时随全量覆盖自然消失；
+//   - 唯一的版本守卫：文件声明的 config_version 比本程序新 → 拒绝启动（避免旧
+//     程序读新配置后把不认识的键覆盖掉）；更旧的版本不做任何转换。
 package config
 
 import (
@@ -25,12 +26,6 @@ import (
 	"workbuddy_manager/internal/upstream"
 )
 
-// runtimeMetaKeys 运行期元数据键：写在配置对象上供面板展示，但**不是配置输入**。
-//
-// 不把它们从文件里读进来（否则用户手写的旧值会污染当期告警列表），也不在回写时
-// 持久化（迁移回写会重写整个文件，留着就会一直存在）。
-var runtimeMetaKeys = []string{"_warnings", "_migrations"}
-
 func Load(path string) (*Config, error) {
 	c := Default()
 	if path != "" {
@@ -41,74 +36,27 @@ func Load(path string) (*Config, error) {
 				"Docker 部署时若宿主机缺少 config.json，bind mount 会创建同名目录。"+
 				"请先 `cp config.example.json config.json` 或删除该目录（程序会自动生成配置）", path)
 		}
-		// 读 → 迁移 → 回写整段在配置文件事务锁里（与面板保存共用同一把锁，
-		// 见 lock.go）：否则迁移回写可能覆盖掉同时发生的一次面板保存。
-		var (
-			obj      map[string]any
-			raw      []byte
-			rep      MigrateReport
-			writeErr error
-		)
-		err := FileTx(func() error {
-			var rerr error
-			raw, rerr = os.ReadFile(path)
-			if rerr != nil {
-				return fmt.Errorf("read config: %w", rerr)
-			}
-			obj, rerr = jsondoc.Object(raw)
-			if rerr != nil {
-				return fmt.Errorf("parse config: %w", rerr)
-			}
-			// 版本迁移：旧形态在这里一次性转成当前版本，并立即回写磁盘。
-			rep, rerr = Migrate(obj)
-			if rerr != nil {
-				return rerr
-			}
-			for _, k := range runtimeMetaKeys {
-				delete(obj, k)
-			}
-			if rep.Migrated() {
-				// 回写失败不阻断启动：内存里已是当前版本，功能不受影响。
-				// 告警在 parseObject 之后追加（parseObject 会重置 Warnings）。
-				writeErr = writeMigrated(path, raw, obj, rep)
-			}
-			// 首次成功加载顺手种一份兜底备份（已存在则不动）：把可用回滚点
-			// 提前到"用户第一次改配置"之前（否则第一次改坏时磁盘上还没有任何备份）。
-			seedBackupOnce(path)
-			return nil
-		})
-		if err != nil {
-			return nil, err
+		// 只读：读盘不改盘，因此不需要配置锁（写入走 WriteFileAtomic 的原子替换）。
+		raw, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return nil, fmt.Errorf("read config: %w", rerr)
+		}
+		obj, oerr := jsondoc.Object(raw)
+		if oerr != nil {
+			return nil, fmt.Errorf("parse config: %w", oerr)
 		}
 		if _, err := parseObject(obj, c); err != nil {
 			return nil, err
 		}
-		if rep.Migrated() {
-			c.Migrations = append(c.Migrations, rep.Steps...)
-			c.Migrations = append(c.Migrations, rep.Notes...)
-			if writeErr != nil {
-				// 必须可见：只读挂载下每次启动都会重新迁移，用户得知道为什么。
-				c.addWarning(fmt.Sprintf("配置已自动迁移到 v%d，但回写磁盘失败（%v）：本次迁移只在内存生效，重启后会重新迁移",
-					rep.To, writeErr))
-			}
-		}
+		// 首次成功加载顺手种一份兜底备份（已存在则不动）：把可用回滚点
+		// 提前到"用户第一次改配置"之前。
+		seedBackupOnce(path)
 	}
 	applyEnv(c)
 	if err := c.normalize(); err != nil {
 		return nil, err
 	}
 	return c, nil
-}
-
-// writeMigrated 把迁移后的配置回写磁盘：先留一份迁移前快照（config.json.v<from>），
-// 再原子替换。快照失败不阻断（best effort）——它只是给用户多一条回退路径。
-func writeMigrated(path string, beforeRaw []byte, obj map[string]any, rep MigrateReport) error {
-	out, err := MarshalConfig(obj)
-	if err != nil {
-		return err
-	}
-	_ = os.WriteFile(VersionSnapshotPath(path, rep.From), beforeRaw, 0o600)
-	return WriteFileAtomic(path, out)
 }
 
 // seedBackupOnce 每个配置文件只尝试种一次 .bak（面板保存路径也会用到它）。
@@ -130,20 +78,19 @@ var seedBackupOnce = func() func(string) {
 
 // parseObject 把已解析的配置对象覆盖到 c 上（不做 env、不读文件、不迁移）。
 func parseObject(obj map[string]any, c *Config) (*Config, error) {
+	if err := checkVersionGate(obj); err != nil {
+		return nil, err
+	}
 	if err := decodeInto(obj, c); err != nil {
 		return nil, err
 	}
-	// 运行期元数据不是配置输入：文件里若残留 _warnings/_migrations（历史手写或
-	// 旧实现写的），一律不读进来，否则会污染当期告警/迁移提示。
+	// 运行期元数据不是配置输入：文件里若残留 _warnings，不读进来，否则会污染当期告警。
 	c.Warnings = nil
-	c.Migrations = nil
-	// 版本已经在 Migrate 里归一：到了这里只可能是当前版本（或未经迁移的裸 JSON，
-	// 见 ParseConfig 的版本闸门）。
 	c.ConfigVersion = CurrentVersion
-	// 未知键只告警不阻断启动（面板保存时直接丢弃，见 PruneUnknownKeys）。
-	// 已知的历史键不该走到这里：它们由 migrate.go 一次性清理掉。
+	// 未知键（含旧键/拼错的键）只告警不阻断：读取时直接忽略，保存时随全量
+	// 覆盖消失。旧键不再有任何兼容处理——它们的值不参与配置语义。
 	for _, k := range unknownConfigKeys(obj) {
-		c.addWarning(k + " —— 未知配置项，已忽略（检查拼写或升级版本）")
+		c.addWarning(k + " —— 未知配置项，已忽略（检查拼写）")
 	}
 	for realm, p := range c.Upstream.Profiles {
 		if realm != "cn" && realm != "global" {
@@ -161,13 +108,43 @@ func parseObject(obj map[string]any, c *Config) (*Config, error) {
 	return c, nil
 }
 
-// MigrateMap 把可能过期的配置对象迁移到当前版本（就地改写），并返回迁移报告。
+// checkVersionGate 唯一的版本守卫：声明得比本程序新的配置文件一律拒绝。
 //
-// 两条使用路径：
-//   - Load：读文件后迁移 + 回写；
-//   - 保存路径（cmd/server）：旧的磁盘内容与面板提交合并后，先迁移再校验/落盘，
-//     保证"写下去的文件永远是当前版本"（否则每次启动都要迁移一遍）。
-func MigrateMap(obj map[string]any) (MigrateReport, error) { return Migrate(obj) }
+// 不做迁移、不做降级：旧版本号（或没有版本号）照当前结构读，认识的键生效、
+// 不认识的键忽略并在下次保存时被覆盖。但反过来（旧程序读新配置）会静默丢掉
+// 新版字段，所以那一种情况必须 fail fast 并告诉用户换新版程序。
+func checkVersionGate(obj map[string]any) error {
+	v, ok := obj["config_version"]
+	if !ok || v == nil {
+		return nil
+	}
+	var declared int
+	switch n := v.(type) {
+	case json.Number:
+		i, err := n.Int64()
+		if err != nil {
+			return fmt.Errorf("config_version: %q 不是整数版本号", n.String())
+		}
+		declared = int(i)
+	case float64:
+		if n != float64(int(n)) {
+			return fmt.Errorf("config_version: %v 不是整数版本号", n)
+		}
+		declared = int(n)
+	case string:
+		i, err := strconv.Atoi(n)
+		if err != nil {
+			return fmt.Errorf("config_version: %q 不是整数版本号", n)
+		}
+		declared = i
+	default:
+		return fmt.Errorf("config_version: 不认识的取值类型 %T（应为整数）", v)
+	}
+	if declared > CurrentVersion {
+		return fmt.Errorf("config_version: %d 由更新版本的程序写入（本程序支持到 %d）：请用新版程序启动", declared, CurrentVersion)
+	}
+	return nil
+}
 
 // addWarning 追加去重后的配置告警（normalize 会被重复调用，同一告警不重复展示）。
 func (c *Config) addWarning(w string) {
@@ -182,41 +159,34 @@ func (c *Config) addWarning(w string) {
 	c.Warnings = append(c.Warnings, w)
 }
 
-// decodeInto 把配置对象解码到 c 上，并执行**版本闸门**。
+// decodeInto 把配置对象解码到 c 上（就地覆盖 c 里出现的键）。
 //
-// 闸门规则：只接受当前版本或完全不带版本号的 JSON。旧版本的显式声明必须报错——
-// 这正是"一次性迁移代替长期归一化"的执行点（旧形态不会走到 normalize）。
-// 版本缺省（0）视为「未声明」：面板表单与单测都会写不带版本号的片段，它们天然是
-// 当前形态；而**文件路径**（Load）已经先经过 Migrate，真实旧文件不会落到这里。
+// 不做版本转换：版本号已由 checkVersionGate 单独把过关（只拒绝比程序新的）。
 func decodeInto(obj map[string]any, c *Config) error {
-	if err := json.Unmarshal(MergedJSON(obj), c); err != nil {
+	// 直接解到传入的 c 上：JSON 里没出现的键保持 c 的现有取值（保存路径正是靠
+	// 这一点做部分更新——提交什么改什么，其余键不动）。
+	// 不认识的键被 encoding/json 静默忽略（= 只读取可用键值）。
+	b, err := json.Marshal(obj)
+	if err != nil {
 		return fmt.Errorf("parse config: %w", err)
 	}
-	switch v := c.ConfigVersion; {
-	case v == 0 || v == CurrentVersion:
-		c.ConfigVersion = CurrentVersion
-	case v > CurrentVersion:
-		return fmt.Errorf("config_version: %d 由更新版本的程序写入（本程序支持到 %d）：请用新版程序启动", v, CurrentVersion)
-	default:
-		return fmt.Errorf("config_version: %d 是旧版本，需要一次性迁移：请通过配置文件启动（Load 会自动迁移并回写）或先调用 MigrateMap", v)
+	if err := json.Unmarshal(b, c); err != nil {
+		return fmt.Errorf("parse config: %w", err)
 	}
 	return nil
 }
 
-// ParseConfig 基于默认值解析一段配置 JSON（不读文件、不读环境变量、**不做迁移**）。
+// ParseConfig 基于默认值解析一段配置 JSON（不读文件、不读环境变量）。
 //
-// 版本闸门：只接受当前版本（CurrentVersion）或完全不带 config_version 的 JSON。
-// 显式声明旧版本的 JSON 一律报错，要求走 Load / MigrateMap 的迁移路径——
-// 这是"不再长期归一化"的执行点：旧形态不能被直接解析，也就不会有兼容分支
-// 悄悄长在 normalize 里。
+// 只拒绝“声明得比本程序新”的版本（见 checkVersionGate）；旧版本与无版本号的
+// JSON 一律按当前结构读，认识的键生效、其余忽略——没有迁移。
 func ParseConfig(raw []byte) (*Config, error) {
 	return ParseConfigInto(raw, Default())
 }
 
-// ParseConfigInto 把 JSON 覆盖到 c 上并 normalize（不读文件、不读 env、不做迁移）。
+// ParseConfigInto 把 JSON 覆盖到 c 上并 normalize（不读文件、不读 env）。
 //
-// 调用方若是从磁盘/面板提交里拿到可能过期的 JSON，应先过 MigrateMap（或直接 Load）：
-// 本函数只认当前版本。
+// c 里已设置的值不会被未提交的键重置：这是保存路径“部分更新”的基础。
 func ParseConfigInto(raw []byte, c *Config) (*Config, error) {
 	obj, err := jsondoc.Object(raw)
 	if err != nil {
@@ -238,7 +208,7 @@ func WriteDefault(path string) (string, error) {
 	c := Default()
 	c.APIKey = key
 	_ = c.normalize() // Default() 全合法，normalize 仅补齐 header/idle 超时的展示值
-	out, err := json.MarshalIndent(c, "", "  ")
+	out, err := MarshalConfig(c)
 	if err != nil {
 		return "", fmt.Errorf("marshal config: %w", err)
 	}

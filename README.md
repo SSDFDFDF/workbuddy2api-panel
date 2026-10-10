@@ -48,6 +48,8 @@ cp config.example.json config.json && docker compose up -d --build
 
 从源码构建需 Go ≥ 1.22（`make build`）；配置字段见 [config.example.json](config.example.json)。协议兼容边界与客户端特征分析见 [docs/](docs/)。
 
+配置只有一个来源：`config.json`（首次启动会按内置推荐值自动生成）。读取时只认当前 schema 的键，键名不认识就忽略并在日志/面板提示；保存（面板改配置）会按当前结构**整份覆盖**写回，因此**手写时拼错的键会在下次保存后消失**。程序不做版本迁移、不兼容旧键旧取值：手改配置前建议先备份，旧格式键名对照见 [FORK_CHANGES.md](FORK_CHANGES.md) §4。
+
 ## 免责声明
 
 本项目仅供学习和研究使用。使用者需遵守 CodeBuddy 服务条款，自行承担使用风险（包括账号封禁、条款违约等）。作者不对任何因使用本项目产生的直接或间接损失负责。

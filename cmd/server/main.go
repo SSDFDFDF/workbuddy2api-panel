@@ -3,7 +3,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -14,14 +13,12 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
 	"workbuddy_manager/internal/auth"
 	"workbuddy_manager/internal/config"
 	"workbuddy_manager/internal/config/runtime"
-	"workbuddy_manager/internal/jsondoc"
 	"workbuddy_manager/internal/media"
 	"workbuddy_manager/internal/panel"
 	"workbuddy_manager/internal/pool"
@@ -79,7 +76,6 @@ func main() {
 	}
 
 	config.LogWarnings(cfg)
-	config.LogMigrations(cfg)
 
 	auths, err := auth.LoadDir(cfg.AuthDir)
 	if err != nil {
@@ -331,10 +327,9 @@ func main() {
 				if err != nil {
 					return nil, err
 				}
-				// 面板配置页据此展示 `_warnings`（未知键）与 `_migrations`
-				//（本次实际执行的版本迁移），不静默吞掉配置被改过这件事。
+				// 面板配置页据此展示 `_warnings`（未知键），不静默吞掉配置里
+				// 有键名拼错这件事。
 				config.LogWarnings(c)
-				config.LogMigrations(c)
 				return c, nil
 			},
 			SaveConfig: func(raw []byte) ([]string, error) {
@@ -519,15 +514,16 @@ func panelListenPath(listen string) string {
 	return listen
 }
 
-// saveConfig 面板保存配置：校验 → 版本迁移 → 落盘 → 热应用 → 返回需重启字段。
+// saveConfig 面板保存配置：叠加 → 校验 → 整份覆盖落盘 → 热应用 → 返回需重启字段。
 //
 // 步骤：
-//  1. 读磁盘旧文件（保留用户手写的未知键，供深合并）；
-//  2. 旧文件先做版本迁移（config.MigrateMap）：写下去的文件永远是当前版本；
-//  3. 合并面板提交的键 → 清掉运行期元数据与未知键；
-//  4. 校验（与启动同一套 Default+normalize），失败直接返回、不落盘；
-//  5. 原子落盘（config.WriteFileAtomic，含 Docker 单文件 bind mount 回落）；
-//  6. 热应用能立即生效的字段，并按「差异 ∩ 需重启目录」返回清单
+//  1. 提交体做 JSON 合法性检查（非法直接拒绝，不碰磁盘）；
+//  2. 读磁盘当前配置并按当前 schema 解析两份：差异基准 + 工作副本；
+//  3. 把提交叠加到工作副本上（提交里没出现的键保持现值）并校验
+//     （与启动同一套 Default+normalize），失败直接返回、不落盘；
+//  4. 把**整份 Config** 原子落盘（config.WriteFileAtomic，含 Docker 单文件
+//     bind mount 回落）：写出去的文件永远是完整当前结构，历史/未知键随之消失；
+//  5. 热应用能立即生效的字段，并按「差异 ∩ 需重启目录」返回清单
 //     （字段名单唯一真相：internal/config/catalog.go）。
 //
 // 串行化：整个「读 → 改 → 写」在 config.FileTx 事务锁里（见 internal/config/lock.go）。
@@ -577,65 +573,54 @@ func saveConfig(raw []byte, path string, hot *hotTargets) ([]string, error) {
 	return restart, nil
 }
 
-// saveConfigTx 执行保存事务本体；调用方必须已持有 config.FileTx（不可重入）。
-func saveConfigTx(raw []byte, path string, hot *hotTargets) ([]string, error) {
-	// 1) 读旧文件并解析为 map（保留用户手写的未知键）。
+// loadForSave 读磁盘配置并解析**两份**对象：差异基准（old）与待改写的工作副本（base）。
+//
+// 为什么要两份：ParseConfigInto 是原地改写，工作副本被提交覆盖后就没法再算差异了
+// （restart_required 依赖 old vs new 的叶子差异）。
+//
+// 读不到 / 解析不了时的口径：工作副本从 Default() 起算（能继续用提交内容覆盖），
+// 差异基准返回 nil —— DiffConfig 把 nil 视为"全部变更"，重启清单退回保守的全量
+// （宁可多报不可漏报）。
+func loadForSave(path string) (old, base *config.Config) {
+	base = config.Default()
 	oldRaw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read current config: %w", err)
+		log.Printf("config: 读当前配置失败，按默认值基准保存（%v）", err)
+		return nil, base
 	}
-	// 旧文件解码失败（非法 JSON / 顶层不是对象）时把 oldCfg 留空：差异计算会
-	// 退化成"全部变更"，重启清单回到保守的全量（宁可多报不可漏报）。
-	cur, oerr := jsondoc.Object(oldRaw)
-	oldUnusable := oerr != nil
-	if oldUnusable {
-		cur = map[string]any{} // 能继续做的只有"用提交内容覆盖"，其余键无从保留
-	}
-	incoming, ierr := jsondoc.Object(raw)
-	if ierr != nil {
-		return nil, fmt.Errorf("parse submitted config: %w", ierr)
-	}
-
-	// 2) 版本迁移（一次性）：磁盘上的旧文件先迁到当前版本。
-	// 写下去的文件永远是当前版本，下次启动不会重复迁移。与 Load 的差别：
-	// 这里不写迁移快照（面板保存已有 .bak 兜底，提交本身就是用户明确意图的覆盖）。
-	if rep, merr := config.MigrateMap(cur); merr != nil {
-		return nil, merr
-	} else if rep.Migrated() {
-		log.Printf("config: 保存时自动迁移 v%d → v%d%s", rep.From, rep.To, migrationNotesSuffix(rep.Notes))
-	}
-
-	// 旧配置的解析结果（供差异计算）。必须在合并提交前解析：合并会原地改写 cur。
-	// 解析失败（含上面的解码失败）时保持 nil → DiffConfig 视为"全部变更"，
-	// 重启清单退回保守的全量。
-	var oldCfg *config.Config
-	if !oldUnusable {
-		if c, cerr := config.ParseConfig(config.MergedJSON(cur)); cerr == nil {
-			oldCfg = c
-		}
-	}
-
-	// 3) 叠加面板提交的键 → 再去掉运行期元数据 → 清未知键。
-	merged := config.MergeConfigMaps(cur, incoming)
-	// 运行期元数据不落盘（否则每次启动都把上次的告警/迁移提示写回文件）。
-	delete(merged, "_warnings")
-	delete(merged, "_migrations")
-	// 未知键不保留：保存 = 用当前结构覆盖配置文件（已知历史键已由迁移清掉，
-	// 这里只管用户拼错的/未登记的）。
-	pruned := config.PruneUnknownKeys(merged)
-
-	// 4) 校验（与启动同一套 Default+normalize），失败直接返回、不落盘。
-	newCfg, err := config.ParseConfig(config.MergedJSON(merged))
+	parsed, err := config.ParseConfigInto(oldRaw, config.Default())
 	if err != nil {
-		return nil, err
+		log.Printf("config: 当前配置不可解析，按默认值基准保存（%v）", err)
+		return nil, base
+	}
+	work, err := config.ParseConfigInto(oldRaw, config.Default())
+	if err != nil {
+		return nil, base
+	}
+	return parsed, work
+}
+
+// saveConfigTx 执行保存事务本体；调用方必须已持有 config.FileTx（不可重入）。
+//
+// 语义：**全量覆盖**。提交的 JSON 只决定它出现的那部分键，其余键保持磁盘现值；
+// 写下去的是完整 Config 序列化结果（当前 schema）。因此：
+//   - 提交里不认识的键（旧键/拼错的键）：忽略，不落盘——写出去的文件里没有；
+//   - 磁盘上的未知/历史键：随这次全量覆盖自然消失，不需要单独的剪枝步骤；
+//   - 部分提交（只改几个键的脚本）不会把其他键重置成默认值。
+func saveConfigTx(raw []byte, path string, hot *hotTargets) ([]string, error) {
+	// 1) 读磁盘当前配置，得到差异基准与待改写的工作副本。
+	oldCfg, base := loadForSave(path)
+
+	// 2) 把提交叠加到基准上（JSON 里没出现的键不动），再校验。
+	// 非法 JSON / 非法取值都在这里被挡下，直接返回、不落盘。
+	newCfg, err := config.ParseConfigInto(raw, base)
+	if err != nil {
+		return nil, fmt.Errorf("提交的配置无效: %w", err)
 	}
 	// 保存时也把告警打出：用户刚改完配置就能看到哪一项没生效。
 	config.LogWarnings(newCfg)
-	if len(pruned) > 0 {
-		log.Printf("config: 已丢弃 %d 个未知/旧配置键：%s", len(pruned), strings.Join(pruned, ", "))
-	}
 
-	// 4.5) auth_dir 热重载预检（必须在落盘前完成，否则失败会留下“文件已改但未生效”）：
+	// 3) auth_dir 热重载预检（必须在落盘前完成，否则失败会留下“文件已改但未生效”）：
 	// 路径已存在且不是目录 → 拒绝；目录不存在按空目录处理（面板登录会 MkdirAll）。
 	authDirChanged := oldCfg == nil || oldCfg.AuthDir != newCfg.AuthDir
 	var newAuths []*auth.Auth
@@ -650,8 +635,10 @@ func saveConfigTx(raw []byte, path string, hot *hotTargets) ([]string, error) {
 		newAuths = auths
 	}
 
-	// 5) 落盘（原子替换 + 只读/挂载错误的可操作提示；与版本迁移回写共用同一实现）。
-	out, err := json.MarshalIndent(merged, "", "  ")
+	// 4) 落盘：写的是**整份 Config**（当前 schema），不是提交原文也不是磁盘原文。
+	// 运行期元数据（告警）不落盘；磁盘上的未知/历史键就此被覆盖掉。
+	newCfg.Warnings = nil
+	out, err := config.MarshalConfig(newCfg)
 	if err != nil {
 		return nil, fmt.Errorf("marshal config: %w", err)
 	}
@@ -659,7 +646,7 @@ func saveConfigTx(raw []byte, path string, hot *hotTargets) ([]string, error) {
 		return nil, err
 	}
 
-	// 6) 热应用：能立即生效的字段全部应用，并列出仍需重启的字段。
+	// 5) 热应用：能立即生效的字段全部应用，并列出仍需重启的字段。
 	// 字段名单的唯一真相是 internal/config/catalog.go（见 restartRequiredFields）。
 	hot.live.Store(runtime.Snapshot{
 		APIKey:           newCfg.APIKey,
@@ -778,14 +765,6 @@ func restartRequiredFields(oldCfg, newCfg *config.Config) []string {
 		}
 	}
 	return out
-}
-
-// migrationNotesSuffix 拼接迁移说明（无说明时不输出空括号）。
-func migrationNotesSuffix(notes []string) string {
-	if len(notes) == 0 {
-		return ""
-	}
-	return "（" + strings.Join(notes, "；") + "）"
 }
 
 // blackcatWindowFrom 由配置推导夜猫子计数窗口覆盖（nil = 内置 23:00–08:00）。

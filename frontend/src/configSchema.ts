@@ -78,7 +78,13 @@ export const CFG_MAP: Record<string, string[]> = {
 
 /* 覆盖型字段：空串也有意义（= 回落内置默认），必须照发。 */
 export const CLEARABLE_CFG = new Set([
-  'prompt_file', 'prompt_text', 'prompt_cn_text', 'prompt_global_text',
+  // 顶层提示词：选「default — 内置默认」= 空串，必需照发——提交里没出现的键会
+  // 保持磁盘现值，不发就等于"没改"，面板保存后回显成旧值（看起来像"选了 default
+  // 却跳回 craft"）。
+  'prompt_preset',
+  'prompt_file', 'prompt_text',
+  // 分域提示词：空串 = 继承顶层（该域三项都空时，后端把这段覆盖整体剪掉）。
+  'prompt_cn_text', 'prompt_global_text',
   'prompt_cn_mode', 'prompt_global_mode', 'prompt_cn_preset', 'prompt_global_preset',
   'proxy_url', 'resin_url', 'resin_platform_name',
   'cn_client_version', 'cn_cli_version', 'global_client_version', 'global_cli_version',
@@ -182,7 +188,16 @@ export function formatRules(rules: FpRule[] | undefined): string {
     .join('\n');
 }
 
-/* 表单收集：所有字段 → 增量配置对象（空 = 不下发，覆盖型除外）。 */
+/* 表单收集：表单值 → 提交对象。
+
+   空串的两种语义（这是本文件最容易改错的地方）：
+   - 默认不下发（undefined）：留空 = 不提交该键，磁盘现值不变；
+   - CLEARABLE_CFG / STR_LIST_CFG 里的字段照发空值：留空本身就是一个选择
+     （回落内置默认 / 清空清单），必须让后端看到。
+   后端保存是「全量覆盖当前 schema」：提交里出现的键才改，其余保持磁盘值
+   （部分提交不会把别的键重置），写出去的文件总是完整当前结构。
+   分域提示词三项全空 = 继承顶层：照发空值即可，后端归一化时会把这段空壳剪掉，
+   前端不需要（也不该）自己判断「磁盘上原本有没有覆盖」。 */
 export function collectConfig(
   form: Record<string, { type?: string; value?: string; checked?: boolean }>,
 ): Record<string, any> {
@@ -205,15 +220,5 @@ export function collectConfig(
   }
   const rulesEl = form['fingerprint_rules_text'];
   if (rulesEl) out.fingerprint_rules = parseRules(String(rulesEl.value ?? ''));
-  /* 提示词分域：整体覆盖语义——全空 = 继承顶层，不下发该域键。 */
-  for (const realm of ['cn', 'global']) {
-    const g = out.prompt?.profiles?.[realm];
-    if (!g) continue;
-    const set = ['mode', 'preset', 'text'].some((k) => g[k] !== undefined && g[k] !== '');
-    if (!set) {
-      delete out.prompt.profiles[realm];
-      if (Object.keys(out.prompt.profiles).length === 0) delete out.prompt.profiles;
-    }
-  }
   return out;
 }

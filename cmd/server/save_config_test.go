@@ -5,6 +5,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -37,22 +38,147 @@ func testHotTargets() *hotTargets {
 	}
 }
 
-// TestUnknownConfigKeySurvivesSave unknown 键在保存回写时保留（不静默删用户数据）。
-func TestUnknownConfigKeySurvivesSave(t *testing.T) {
-	start := map[string]any{"config_version": float64(config.CurrentVersion), "listen": ":1", "my_note": "keep me"}
-	incoming := map[string]any{"listen": ":2"}
-	merged := config.MergeConfigMaps(start, incoming)
-	if _, err := config.ParseConfig(config.MergedJSON(merged)); err != nil {
-		t.Fatalf("save path must accept existing unknown keys: %v", err)
+// TestSaveConfigOverwritesUnknownKeys 保存是**全量覆盖当前 schema**：
+// 磁盘上的未知/历史键随这次覆盖消失，提交里塞的未知键也不会落盘。
+// （这是刻意的：未知键在读取时就已不参与语义，留着只会让文件带着死键越滚越大。）
+func TestSaveConfigOverwritesUnknownKeys(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	legacy := `{"listen":":1","my_note":"drop me","features":{"sanitize":true}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if merged["my_note"] != "keep me" {
-		t.Fatalf("unknown key dropped on save: %v", merged)
+	// 提交里也带一个未知键（模拟旧前端/手写脚本）。
+	payload := []byte(`{"listen":":2","another_note":"also dropped"}`)
+	if _, err := saveConfig(payload, path, testHotTargets()); err != nil {
+		t.Fatalf("saveConfig: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, gone := range []string{"my_note", "features", "another_note"} {
+		if strings.Contains(string(raw), gone) {
+			t.Errorf("未知键 %s 不该出现在落盘内容里:\n%s", gone, raw)
+		}
+	}
+	c, err := config.ParseConfig(raw)
+	if err != nil {
+		t.Fatalf("落盘内容必须可解析: %v", err)
+	}
+	if c.Listen != ":2" {
+		t.Errorf("listen=%q want :2", c.Listen)
+	}
+}
+
+// TestSaveConfigPartialPayloadKeepsOtherKeys 部分提交只改它提到的键：
+// 没出现的键保持磁盘现值（不会被重置成默认值），写出去的是完整当前结构。
+func TestSaveConfigPartialPayloadKeepsOtherKeys(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	// 磁盘上已有非默认值（sleep 两个键都是「面板表单里没有」或「本次没提交」的）。
+	start := `{
+		"listen": ":1",
+		"state_file": "./data/custom-state.json",
+		"logging": {"request_archive_enabled": false, "request_retention_days": 30},
+		"upstream": {"tail_seconds": 42},
+		"pool": {"max_in_flight": 7}
+	}`
+	if err := os.WriteFile(path, []byte(start), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// 只提交一个键。
+	if _, err := saveConfig([]byte(`{"pool":{"max_in_flight":9}}`), path, testHotTargets()); err != nil {
+		t.Fatalf("saveConfig: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := config.ParseConfig(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Pool.MaxInFlight != 9 {
+		t.Errorf("提交的键没生效: max_in_flight=%d", c.Pool.MaxInFlight)
+	}
+	// 以下都是「本次没提交」，必须原样保留（若退化成整体重置会变回默认值）。
+	if c.StateFile != "./data/custom-state.json" {
+		t.Errorf("state_file=%q 被重置了（部分提交不得影响未提交的键）", c.StateFile)
+	}
+	if c.Logging.RequestArchiveEnabled || c.Logging.RequestRetentionDays != 30 {
+		t.Errorf("logging 段被重置: %+v", c.Logging)
+	}
+	if c.Upstream.TailSeconds != 42 {
+		t.Errorf("upstream.tail_seconds=%d 被重置（该键不在面板表单里）", c.Upstream.TailSeconds)
+	}
+	// 写出去的是完整结构：不在提交里、也不在磁盘原文里显式出现的键，会以
+	// 当前 schema 的形态出现（例如 server.read_timeout 的默认值）。
+	if !strings.Contains(string(raw), "read_timeout") {
+		t.Errorf("落盘内容应是完整当前结构（缺 read_timeout）:\n%s", raw)
+	}
+}
+
+// TestSaveConfigPrunesEmptyPromptProfiles 分域提示词覆盖全空 = 继承顶层：
+// 落盘时不留空壳对象（面板把「继承顶层」表达为三项全空）。
+func TestSaveConfigPrunesEmptyPromptProfiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	start := `{"listen":":1","prompt":{"mode":"inject","profiles":{"cn":{"preset":"official-craft"}}}}`
+	if err := os.WriteFile(path, []byte(start), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := saveConfig([]byte(`{"prompt":{"profiles":{"cn":{"mode":"","preset":"","text":""}}}}`), path, testHotTargets()); err != nil {
+		t.Fatalf("saveConfig: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := config.ParseConfig(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.Prompt.Profiles["cn"]; ok {
+		t.Errorf("全空的分域覆盖应被剪掉，实际 %+v\n%s", c.Prompt.Profiles, raw)
+	}
+	// prompt 段里不该留下任何 profiles 键（upstream.profiles 是另一回事，始终存在）。
+	var doc struct {
+		Prompt map[string]any `json:"prompt"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := doc.Prompt["profiles"]; ok {
+		t.Errorf("落盘内容的 prompt 段不该出现空 profiles 壳:\n%s", raw)
+	}
+}
+
+// TestSaveConfigRejectsLegacyPromptMode 旧 mode 取值（v2 时代的 custom/passthrough）
+// 没有迁移：保存时直接报错并把合法取值列出来，不静默降级。
+func TestSaveConfigRejectsLegacyPromptMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"listen":":1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(path)
+	_, err := saveConfig([]byte(`{"prompt":{"mode":"custom"}}`), path, testHotTargets())
+	if err == nil || !strings.Contains(err.Error(), "prompt.mode") {
+		t.Fatalf("旧 mode 取值必须报错，实际: %v", err)
+	}
+	if !strings.Contains(err.Error(), "replace") {
+		t.Errorf("报错信息应列出合法取值，实际: %v", err)
+	}
+	after, _ := os.ReadFile(path)
+	if string(before) != string(after) {
+		t.Errorf("被拒绝的保存不得改写配置文件:\nbefore=%s\nafter=%s", before, after)
 	}
 }
 
 // TestSaveConfigMediaPolicyRoundTrip 面板保存 + 热生效往返（media 段）。
 //
-// 后端走 merge → PruneUnknownKeys → ParseConfig → 热应用。这里用与前端 collectConfig
+// 后端走「叠加到磁盘现值 → ParseConfig → 整份覆盖落盘 → 热应用」。这里用与前端 collectConfig
 // 相同形态的 payload（bool + number）钉住 media 段：
 //   - 三个键都不是未知键（不被剪掉）；
 //   - 数值档位落到 int 字段（不是字符串）；
@@ -115,9 +241,9 @@ func TestSaveConfigRejectsInvalidMediaPolicy(t *testing.T) {
 }
 
 // TestSaveConfigIngressRoundTrip 面板保存路径的类型往返（server.* 入站准入四项）：
-// 面板提交的是 JSON（number → int，时长 → 字符串），后端走
-// merge → PruneUnknownKeys → ParseConfig。钉住三件事：
-//   - 四项都不是未知键（不被剪掉）；
+// 面板提交的是 JSON（number → int，时长 → 字符串），后端叠加到磁盘现值后校验落盘。
+// 钉住三件事：
+//   - 四项都落进当前 schema（不被丢弃）；
 //   - 数值落到 int 字段（不是字符串），且 **0 是合法取值**（"不限制"）——前端把
 //     0 与空串区分开正是为此（见 internal/panel/frontend_test.go 的 CollectIngressPolicy）；
 //   - 时长字面量（含裸 "0"）被解析成对应 duration，而不是被当成缺省值回落。
@@ -175,18 +301,16 @@ func TestSaveConfigIngressRoundTrip(t *testing.T) {
 	}
 }
 
-// TestSaveConfigStampsCurrentVersionAndMigratesLegacy 保存路径也必须跑迁移：
-// 面板提交的配置与磁盘上的旧文件合并后，写下去的文件永远是**当前版本**，
-// 否则每次启动都要迁移一遍（且用户永远看到"已自动迁移"的提示）。
-func TestSaveConfigStampsCurrentVersionAndMigratesLegacy(t *testing.T) {
+// TestSaveConfigWritesCurrentVersion 保存路径写出的文件永远是当前版本号 +
+// 当前 schema，不认识的键（历史遗留段、退役键）随全量覆盖消失。
+func TestSaveConfigWritesCurrentVersion(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	// 磁盘上是带历史遗留键的旧文件（无版本号）。
-	legacy := `{"prompt":{"mode":"custom"},"cooldown":{"hard_credit":"1h","soft_rate":"30s"},"my_note":"keep"}`
+	legacy := `{"cooldown":{"hard_credit":"1h","soft_rate":"30s"},"my_note":"keep","prompt":{"mode":"replace"}}`
 	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// 面板提交一个热字段（与前端 collectConfig 同形态）。
 	payload := []byte(`{"pool":{"max_in_flight":9}}`)
 	if _, err := saveConfig(payload, path, testHotTargets()); err != nil {
 		t.Fatalf("saveConfig: %v", err)
@@ -200,37 +324,31 @@ func TestSaveConfigStampsCurrentVersionAndMigratesLegacy(t *testing.T) {
 		t.Fatalf("落盘文件必须能被当前版本解析: %v\n%s", err, raw)
 	}
 	if disk.ConfigVersion != config.CurrentVersion {
-		t.Errorf("config_version=%d want %d（保存必须归一版本）", disk.ConfigVersion, config.CurrentVersion)
+		t.Errorf("config_version=%d want %d", disk.ConfigVersion, config.CurrentVersion)
 	}
-	for _, gone := range []string{"hard_credit", `"custom"`} {
+	for _, gone := range []string{"hard_credit", "my_note"} {
 		if strings.Contains(string(raw), gone) {
-			t.Errorf("旧形态 %s 仍在落盘内容里:\n%s", gone, raw)
+			t.Errorf("历史/未知键 %s 仍在落盘内容里:\n%s", gone, raw)
 		}
 	}
-	// 迁移后的值生效：custom → replace 被保留为 prompt.mode。
+	// 已知的旧文件取值原样保留（没有迁移，也没有被重置）。
 	if disk.Prompt.Mode != "replace" {
-		t.Errorf("prompt.mode=%q want replace（旧取值应被迁移而不是丢弃）", disk.Prompt.Mode)
+		t.Errorf("prompt.mode=%q want replace（已知取值应保持不变）", disk.Prompt.Mode)
 	}
 	if disk.Pool.MaxInFlight != 9 {
-		t.Errorf("面板提交的值没生效: max_in_flight=%d", disk.Pool.MaxInFlight)
-	}
-	// 未知键被**清掉**：这是保存路径的既有语义（面板保存 = 用当前结构覆盖
-	// 配置文件，用户拼错/未登记的键就此消失），与版本迁移回写刻意不同——
-	// 迁移是自动发生的，不能删用户的东西；保存是用户显式动作，可以收口。
-	if strings.Contains(string(raw), "my_note") {
-		t.Errorf("保存路径应丢弃未知键（持久化只留当前结构）:\n%s", raw)
+		t.Errorf("提交的值没生效: max_in_flight=%d", disk.Pool.MaxInFlight)
 	}
 }
 
 // TestSaveConfigDropsRuntimeMetaAndHandlesCorruptOld 两个边界：
-//   - 运行期元数据（_warnings/_migrations）不得被保存路径持久化（否则每次启动
-//     都把上一轮的告警/迁移提示写回文件，越滚越多）；
-//   - 旧文件是坏 JSON 时保存仍可成功（用提交内容覆盖），且重启清单退回保守全量。
+//   - 运行期元数据（_warnings）不得被保存路径持久化（否则每次启动都把上一轮的
+//     告警写回文件，越滚越多）；
+//   - 旧文件是坏 JSON 时保存仍可成功（从 Default 基准覆盖），且重启清单退回保守全量。
 func TestSaveConfigDropsRuntimeMetaAndHandlesCorruptOld(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	// 磁盘上是带运行期元数据的正常文件。
-	if err := os.WriteFile(path, []byte(`{"listen":":1","_warnings":["stale"],"_migrations":["stale"]}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"listen":":1","_warnings":["stale"]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := saveConfig([]byte(`{"pool":{"max_in_flight":4}}`), path, testHotTargets()); err != nil {

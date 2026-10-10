@@ -120,23 +120,59 @@ func TestBadDuration(t *testing.T) {
 	}
 }
 
-func TestHardCreditKeyMigratedAway(t *testing.T) {
-	// 退役键不阻断启动，且由**一次性迁移**清掉（而不是永久"忽略并告警"）。
-	// 详见 migrate.go 的文件头：长期忽略会让配置文件永远带着死键。
-	dir := t.TempDir()
-	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"cooldown":{"hard_credit":"not-a-duration","soft_rate":"30s"}}`), 0o600)
-	c, err := Load(fp)
-	if err != nil {
-		t.Fatalf("retired key must not block startup: %v", err)
+// TestUnknownKeysIgnoredOnLoad 未知/退役键在读取时直接忽略：不阻断启动、
+// 不参与语义、只告警，并且**读盘不改盘**（没有迁移回写这回事）。
+// 它们要等到下一次保存（全量覆盖）才会从文件里消失。
+func TestUnknownKeysIgnoredOnLoad(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		goneKey string
+		check   func(t *testing.T, c *Config)
+	}{
+		{
+			name:    "退役的 cooldown.hard_credit",
+			body:    `{"cooldown":{"hard_credit":"not-a-duration","soft_rate":"30s"}}`,
+			goneKey: `"hard_credit"`,
+			check: func(t *testing.T, c *Config) {
+				if c.SoftRateDur.Seconds() != 30 {
+					t.Errorf("soft_rate=%v want 30s（同段其余键照常生效）", c.SoftRateDur)
+				}
+			},
+		},
+		{
+			name:    "退役的 schedule.travel_interval_minutes",
+			body:    `{"schedule":{"travel_interval_minutes":15,"checkin_hours":[9]}}`,
+			goneKey: `"travel_interval_minutes"`,
+			check: func(t *testing.T, c *Config) {
+				if len(c.Schedule.CheckinHours) != 1 || c.Schedule.CheckinHours[0] != 9 {
+					t.Errorf("checkin_hours=%v want [9]（同段其余键照常生效）", c.Schedule.CheckinHours)
+				}
+			},
+		},
 	}
-	if c.SoftRateDur.Seconds() != 30 {
-		t.Errorf("soft_rate=%v want 30s（同段其余键照常生效）", c.SoftRateDur)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			fp := filepath.Join(dir, "c.json")
+			if err := os.WriteFile(fp, []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before, _ := os.ReadFile(fp)
+			c, err := Load(fp)
+			if err != nil {
+				t.Fatalf("未知键不得阻断启动: %v", err)
+			}
+			if !hasWarning(c.Warnings, strings.Trim(tc.goneKey, `"`)) {
+				t.Errorf("未知键必须出现在告警里: %v", c.Warnings)
+			}
+			tc.check(t, c)
+			after, _ := os.ReadFile(fp)
+			if string(before) != string(after) {
+				t.Errorf("读盘不得改盘（已无迁移回写）：\nbefore=%s\nafter=%s", before, after)
+			}
+		})
 	}
-	if !hasMigration(c.Migrations, "cooldown.hard_credit") {
-		t.Errorf("退役键必须出现在迁移说明里: %v", c.Migrations)
-	}
-	assertMigratedOnDisk(t, fp, `"hard_credit"`)
 }
 
 func TestNewPoolConfigDefaults(t *testing.T) {
@@ -356,54 +392,6 @@ func TestUpstreamEnvOverride(t *testing.T) {
 	}
 	if c.Upstream.IdleTimeoutSeconds != 900 {
 		t.Errorf("idle_timeout_seconds=%d want env 900", c.Upstream.IdleTimeoutSeconds)
-	}
-}
-
-// TestRetiredTravelIntervalKeyIgnored 退役的 travel_interval_minutes 键仅告警，同段其余键照常生效。
-func TestRetiredTravelIntervalKeyMigratedAway(t *testing.T) {
-	dir := t.TempDir()
-	fp := filepath.Join(dir, "c.json")
-	os.WriteFile(fp, []byte(`{"schedule":{"travel_interval_minutes":15,"checkin_hours":[9]}}`), 0o600)
-	c, err := Load(fp)
-	if err != nil {
-		t.Fatalf("retired key should not fail load: %v", err)
-	}
-	if len(c.Schedule.CheckinHours) != 1 || c.Schedule.CheckinHours[0] != 9 {
-		t.Errorf("checkin_hours=%v want [9]（同段其余键照常生效）", c.Schedule.CheckinHours)
-	}
-	if !hasMigration(c.Migrations, "schedule.travel_interval_minutes") {
-		t.Errorf("退役键必须出现在迁移说明里: %v", c.Migrations)
-	}
-	assertMigratedOnDisk(t, fp, `"travel_interval_minutes"`)
-}
-
-// hasMigration 报告迁移说明里是否含指定片段（迁移说明是"键名 → 处理"的逐条字符串）。
-func hasMigration(notes []string, needle string) bool {
-	for _, n := range notes {
-		if strings.Contains(n, needle) {
-			return true
-		}
-	}
-	return false
-}
-
-// assertMigratedOnDisk 断言迁移已**回写**：文件里不再出现旧键，且版本号升到当前版本。
-// 这是"一次性迁移"的关键性质——迁移必须落盘，否则每次启动都要再迁一遍。
-func assertMigratedOnDisk(t *testing.T, path, goneKey string) {
-	t.Helper()
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(raw), goneKey) {
-		t.Errorf("旧键 %s 仍在磁盘文件里（迁移没回写）:\n%s", goneKey, raw)
-	}
-	c, err := ParseConfig(raw)
-	if err != nil {
-		t.Fatalf("迁移后的文件必须能被当前版本解析: %v", err)
-	}
-	if c.ConfigVersion != CurrentVersion {
-		t.Errorf("config_version=%d want %d", c.ConfigVersion, CurrentVersion)
 	}
 }
 
@@ -839,8 +827,9 @@ func hasWarning(warnings []string, needle string) bool {
 	return false
 }
 
-// TestUnknownConfigKeyTolerated 未知/笔误键只告警，不阻断：面板保存会把旧文件
-// 深合并回来，若严格拒收则任何历史遗留键都会让配置写不回去。
+// TestUnknownConfigKeyTolerated 未知/笔误键只告警，不阻断：读取时直接忽略
+// （不参与语义），保存时随全量覆盖消失。若在这里拒收，用户手改配置里残留一个
+// 旧键就再也启动不了。
 func TestUnknownConfigKeyTolerated(t *testing.T) {
 	c, err := ParseConfig([]byte(`{"config_version":3,"upstream":{"profiles":{"cn":{"client_verison":"9.9.9"}}},"listen":":1234"}`))
 	if err != nil {
@@ -1135,64 +1124,60 @@ func TestPlainProxyEnv(t *testing.T) {
 	}
 }
 
-// TestPruneUnknownKeysNestedValid 未知键识别必须只认"真的不认识"的键：
+// 未知键识别必须只认"真的不认识"的键：
 // 嵌套 map 值类型里的合法字段（prompt.profiles.cn.mode）不能被误删。
 // 回归：早期实现把零值 Config 序列化成已知树，nil map → null，导致这些
 // 子键全部被判未知并 prune 掉。
-func TestPruneUnknownKeysNestedValid(t *testing.T) {
-	raw := map[string]any{
+// 未知键只告警，不影响解析结果：合法嵌套键（含 upstream.profiles / prompt.profiles
+// 这类 map 内部键）照常生效；未知键与拼错的键既不入配置语义，也不会让解析失败。
+// （写侧不再需要剪枝：保存是全量覆盖，未知键自然消失——见 cmd/server 的保存测试。）
+func TestUnknownKeysDoNotAffectConfig(t *testing.T) {
+	raw := []byte(`{
 		"listen": ":1",
-		"media":  map[string]any{"tool_images": "hoist"},
-		"prompt": map[string]any{
+		"media":  {"tool_images": "hoist"},
+		"prompt": {
 			"mode":   "after",
-			"preset": "minimal",
-			"profiles": map[string]any{
-				"cn":     map[string]any{"mode": "replace", "preset": "coding", "text": "x"},
-				"global": map[string]any{"file": "/tmp/p.md"},
-			},
+			"preset": "official-ask",
+			"profiles": {
+				"cn":     {"mode": "replace", "preset": "official-plan", "text": "x"},
+				"global": {"text": "y"}
+			}
 		},
-		"upstream": map[string]any{
-			"profiles": map[string]any{
-				"cn": map[string]any{"client_version": "9.9.9", "client_verison": "typo"},
-			},
-		},
-		"features":  map[string]any{"sanitize_blacklist_fingerprints": true},
-		"bogus_top": 1,
-	}
-	pruned := PruneUnknownKeys(raw)
-
-	// 合法嵌套键必须全部保留。
-	cn := raw["prompt"].(map[string]any)["profiles"].(map[string]any)["cn"].(map[string]any)
-	if cn["mode"] != "replace" || cn["preset"] != "coding" || cn["text"] != "x" {
-		t.Fatalf("valid nested keys were pruned: %v", cn)
-	}
-	gl := raw["prompt"].(map[string]any)["profiles"].(map[string]any)["global"].(map[string]any)
-	if gl["file"] != "/tmp/p.md" {
-		t.Fatalf("global override pruned: %v", gl)
-	}
-	up := raw["upstream"].(map[string]any)["profiles"].(map[string]any)["cn"].(map[string]any)
-	if up["client_version"] != "9.9.9" {
-		t.Fatalf("upstream profile pruned: %v", up)
+		"upstream": {"profiles": {"cn": {"client_version": "9.9.9", "client_verison": "typo"}}},
+		"features":  {"sanitize_blacklist_fingerprints": true},
+		"bogus_top": 1
+	}`)
+	c, err := ParseConfig(raw)
+	if err != nil {
+		t.Fatalf("未知键不得让解析失败: %v", err)
 	}
 
-	// media.tool_images 是已知键（面板保存不能把它当未知键丢掋）。
-	if got := raw["media"].(map[string]any)["tool_images"]; got != "hoist" {
-		t.Fatalf("media.tool_images pruned: %v", got)
+	// 合法嵌套键必须全部生效。
+	if c.Listen != ":1" {
+		t.Errorf("listen=%q", c.Listen)
+	}
+	if c.Media.ToolImages != "hoist" {
+		t.Errorf("media.tool_images=%q（已知键不得被忽略）", c.Media.ToolImages)
+	}
+	if c.Prompt.Mode != "after" || c.Prompt.Preset != "official-ask" {
+		t.Errorf("prompt mode/preset = %q/%q", c.Prompt.Mode, c.Prompt.Preset)
+	}
+	cn := c.Prompt.Profiles["cn"]
+	if cn.Mode != "replace" || cn.Preset != "official-plan" || cn.Text != "x" {
+		t.Errorf("prompt.profiles.cn = %+v", cn)
+	}
+	if gl := c.Prompt.Profiles["global"]; gl.Text != "y" {
+		t.Errorf("prompt.profiles.global = %+v", gl)
+	}
+	if got := c.Upstream.Profiles["cn"].ClientVersion; got != "9.9.9" {
+		t.Errorf("upstream.profiles.cn.client_version=%q", got)
 	}
 
-	// 真正的未知键被删。
-	if _, ok := raw["features"]; ok {
-		t.Error("features (removed section) must be pruned")
-	}
-	if _, ok := raw["bogus_top"]; ok {
-		t.Error("bogus_top must be pruned")
-	}
-	if _, ok := up["client_verison"]; ok {
-		t.Error("typo key must be pruned")
-	}
-	want := []string{"bogus_top", "features", "upstream.profiles.cn.client_verison"}
-	if strings.Join(pruned, ",") != strings.Join(want, ",") {
-		t.Errorf("pruned=%v want %v", pruned, want)
+	// 未知键只告警（顶层未知段、拼错的嵌套键都要能被发现）。
+	for _, want := range []string{"features", "bogus_top", "upstream.profiles.cn.client_verison"} {
+		if !hasWarning(c.Warnings, want) {
+			t.Errorf("缺少对 %q 的告警: %v", want, c.Warnings)
+		}
 	}
 }
 

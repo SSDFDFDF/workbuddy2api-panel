@@ -1,10 +1,10 @@
 // normalize.go 配置归一化与校验：所有「认识的键、值非法」都在这里 fail fast。
 //
-// **只处理当前版本**（见 migrate.go 的纪律）：
-//   - 旧键、旧取值一律不在这里兼容——它们由 migrate.go 一次性迁移掉；
-//   - 这里只做三件事：缺省值补齐、非法值钳制/报错、派生字段（*Dur / *Client /
-//     PromptRules）计算；
-//   - 任何"为了兼容旧配置"的分支都不该出现在本文件，否则兼容债会永久驻留。
+// 这里只做三件事：缺省值补齐、非法值钳制/报错、派生字段（*Dur / *Client /
+// PromptRules / Window 分钟数）计算。
+//
+// 没有"为了兼容旧配置"的分支：不认识的键在读侧就已被忽略，认识的键取值非法
+// 一律 fail fast（报错信息里给出合法取值），不静默降级成另一种行为。
 //
 // 未知键不进这里（只由 keyshape.go 告警）。
 package config
@@ -227,8 +227,8 @@ func (c *Config) normalize() error {
 	return c.normalizePrompt()
 }
 
-// normalizePrompt / buildPromptRule / normalizePromptMode 等见 prompt_config.go：
-// 校验 prompt.mode（none/replace/append/after/inject，历史别名迁移并告警）、按域覆盖
+// normalizePrompt / buildPromptRule / normalizePromptMode 等见 prompt.go：
+// 校验 prompt.mode（none/replace/append/after/inject，旧取值直接报错）、按域覆盖
 // 构建 c.PromptRules（键 "" / cn / global），并在需要正文时解析 preset/file/text
 // （素材优先级 text > file > preset，file 不可读 → fail fast）。
 

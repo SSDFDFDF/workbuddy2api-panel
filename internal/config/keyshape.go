@@ -1,10 +1,10 @@
 // keyshape.go 配置键识别：只认 Config 结构里存在的键。
 //
-// 三条口径：
-//   - 未知键（含改名前的旧键、已删除的配置段）在启动/保存时进 Warnings，不阻断；
-//   - 不认识就不读取：旧键的值一律不参与配置语义（没有别名，也没有迁移）；
-//   - 面板保存时直接丢弃未知键（PruneUnknownKeys），让配置文件被新结构覆盖，
-//     而不是把历史遗留永久带着走。
+// 口径：
+//   - 读取时只认已知键（反序列化天然忽略其余键），不认识的键只进 Warnings 提示，
+//     让用户能发现自己拼错了键名；值一律不参与配置语义（没有别名、没有旧键兼容）；
+//   - 保存时整份文件按当前结构全量覆盖，未知键/历史遗留键自然消失，
+//     因此不需要写侧剪枝逻辑。
 //
 // 只有「认识的键、值非法」才报错。
 package config
@@ -108,37 +108,4 @@ func joinPath(path, key string) string {
 		return key
 	}
 	return path + "." + key
-}
-
-// PruneUnknownKeys 从原始配置 map 中删除 Config 不认识的键（就地修改），返回删除的路径。
-//
-// 为什么在保存时删而不是保留：旧键（改名前的 mode 取值、已删除的 prompt/features 段）
-// 保留下来只会让每次启动都重复告警，且让用户误以为它仍在生效。保存 = 用当前结构覆盖，
-// 未知键就此消失；下次启动零告警。
-//
-// 只在保存路径调用：启动路径仍需 raw 原文（未知键进 Warnings 提示用户），
-// 且不能在读文件时改盘。
-func PruneUnknownKeys(raw map[string]any) []string {
-	paths := unknownConfigKeys(raw)
-	for _, p := range paths {
-		// 数组元素路径（a[]）不在配置结构里出现，跳过。
-		if strings.HasSuffix(p, "[]") {
-			continue
-		}
-		segs := strings.Split(p, ".")
-		parent := raw
-		ok := true
-		for _, seg := range segs[:len(segs)-1] {
-			next, isMap := parent[seg].(map[string]any)
-			if !isMap {
-				ok = false
-				break
-			}
-			parent = next
-		}
-		if ok {
-			delete(parent, segs[len(segs)-1])
-		}
-	}
-	return paths
 }

@@ -27,9 +27,10 @@ import (
 
 type tsSchema struct {
 	// mapName 表单字段名 → config 叶子路径（点分）。
-	mapPath map[string]string
-	numeric map[string]bool // NUMERIC_CFG
-	strList map[string]bool // STR_LIST_CFG
+	mapPath   map[string]string
+	numeric   map[string]bool // NUMERIC_CFG
+	strList   map[string]bool // STR_LIST_CFG
+	clearable map[string]bool // CLEARABLE_CFG
 }
 
 var (
@@ -45,7 +46,7 @@ func parseConfigSchemaTS(t *testing.T) tsSchema {
 		t.Fatalf("读取前端口径文件失败（源码树不完整？测试需在仓库内运行）：%v", err)
 	}
 	src := string(raw)
-	out := tsSchema{mapPath: map[string]string{}, numeric: map[string]bool{}, strList: map[string]bool{}}
+	out := tsSchema{mapPath: map[string]string{}, numeric: map[string]bool{}, strList: map[string]bool{}, clearable: map[string]bool{}}
 
 	// CFG_MAP：只认顶层条目（形如 `name: ['a', 'b'],`），嵌套行是逗号结尾的单行。
 	lines := strings.Split(src, "\n")
@@ -88,7 +89,7 @@ func parseConfigSchemaTS(t *testing.T) tsSchema {
 		case "STR_LIST_CFG":
 			dst = out.strList
 		case "CLEARABLE_CFG":
-			dst = map[string]bool{} // 本测试不核对，占位避免误用
+			dst = out.clearable
 		}
 		for _, s := range reTsString.FindAllStringSubmatch(rest[:end], -1) {
 			dst[s[1]] = true

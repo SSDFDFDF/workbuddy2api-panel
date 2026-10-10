@@ -1,12 +1,12 @@
 // write.go 配置文件落盘原语：原子替换 + 只读/挂载错误的可操作提示 + 快照备份。
 //
 // 为什么独立成文件：这些语义（tmp+rename、Docker 单文件 bind mount 的 EBUSY
-// 回落、只读挂载的成因提示、0600）此前只存在于 cmd/server 的面板保存路径里；
-// 版本迁移在**读文件**时也要回写一次，两处必须完全一致，否则会出现
-// "面板保存能写、迁移回写写不了"这种只在特定部署形态暴露的差异。
+// 回落、只读挂载的成因提示、0600）是配置写盘的唯一实现：首次运行生成默认配置
+// （WriteDefault）与面板保存共用同一套（读路径只读，不写盘）。
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -14,6 +14,15 @@ import (
 	"path/filepath"
 	"syscall"
 )
+
+// MarshalConfig 把配置序列化为**落盘形态**（两空格缩进，便于用户直接编辑）。
+//
+// 落盘形态必须可读：紧凑单行会把一份手写配置文件变成一整行，用户下次打开基本
+// 无法维护。所有写盘路径（首次生成的默认配置、面板保存）共用本函数，
+// 保证"程序写出来的文件"只有一种形状。
+func MarshalConfig(v any) ([]byte, error) {
+	return json.MarshalIndent(v, "", "  ")
+}
 
 // WriteFileAtomic 原子替换写文件：tmp + 写 + rename（同目录，保证 rename 原子）。
 //
@@ -97,12 +106,6 @@ func SnapshotFile(src, dst string) error {
 
 // BackupPath 通用兜底备份名（config.json.bak）。
 func BackupPath(path string) string { return path + ".bak" }
-
-// VersionSnapshotPath 迁移前快照名（config.json.v<from>）：文件从哪个版本迁上来，
-// 快照就叫哪个名字，语义自解释，便于用户直接 `cp` 回退。
-func VersionSnapshotPath(path string, from int) string {
-	return fmt.Sprintf("%s.v%d", path, from)
-}
 
 // SeedBackup 首次成功加载时顺手种一份 .bak（已存在则不动）。
 //

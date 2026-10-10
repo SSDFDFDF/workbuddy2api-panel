@@ -62,7 +62,7 @@ git log --oneline <已同步基线>..upstream/main     # 列出待判定提交�
 | 5 | **出站指纹改写层** | 改写 user/assistant/tool/推理/工具入参里的已知指纹串（内置 7 类 + 自定义规则） | `false` |
 | 6 | **分域身份与 UA** | 按 `realm × 用途` 生成版本、产品名、Origin、语言与 UA；不随代理域名变化 | CN `5.7.6`/Global `5.6.2` |
 | 7 | **缓存键** | `prompt_cache_key` 改 HMAC 派生（持久化 secret）；无显式会话则不生成 | 生效 |
-| 8 | **配置版本迁移** | `config_version` + 一次性迁移（读时识别版本 → 改写 → 回写 + `.v<旧版本>` 快照）；未知键告警、面板保存时丢弃 | 生效 |
+| 8 | **配置读写从简** | 单份 `config.json` 即唯一真相：读取只认已知键（不认识的键忽略并告警，不做版本迁移、不做旧取值兼容、读盘不改盘），保存 = 把提交叠加到磁盘现值后**按当前 schema 整份覆盖**（历史遗留键随之消失） | 生效 |
 | 9 | **Web 管理面板** | 内嵌单页（明暗主题，七个视图）：账号运维 / 用量与积分 / 模型档位 / 在线改配置（热生效，唯一真相为 `internal/config/catalog.go`；仍需重启的只有 5 个字段：监听地址、状态文件路径、服务读超时、Upstash 地址与 Token）/ 运行日志 / 任务中心 | 生效 |
 | 10 | **积分任务体系** | 任务列表/接受/领取 + 「一键完成」覆盖 25 个内置成长任务动作（纯 API）；任务中心全账号扫描 + 执行队列；**哪些任务参与自动化可配置**（`growth.autotasks`：黑/白名单、执行顺序、mp 口径码、逐任务参数 gap/target/window/activity_id、未内置判据任务的 accept+领奖兜底），保存即热生效 | 生效（缺省全启用） |
 | 11 | **出站代理** | 普通正向代理 + Resin 粘性代理池 + 账号级代理开关 | 未配置 = 不接入 |
@@ -202,32 +202,43 @@ content:[]。空数组保持原形，不作为 null、缺失结果或虚构文�
 
 厂商直连补丁不等于 WorkBuddy 能力；后续采用补丁须提供真实上游脱敏请求 / 原始帧依据与回归测试。
 
-## 4. 配置版本与一次性迁移（`config_version`）
+## 4. 配置读写：只认当前 schema，不做迁移
 
-配置文件带 `config_version`（当前 `3`），由 `internal/config/migrate.go` 执行
-**一次性迁移**：读取时识别版本 → 逐级改写 → 立即回写（并留 `config.json.v<旧版本>` 快照）。
-迁移跑过后磁盘上就是当前版本，**兼容分支不会长期留在程序里**（normalize 只认当前版本）。
+配置文件带 `config_version`（当前 `3`），但它只是**标记 + 一道单向守卫**，不再是迁移链的终点：
 
-不支持迁移的情况会 fail fast 并给出人工路径：版本比程序新（用新版程序启动）、
-版本早于迁移链起点。
+- **读取**（`internal/config/load.go`）：把文件反序列化到 `Default()` 上，只认 `Config` 结构里存在的键；
+  不认识的键（含 v1/v2 时代的旧键）忽略并进 `_warnings` 提示键名，**不参与任何语义**；
+  旧取值（如 `prompt.mode: custom`）不做别名兼容，直接报错并列出合法取值。
+  读盘**不改盘**——没有"读时迁移回写"，也没有 `config.json.v<旧版本>` 快照。
+- **唯一守卫**：文件声明的 `config_version` 比程序新 → 拒绝启动（旧程序读新配置会静默丢掉
+  不认识的键，那种数据损失必须 fail fast）。更旧的版本号不做任何转换，照当前结构读。
+- **保存**（`cmd/server` 的 `saveConfigTx`）：提交的 JSON 叠加到**磁盘现值**上（提交里没出现的键
+  保持原值，因此部分提交不会把其它键重置），校验后把**整份 `Config`** 序列化落盘。
+  于是磁盘上的未知键/历史遗留随这次覆盖自然消失，写出去的文件永远是完整当前结构。
 
-迁移覆盖的历史遗留（v1 时代改名未迁移的键 + 更早退役的键）：
+由此带来的行为变化（相对"一次性迁移"口径）：
 
-| 旧键 | 迁移处理 |
+| 旧口径 | 现口径 |
 | --- | --- |
-| `features.sanitize_blacklist_fingerprints: true` | → `fingerprint_rewrite: true`（**仅显式 true**；v1 缺省为 true、当前缺省为 false，缺省不迁，不替用户开开关），随后删除 `features` 段 |
-| `upstream.client_version` / `cli_version` | → `upstream.profiles.{cn,global}.{client_version,cli_version}`（v1 是全局单值、对两域都生效；目标域已有显式值的不覆盖） |
-| `upstream.user_agent` | **删除并给出替代键提示**（v1 是「全路径完全覆盖」，当前只有按域×按用途的 `user_agents`，机械映射必然猜错用途，所以不猜） |
-| `prompt.mode: custom` | → `replace` |
-| `prompt.mode: passthrough` | → `none` |
-| `cooldown.hard_credit` / `err_threshold` / `err_cooldown` | 删除（硬冷却固定次日 04:00，连续错误语义并入熔断器） |
-| `schedule.travel_interval_minutes` | 删除（已被 `schedule.travel_hours` 取代） |
+| 旧键由迁移机械改写（`features.*` → `fingerprint_rewrite`、`prompt.mode: custom` → `replace`、`upstream.client_version` → `profiles.*`…） | 一律不做：旧键忽略并告警，旧取值报错。要沿用旧配置就得手工对照下表改名 |
+| 读取时自动迁移并回写 + 留快照 | 读盘只读；旧键留在文件里直到下一次保存被覆盖 |
+| 保存时深合并原始 map + 剪掉未知键 | 叠加到磁盘现值后整份覆盖（未知键不再需要单独剪枝） |
+| 空的分域提示词覆盖会写成空壳对象 | 保存时剪掉（`PruneEmptyPromptProfiles`），文件里不出现空壳 |
 
-其它默认值变更：`upstream.chat_base_cn` → `https://www.workbuddy.cn`。
+历史键对照（**仅供手工迁移参考，程序不再自动处理**）：
 
-> 历史：本节原先的口径是「旧键不识别、不迁移：启动告警、面板保存时丢弃」。
-> 那个口径的代价是死键跟着配置文件永久存在、每次启动都告警；改为一次性迁移后，
-> 旧键只被处理一次，之后零告警、零分支。
+| 旧键 | 现在怎么办 |
+| --- | --- |
+| `features.sanitize_blacklist_fingerprints: true` | 手工改成顶层 `fingerprint_rewrite: true`（缺省 false，需要就自己打开） |
+| `upstream.client_version` / `cli_version` | 手工搬到 `upstream.profiles.{cn,global}.{client_version,cli_version}` |
+| `upstream.user_agent` | 无对应键（现按域×用途生成 UA），删掉即可 |
+| `prompt.mode: custom` / `passthrough` | 手工改成 `replace` / `none`；不改会启动报错并列出合法取值 |
+| `cooldown.hard_credit` / `err_threshold` / `err_cooldown` | 删掉（硬冷却固定次日 04:00，连续错误语义并入熔断器） |
+| `schedule.travel_interval_minutes` | 删掉（已被 `schedule.travel_hours` 取代） |
+
+> 为什么去掉迁移：这套机制（迁移链 + 版本闸门 + 读时回写 + 快照 + 合并 + 写侧剪枝）
+> 是为一堆历史配置文件服务的，而实际只有一份自用配置。去掉之后配置路径只剩
+> "读当前结构 / 写当前结构"两个动作，少了一整类"迁移写错了把用户配置改坏"的失败面。
 
 ## 5. 挂载点（冲突最可能）
 

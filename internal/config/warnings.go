@@ -1,8 +1,8 @@
 // warnings.go 配置告警的去重打印。
 //
-// 告警来源：未知/退役键（keyshape.go）、旧取值迁移（normalize.go）、
-// 被剔除的非法 realm（prompt.go / load.go）。只告警不阻断启动，但必须可见，
-// 否则用户会以为旧开关仍在生效。
+// 告警来源：文件里不认识的键（keyshape.go）、被剔除的非法 realm 与注入槽位
+// 缺失（prompt.go / load.go）。只告警不阻断启动，但必须可见，否则用户改了键名
+// 会以为已经生效。
 package config
 
 import (
@@ -23,15 +23,6 @@ var (
 // LogWarnings 把配置告警打到标准日志（面板日志页同源），同一条只打一次。
 func LogWarnings(c *Config) {
 	logOnce(c, c.Warnings, "WARN: [config] ")
-}
-
-// LogMigrations 把本次实际执行的配置版本迁移打到标准日志，同一条只打一次。
-//
-// 为什么必须单独打：迁移会自动改写用户的配置文件——用户必须知道"谁改了我的文件、
-// 改了什么、原文在哪"，否则升级后看到配置变了会以为是程序 bug。
-// 面板配置页底部同源展示（`_migrations`），这里补上启动/无面板场景。
-func LogMigrations(c *Config) {
-	logOnce(c, c.Migrations, "[config] 已自动迁移: ")
 }
 
 // logOnce 打同一条内容只打印一次（整个进程内去重）。

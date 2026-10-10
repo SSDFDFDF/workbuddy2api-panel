@@ -48,6 +48,24 @@ func (p PromptProfile) hasSource() bool {
 	return p.Preset != "" || p.File != "" || p.Text != ""
 }
 
+// isEmpty 报告该覆盖项是否没有任何生效取值（= 用户选了"继承顶层"）。
+func (p PromptProfile) isEmpty() bool {
+	return p.Mode == "" && p.Preset == "" && p.File == "" && p.Text == ""
+}
+
+// pruneEmptyPromptProfiles 剔除全空的分域提示词覆盖项（就地修改）。
+//
+// 面板把"继承顶层"表达为三项全空；这种对象没有任何语义（下面 buildPromptRule
+// 也视同不存在），留着只会在配置文件里变成空壳。在 normalize 里统一剔除，
+// 于是**任何**路径（读文件、保存、生成默认配置、示例配置）产出的都不带空壳。
+func (c *Config) pruneEmptyPromptProfiles() {
+	for realm, p := range c.Prompt.Profiles {
+		if p.isEmpty() {
+			delete(c.Prompt.Profiles, realm)
+		}
+	}
+}
+
 // normalizePrompt 归一化 prompt 段并构建各域生效规则：
 //   - 归一 mode/preset，非法值报错（fail fast）；
 //   - 未知 realm 键告警并剔除（与 upstream.profiles 同口径，不阻断启动）；
@@ -72,6 +90,9 @@ func (c *Config) normalizePrompt() error {
 			delete(c.Prompt.Profiles, realm)
 		}
 	}
+
+	// 空壳（三项全空 = 继承顶层）没有语义，先剪掉：读侧看不见、写侧不落盘。
+	c.pruneEmptyPromptProfiles()
 
 	rules := make(map[string]prompt.Rule, 3)
 	// 默认规则（未知 realm 的兜底）：顶层配置，语言按 cn。
@@ -141,8 +162,8 @@ func (c *Config) normalizePromptPreset(path string, v *string) error {
 }
 
 // normalizePromptMode 校验并归一 mode。只认当前取值（none/replace/append/after/inject）；
-// 旧取值（custom/passthrough）由 migrate.go 在读文件时一次性改名，因此走到这里
-// 仍是非法的取值就是用户手写的错值，直接报错（不静默降级）。
+// 旧取值（custom/passthrough）没有任何兼容处理，直接报错（不静默降级）——
+// 报错信息里带上全部合法取值，用户按提示改一次即可。
 func (c *Config) normalizePromptMode(v, path string) (string, error) {
 	m, ok := prompt.NormalizeMode(v)
 	if !ok {

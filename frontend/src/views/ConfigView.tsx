@@ -74,9 +74,7 @@ export function ConfigView() {
       setPath(d.path || '');
       setVersionInfo(d.version_info || null);
       const bits: string[] = [];
-      const migs = Array.isArray(cfg._migrations) ? cfg._migrations : [];
       const warns = Array.isArray(cfg._warnings) ? cfg._warnings : [];
-      if (migs.length) bits.push(`已自动迁移配置（${migs.join('；')}）；迁移前原文保留为 config.json.v<旧版本>`);
       if (warns.length) bits.push(`配置告警：${warns.join('；')}`);
       setNote(bits.join(' ｜ '));
     } catch (e) {
@@ -344,7 +342,7 @@ export function ConfigView() {
                 </div>
               )}
               <div className="mt-3 text-[11.5px] leading-relaxed text-[var(--ink-3)]">
-                逐任务参数覆盖（gap / target / attempt / window / activity_id）是结构化对象，因面板保存是深合并（无法删除键），请在 config.json 的 <code>growth.autotasks.tasks</code> 手工编辑，保存后热生效。
+                逐任务参数覆盖（gap / target / attempt / window / activity_id）是结构化对象，面板表单不含它（保存时原样保留，不会被动到），请在 config.json 的 <code>growth.autotasks.tasks</code> 手工编辑，保存后热生效。
               </div>
               {growthTasks && (
                 <pre className="mt-1.5 max-h-[160px] overflow-auto whitespace-pre-wrap rounded bg-[var(--surface)] p-2.5 font-[family-name:var(--mono)] text-[11.5px] leading-relaxed">

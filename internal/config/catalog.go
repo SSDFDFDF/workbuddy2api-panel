@@ -118,8 +118,8 @@ func MatchPath(pattern, path string) bool {
 // 重置、值未变则空操作），因此不在 Restart 之列。
 var entries = Catalog{
 	// ── 基础 ────────────────────────────────────────────────────────────
-	// config_version：由 migrate.go 在加载/保存时自动归一（一次性版本迁移），
-	// 用户无需维护，也没有热应用动作——Passive 即"无需 apply"。
+	// config_version：程序写文件时固定写 CurrentVersion，读取时不做版本转换
+	//（只拒绝比程序新的版本），用户无需维护，也没有热应用动作。
 	{Path: "config_version", Mode: Hot, Passive: true, Group: "base"},
 	{Path: "listen", Mode: Restart, Group: "base",
 		Why: "端口在装配期由 http.Server.Addr 绑定，热换需要起第二个 listener 并排空旧连接"},
@@ -207,11 +207,10 @@ var entries = Catalog{
 // nonUserLeaves 不是"用户可配置项"的叶子，不要求目录登记，附理由。
 //
 // 与 json:"-" 的派生态不同：这些字段**有 json tag**（面板读取它们展示），
-// 但语义上不是可调配置，也不从文件读入（见 runtimeMetaKeys）。
+// 但语义上不是可调配置，也不从文件读入（见 load.go 的 parseObject）。
 // 守护测试要求每个豁免都写明原因（防止拿豁免绕过漏登记）。
 var nonUserLeaves = map[string]string{
-	"_warnings":   "载入期告警的运行时载体（面板只读展示），不是可配置项",
-	"_migrations": "本次加载实际执行过的版本迁移（面板只读展示），不是可配置项",
+	"_warnings": "载入期告警的运行时载体（面板只读展示），不是可配置项",
 }
 
 // Entries 返回目录全量（按 Path 稳定排序的副本，调用方可安全持有）。
