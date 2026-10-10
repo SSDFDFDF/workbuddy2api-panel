@@ -105,6 +105,16 @@ type Panel struct {
 	// 任务中心执行队列（taskcenter.go）。
 	queueOnce sync.Once
 	q         *queueState
+
+	// autotask 成长任务自动化策略快照（growth.autotasks，保存配置时热替换；
+	// nil = 全默认 = 既有行为）。读侧只经 autotaskPolicy()。
+	autotask atomic.Pointer[AutotaskPolicy]
+	// mpDetected 运行时探测到的「仅 mp 口径下发」任务码：默认列表 vs mp 列表的
+	// 差集（两者都成功时才更新）。静态表与配置只作兜底——上游新增 mp 任务时
+	// 无需改代码，任务中心的扫描/队列会自然把它路由到 mp 口径。
+	mpMu         sync.Mutex
+	mpDetected   map[string]bool
+	mpDetectedAt time.Time
 }
 
 // tryLockAccount 尝试锁定账号的任务执行；已在执行返回 false。
@@ -250,6 +260,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto", p.withAuth(p.accountTaskAuto))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto_all", p.withAuth(p.accountTaskAutoAll))
 	p.mux.HandleFunc("POST /panel/api/tasks/scan_all", p.withAuth(p.tasksScanAll))
+	p.mux.HandleFunc("GET /panel/api/tasks/actions", p.withAuth(p.tasksActions))
 	p.mux.HandleFunc("POST /panel/api/tasks/run_queue", p.withAuth(p.tasksRunQueue))
 	p.mux.HandleFunc("GET /panel/api/tasks/queue", p.withAuth(p.tasksQueueStatus))
 	p.mux.HandleFunc("GET /panel/api/school/vouchers", p.withAuth(p.schoolVouchers))

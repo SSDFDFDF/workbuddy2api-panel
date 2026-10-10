@@ -41,6 +41,10 @@ export function ConfigView() {
   const [preview, setPreview] = useState<PromptPreviewResponse | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [saving, setSaving] = useState(false);
+  /* 内置自动化动作清单（后端注册表下发，前端不硬编码任务码）。 */
+  const [taskActions, setTaskActions] = useState<{ code: string; desc?: string; enabled: boolean; mp?: boolean }[]>([]);
+  /* 逐任务参数覆盖的只读预览（手工编辑 config.json；见表单提示）。 */
+  const [growthTasks, setGrowthTasks] = useState('');
   const formRef = useRef<HTMLFormElement>(null);
 
   /* catalog 匹配（与 Go 侧 config.MatchPath 同语义）。 */
@@ -65,6 +69,8 @@ export function ConfigView() {
       }
       v['fingerprint_rules_text'] = formatRules(cfg.fingerprint_rules);
       setValues(v);
+      const gt = cfg.growth?.autotasks?.tasks;
+      setGrowthTasks(gt && Object.keys(gt).length ? JSON.stringify(gt, null, 2) : '');
       setPath(d.path || '');
       setVersionInfo(d.version_info || null);
       const bits: string[] = [];
@@ -87,6 +93,12 @@ export function ConfigView() {
       setPresets(p.presets || []);
     } catch {
       setPresets([]);
+    }
+    try {
+      const a = await api<{ actions?: { code: string; desc?: string; enabled: boolean; mp?: boolean }[] }>('tasks/actions');
+      setTaskActions(a.actions || []);
+    } catch {
+      setTaskActions([]); // 失败沉默：提示性信息，不是功能
     }
   }, []);
 
@@ -291,6 +303,54 @@ export function ConfigView() {
               <div className="mt-1.5 text-[11.5px] leading-relaxed text-[var(--ink-3)]">
                 打开后已禁用的账号仍会签到 / 活跃上报 / 保活 / 刷新余额（依旧不参与选号）。适合用禁用做流量开关的轮换养号用法，默认关闭。若只想让单个账号临时退出选号但保留保号，用账号行的「暂停选号」。
               </div>
+            </div>
+
+            <div className="rounded-lg border border-[var(--line-soft)] bg-[var(--surface-2)] p-3.5">
+              <div className="text-[12.5px] font-semibold text-[var(--ink-2)]">成长任务自动化（任务中心 / 一键完成）</div>
+              <div className="mt-1.5 text-[11.5px] leading-relaxed text-[var(--ink-3)]">
+                控制哪些成长/活动任务参与自动扫描与执行。判据事件形状是内置实现（代码），这里只能选择启用集合、顺序与参数；全部留空 = 既有行为（内置动作全启用）。
+              </div>
+              <div className="mt-2.5">
+                <Grid cols={2}>
+                  {fld({ name: 'growth_autotasks_disabled', label: '屏蔽的任务码（黑名单）', placeholder: '如 skill_1, black_cat', hint: '逗号分隔；同时命中白名单时以黑名单为准' })}
+                  {fld({ name: 'growth_autotasks_only', label: '仅启用这些任务码（白名单）', placeholder: '留空 = 不启用白名单', hint: '非空时只有列出的任务参与自动化' })}
+                  {fld({ name: 'growth_autotasks_order', label: '执行顺序覆盖', placeholder: '如 chat_5, first_buddy', hint: '列出的按本序在前（用于依赖前置）；未列出的按内置依赖序排后' })}
+                  {fld({ name: 'growth_autotasks_mp_codes', label: '小程序口径任务码', placeholder: '如 +New_MP_Task', hint: '裸码 = 覆盖内置表；+ 前缀 = 追加；运行时差集探测到的码自动并入' })}
+                </Grid>
+              </div>
+              <div className="mt-2.5">
+                {sw('growth_autotasks_allow_unknown_claim', '未内置判据的任务只做「接受 + 达标领奖」')}
+                <div className="mt-1.5 text-[11.5px] leading-relaxed text-[var(--ink-3)]">
+                  打开后，上游已下发但尚无判据实现的任务不会被忽略：进度达标时自动领奖（绝不伪造事件）；未达标不排队。默认关闭。
+                </div>
+              </div>
+              {taskActions.length > 0 && (
+                <div className="mt-3 flex flex-col gap-1.5">
+                  <div className="text-[11.5px] text-[var(--ink-3)]">内置动作码（共 {taskActions.length} 个，灰显 = 当前被策略屏蔽或不在白名单）：</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {taskActions.map((a) => (
+                      <span
+                        key={a.code}
+                        title={a.desc || ''}
+                        className={
+                          'rounded px-1.5 py-0.5 font-[family-name:var(--mono)] text-[11px] ' +
+                          (a.enabled ? 'bg-[var(--accent-soft)] text-[var(--accent)]' : 'bg-[var(--surface)] text-[var(--ink-3)] line-through opacity-70')
+                        }
+                      >
+                        {a.code}{a.mp ? ' · mp' : ''}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div className="mt-3 text-[11.5px] leading-relaxed text-[var(--ink-3)]">
+                逐任务参数覆盖（gap / target / attempt / window / activity_id）是结构化对象，因面板保存是深合并（无法删除键），请在 config.json 的 <code>growth.autotasks.tasks</code> 手工编辑，保存后热生效。
+              </div>
+              {growthTasks && (
+                <pre className="mt-1.5 max-h-[160px] overflow-auto whitespace-pre-wrap rounded bg-[var(--surface)] p-2.5 font-[family-name:var(--mono)] text-[11.5px] leading-relaxed">
+                  {growthTasks}
+                </pre>
+              )}
             </div>
           </div>
         )}

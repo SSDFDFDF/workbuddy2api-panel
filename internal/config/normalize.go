@@ -11,6 +11,7 @@ package config
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -210,6 +211,12 @@ func (c *Config) normalize() error {
 	if err := media.ValidateToolPolicy(media.ToolPolicy(c.Media.ToolImages)); err != nil {
 		return err
 	}
+	// 成长任务自动化策略（growth.autotasks）：归一化 + 非法值 fail fast。
+	// 任务码是否存在于内置动作表由 panel 侧校验（配置域不依赖动作注册表，避免
+	// 配置包反向依赖运行期组件）；未知码只告警不报错。
+	if err := c.normalizeGrowthAutotasks(); err != nil {
+		return err
+	}
 	// 图片像素处理策略（转码/压缩）：同样只校验，生效在 main 的热应用路径。
 	if err := media.ValidateImagePolicy(media.ImagePolicy{
 		Transcode:    c.Media.ImageTranscode,
@@ -256,6 +263,139 @@ func checkHourRange(field, switchKey string, hours []int) error {
 		}
 	}
 	return nil
+}
+
+// normalizeGrowthAutotasks 归一化 growth.autotasks（成长任务自动化策略）。
+//
+// 只做三件事：去空白/去重/剔除空项、把可解析的取值解析成派生字段、对非法值
+// fail fast（与 server.read_timeout / pool.breaker_cooldown 等同一风格：宁可
+// 启动/保存时报错，也不静默回落成另一个行为）。
+//
+// 任务码的合法性不在这里校验：内置动作注册表在 internal/panel，配置包不反向
+// 依赖运行期组件；panel 侧构建策略时对未知码打日志（面板运行日志可见）。
+func (c *Config) normalizeGrowthAutotasks() error {
+	g := &c.Growth.Autotasks
+	g.Disabled = normalizeTaskCodes(g.Disabled)
+	g.Only = normalizeTaskCodes(g.Only)
+	g.Order = normalizeTaskCodes(g.Order)
+	// mp_codes 保留 "+" 前缀语义，只 trim + 去重（"+x" 与 "x" 不算重复）。
+	var mp []string
+	seen := map[string]bool{}
+	for _, raw := range g.MPCodes {
+		code := strings.TrimSpace(raw)
+		if code == "" || seen[code] {
+			continue
+		}
+		if code == "+" {
+			return fmt.Errorf("growth.autotasks.mp_codes: %q 只有前缀没有任务码", raw)
+		}
+		seen[code] = true
+		mp = append(mp, code)
+	}
+	g.MPCodes = mp
+
+	if len(g.Tasks) == 0 {
+		g.Tasks = nil
+		return nil
+	}
+	// 归一化任务码（trim）后再逐项解析。同名（trim 后）键视为配置错误：JSON 允许
+	// " x " 与 "x" 并存，静默取其一会让配置含义随 map 遍历顺序漂移；先收集到新 map
+	// 也避免边 range 边改原 map。
+	trimmed := make(map[string]GrowthTaskPolicy, len(g.Tasks))
+	for code, p := range g.Tasks {
+		name := strings.TrimSpace(code)
+		if name == "" {
+			return fmt.Errorf("growth.autotasks.tasks: 任务码不能为空")
+		}
+		if _, dup := trimmed[name]; dup {
+			return fmt.Errorf("growth.autotasks.tasks.%s: 重复的任务码（去掉首尾空白后同名）", name)
+		}
+		trimmed[name] = p
+	}
+	g.Tasks = trimmed
+	for name, p := range g.Tasks {
+		prefix := "growth.autotasks.tasks." + name
+		p.Gap = strings.TrimSpace(p.Gap)
+		if p.Gap != "" {
+			d, err := time.ParseDuration(p.Gap)
+			if err != nil {
+				return fmt.Errorf("%s.gap: %w", prefix, err)
+			}
+			if d < 0 {
+				return fmt.Errorf("%s.gap: 负时长 %q 无意义", prefix, p.Gap)
+			}
+			p.GapDur = d
+		}
+		if p.Target < 0 {
+			return fmt.Errorf("%s.target: 负值 %d 无意义（0 = 以上游下发为准）", prefix, p.Target)
+		}
+		p.ActivityID = strings.TrimSpace(p.ActivityID)
+		p.Window = strings.TrimSpace(p.Window)
+		if p.Window != "" {
+			start, end, err := parseClockWindow(p.Window)
+			if err != nil {
+				return fmt.Errorf("%s.window: %w", prefix, err)
+			}
+			p.WindowStartMin, p.WindowEndMin, p.HasWindow = start, end, true
+		}
+		g.Tasks[name] = p
+	}
+	return nil
+}
+
+// normalizeTaskCodes trim + 去重 + 剔除空项（保持出现顺序）。
+func normalizeTaskCodes(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	seen := map[string]bool{}
+	for _, raw := range in {
+		code := strings.TrimSpace(raw)
+		if code == "" || seen[code] {
+			continue
+		}
+		seen[code] = true
+		out = append(out, code)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// parseClockWindow 解析 "HH:MM-HH:MM" 计数窗口，返回起止的当日分钟数
+// （start > end 表示跨零点，如 23:00-08:00）。
+func parseClockWindow(s string) (start, end int, err error) {
+	sides := strings.Split(s, "-")
+	if len(sides) != 2 {
+		return 0, 0, fmt.Errorf("格式应为 HH:MM-HH:MM（如 23:00-08:00），得到 %q", s)
+	}
+	if start, err = parseClockMinute(sides[0]); err != nil {
+		return 0, 0, err
+	}
+	if end, err = parseClockMinute(sides[1]); err != nil {
+		return 0, 0, err
+	}
+	return start, end, nil
+}
+
+// parseClockMinute 解析 "HH:MM" 为当日分钟数（00:00-23:59）。
+func parseClockMinute(s string) (int, error) {
+	s = strings.TrimSpace(s)
+	parts := strings.Split(s, ":")
+	if len(parts) != 2 {
+		return 0, fmt.Errorf("%q 不是 HH:MM 格式", s)
+	}
+	h, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil || h < 0 || h > 23 {
+		return 0, fmt.Errorf("%q 的小时不是 0-23", s)
+	}
+	m, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil || m < 0 || m > 59 {
+		return 0, fmt.Errorf("%q 的分钟不是 0-59", s)
+	}
+	return h*60 + m, nil
 }
 
 // normalizeModelDefaultRealm 归一化 model_default_realm：小写去空白，接受

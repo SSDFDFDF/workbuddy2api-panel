@@ -159,6 +159,11 @@ var entries = Catalog{
 	// ── 排程 ────────────────────────────────────────────────────────────
 	{Path: "schedule.*", Mode: Hot, Group: "schedule", Why: ""},
 
+	// ── 成长任务自动化 ────────────────────────────────────────────────
+	// growth.autotasks 全部热生效：保存时整体替换面板侧的策略快照（启用集合 /
+	// 顺序 / mp 码 / 逐任务参数），任务中心与一键完成下一次动作即用新策略。
+	{Path: "growth.*", Mode: Hot, Group: "growth", Why: ""},
+
 	// ── 域策略 ──────────────────────────────────────────────────────────
 	{Path: "global.enabled", Mode: Hot, Group: "realm", Why: ""},
 	{Path: "global.chat_base", Mode: Hot, Group: "realm", Why: ""},

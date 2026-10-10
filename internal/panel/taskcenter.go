@@ -34,8 +34,10 @@ type scanAccountItem struct {
 	GrowthErr string          `json:"growth_error,omitempty"`
 }
 
-// growthPending 任务是否"未完成且可自动化"。
-func growthPending(t upstream.Task) bool {
+// growthPending 报告任务是否「未完成且可自动化」——判定完全由当前策略
+// （growth.autotasks）驱动：被黑/白名单屏蔽的任务不出现，allow_unknown_claim
+// 合成的兜底动作只在任务已达标时入待办（否则每天白跑一轮 accept）。
+func (p *Panel) growthPending(t upstream.Task) bool {
 	if t.Claimed {
 		return false
 	}
@@ -46,12 +48,15 @@ func growthPending(t upstream.Task) bool {
 	if t.Locked {
 		return false
 	}
-	if t.Target > 0 && t.Current >= t.Target {
-		// 达标未领：也入队（队列执行后会自动领）——但仅限有自动化动作的任务，
-		// 否则队列执行时会因 autoActionFor 为 nil 直接报错。
-		return autoActionFor(t.TaskCode) != nil
+	act := p.actionFor(t.TaskCode)
+	if act == nil {
+		return false
 	}
-	return autoActionFor(t.TaskCode) != nil
+	// 兜底动作（未内置判据）只做 accept + 领奖：没达标时排队毫无意义。
+	if act.claimOnly {
+		return t.Claimable || t.AcceptStatus == "completed" || (t.Target > 0 && t.Current >= t.Target)
+	}
+	return true
 }
 
 // pendingGrowthTasks 拉取该账号「未完成且可自动化」的成长任务待办
@@ -72,16 +77,18 @@ func (p *Panel) pendingGrowthTasks(a *auth.Auth) ([]upstream.Task, error) {
 	var pending []upstream.Task
 	seen := map[string]bool{}
 	for _, t := range tasks {
-		if growthPending(t) {
+		if p.growthPending(t) {
 			pending = append(pending, t)
 			seen[t.TaskCode] = true
 		}
 	}
 	// 小程序口径任务（school_season 校园日 / Sequential_Tasks_1 小程序首对话）
 	// 仅在 mp 头列表下发，与默认口径不重叠——合并进待办；失败静默。
+	// 两次列表都成功时顺手记录差集（= mp 专属码），供 isMPTaskCode 运行时识别。
 	if mpTasks, mpErr := p.cfg.Upstream.ListTasksMP(a); mpErr == nil {
+		p.noteMPDetected(mpExclusiveCodes(tasks, mpTasks))
 		for _, t := range mpTasks {
-			if growthPending(t) && !seen[t.TaskCode] {
+			if p.growthPending(t) && !seen[t.TaskCode] {
 				pending = append(pending, t)
 				seen[t.TaskCode] = true
 			}
@@ -248,8 +255,8 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 			if growth {
 				if pending, err := p.pendingGrowthTasks(a); err == nil {
 					one.grow = pending
-					sort.Slice(one.grow, func(i, j int) bool { // 按 autoActions 顺序（依赖前置）
-						return autoActionIndex(one.grow[i].TaskCode) < autoActionIndex(one.grow[j].TaskCode)
+					sort.Slice(one.grow, func(i, j int) bool { // 按策略顺序（缺省 = 内置依赖序）
+						return p.actionIndex(one.grow[i].TaskCode) < p.actionIndex(one.grow[j].TaskCode)
 					})
 				}
 			}
@@ -416,9 +423,9 @@ func (p *Panel) acceptPendingTasks(a *auth.Auth) int {
 // runGrowthQueued 执行单个成长任务（动作 + 回读 + 自动领奖；与
 // accountTaskAuto 同语义，结果以文字返回）。
 func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, error) {
-	act := autoActionFor(code)
+	act := p.actionFor(code)
 	if act == nil {
-		return "", fmt.Errorf("任务 %s 无自动动作", code)
+		return "", fmt.Errorf("任务 %s 无自动动作（可能被 growth.autotasks 配置屏蔽）", code)
 	}
 	// taskByCode 已双口径（mp 专属码自动回落 mp 列表）。
 	before, err := p.taskByCode(a, code)
@@ -428,7 +435,7 @@ func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, error) {
 	if before == nil {
 		return "该账号无此任务", nil
 	}
-	isMP := isMPTaskCode(code)
+	isMP := p.isMPTaskCode(code)
 	if before.Claimed {
 		return "已完成（已领取）", nil
 	}
@@ -459,6 +466,44 @@ func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, error) {
 	}
 	log.Printf("panel: 队列 growth uid=%s code=%s: %s", a.UID, code, msg)
 	return msg, nil
+}
+
+// tasksActions 列出内置自动化动作与当前策略下的启用状态（供面板「任务中心 / 配置
+// 页」展示可配置的任务码；代码是注册表的唯一真相，前端不硬编码清单）。
+type taskActionInfo struct {
+	Code    string `json:"code"`
+	Desc    string `json:"desc,omitempty"`
+	Attempt bool   `json:"attempt,omitempty"`
+	Enabled bool   `json:"enabled"`
+	MP      bool   `json:"mp,omitempty"`
+}
+
+func (p *Panel) tasksActions(w http.ResponseWriter, r *http.Request) {
+	pol := p.autotaskPolicy()
+	out := make([]taskActionInfo, 0, len(autoActions))
+	for _, code := range p.orderedCodes() {
+		base := autoActionByCode(code)
+		if base == nil {
+			continue
+		}
+		act := p.actionFor(code)
+		out = append(out, taskActionInfo{
+			Code:    code,
+			Desc:    base.Desc,
+			Attempt: act != nil && act.Attempt,
+			Enabled: act != nil,
+			MP:      p.isMPTaskCode(code),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"actions": out,
+		"policy": map[string]any{
+			"has_only":            pol.HasOnly,
+			"allow_unknown_claim": pol.AllowUnknownClaim,
+			"mp_override":         pol.MPOverride,
+		},
+	})
 }
 
 // tasksQueueStatus 队列状态（轮询用）。

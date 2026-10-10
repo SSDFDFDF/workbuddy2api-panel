@@ -185,6 +185,17 @@ type Config struct {
 		BalanceRefreshMinutes int  `json:"balance_refresh_minutes"` // 缺省 5；<=0 回落 5
 	} `json:"schedule"`
 
+	// Growth 成长任务自动化策略（面板「任务中心」/账号「一键完成」/growth 排程共用）。
+	//
+	// 上线背景：哪些活动任务能被自动化，此前是 internal/panel 里的硬编码表
+	//（autoActions / builtinMPTaskCodes）——上游新增活动只能改代码重编译。本段配置让
+	// 「启用集合、执行顺序、mp 口径、逐任务参数」四类调整不改代码即可生效；
+	// **判据事件的形状**（字段/埋点指纹）仍是代码（逆向产物），配置只能引用
+	// 已实现的动作，不能用配置造出新判据。
+	Growth struct {
+		Autotasks GrowthAutotasks `json:"autotasks"`
+	} `json:"growth"`
+
 	Global struct {
 		// Enabled global realm 路由开关。缺省 true：Realm() 正常把 realm=global/
 		// domain=workbuddy.ai 的账号判为 global 并路由 global base/路径。
@@ -357,6 +368,66 @@ type Config struct {
 	// ProxyClient 解析校验后的代理接入实例（普通代理或 Resin）；nil = 未接入
 	// （JSON 不序列化）。
 	ProxyClient *proxy.Client `json:"-"`
+}
+
+// GrowthAutotasks 成长任务自动化策略（growth.autotasks）。
+//
+// 语义要点：
+//   - 缺省（全空）= 既有行为：内置动作表全部启用、内置 mp 码表生效、内置参数。
+//   - disabled / only 只影响「自动化动作」的可用集合，不影响账号页的任务列表
+//     展示，也不影响手动「接受 / 领取」接口。
+//   - order 只影响执行顺序（队列与一键完成），不改变动作本身的幂等语义。
+//   - tasks 的参数覆盖只作用于已实现动作；未实现判据的任务只能通过
+//     allow_unknown_claim 做 accept + 达标领奖。
+//
+// 本段全部为热生效字段（保存即生效，无需重启）。
+// 完整文件示例与字段速查见 config.example.json / README。
+type GrowthAutotasks struct {
+	// Disabled 屏蔽的任务 code 黑名单（trim 后精确匹配，大小写敏感）。
+	// 缺省空 = 不屏蔽任何内置动作。
+	Disabled []string `json:"disabled"`
+	// Only 白名单：非空时只有列出的 code 参与自动化；同时命中 Disabled 时
+	// Disabled 优先（= 屏蔽）。缺省空 = 不启用白名单。
+	Only []string `json:"only"`
+	// Order 执行顺序覆盖：列出的 code 按本列表次序执行，未列出的排在其后
+	//（按内置依赖序）。缺省空 = 完全按内置序（先解锁依赖项）。
+	Order []string `json:"order"`
+	// MPCodes 小程序口径专属任务码：**裸值 = 整体覆盖**内置表，前缀 "+" =
+	// 追加到内置表。运行时由「默认列表 vs mp 列表」差集探测到的码始终并入，
+	// 因此只有探测不到的场景（列表失败/任务刚上线）才需要在此登记。
+	MPCodes []string `json:"mp_codes"`
+	// AllowUnknownClaim 对「上游已下发但无判据动作实现」的任务只做
+	// accept + 达标领奖（绝不伪造事件）；缺省 false = 未实现的任务不参与自动化。
+	AllowUnknownClaim bool `json:"allow_unknown_claim"`
+	// Tasks 逐任务参数覆盖（键 = task_code）。缺省空 = 全部用内置默认。
+	Tasks map[string]GrowthTaskPolicy `json:"tasks"`
+}
+
+// GrowthTaskPolicy 单个任务的自动化参数覆盖（growth.autotasks.tasks.<code>）。
+// 每一项留空 / 零值 = 用内置默认（上游下发或代码常量）。
+type GrowthTaskPolicy struct {
+	// Gap 判据事件之间的间隔（Go 时长语法，如 "45s"）。作用于有上游反作弊
+	// 校验的连发任务（mp 对话事件、chat_5 等）；空 = 内置默认。
+	Gap string `json:"gap"`
+	// Target 进度目标覆盖；0 = 以上游下发为准（推荐，任务改版后自动跟随）。
+	// 注意：设成**低于**上游下发值会在进度未足时就去领奖，上游回 400
+	// "task not completed"（日志可见）；需要降目标时应确认上游确实不会再累加。
+	Target int64 `json:"target"`
+	// Attempt 覆盖「尝试型」标记（仅影响面板/接口的 attempt 提示，不改变执行逻辑）；
+	// null / 缺省 = 内置值。
+	Attempt *bool `json:"attempt"`
+	// Window 计数窗口 "HH:MM-HH:MM"（支持跨零点，如 "23:00-08:00"）。
+	// 目前由 black_cat 使用；空 = 内置 23:00-08:00。
+	Window string `json:"window"`
+	// ActivityID 上报事件的 activityId 覆盖（目前由 school_season 使用）；
+	// 空 = 内置 school_open_day_2026。
+	ActivityID string `json:"activity_id"`
+
+	// ── 派生（normalize 解析，非法值在启动/保存时报错，不落盘）──
+	GapDur         time.Duration `json:"-"`
+	WindowStartMin int           `json:"-"` // 窗口起（当日分钟数，0-1439）
+	WindowEndMin   int           `json:"-"` // 窗口止（当日分钟数，0-1439）
+	HasWindow      bool          `json:"-"` // Window 非空（跨零点由 start>end 表意）
 }
 
 // Default 默认配置。

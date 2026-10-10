@@ -64,12 +64,64 @@ git log --oneline <已同步基线>..upstream/main     # 列出待判定提交�
 | 7 | **缓存键** | `prompt_cache_key` 改 HMAC 派生（持久化 secret）；无显式会话则不生成 | 生效 |
 | 8 | **配置版本迁移** | `config_version` + 一次性迁移（读时识别版本 → 改写 → 回写 + `.v<旧版本>` 快照）；未知键告警、面板保存时丢弃 | 生效 |
 | 9 | **Web 管理面板** | 内嵌单页（明暗主题，七个视图）：账号运维 / 用量与积分 / 模型档位 / 在线改配置（热生效，唯一真相为 `internal/config/catalog.go`；仍需重启的只有 5 个字段：监听地址、状态文件路径、服务读超时、Upstash 地址与 Token）/ 运行日志 / 任务中心 | 生效 |
-| 10 | **积分任务体系** | 任务列表/接受/领取 + 「一键完成」覆盖 17 个成长任务（纯 API）；任务中心全账号扫描 + 执行队列 | 生效 |
+| 10 | **积分任务体系** | 任务列表/接受/领取 + 「一键完成」覆盖 25 个内置成长任务动作（纯 API）；任务中心全账号扫描 + 执行队列；**哪些任务参与自动化可配置**（`growth.autotasks`：黑/白名单、执行顺序、mp 口径码、逐任务参数 gap/target/window/activity_id、未内置判据任务的 accept+领奖兜底），保存即热生效 | 生效（缺省全启用） |
 | 11 | **出站代理** | 普通正向代理 + Resin 粘性代理池 + 账号级代理开关 | 未配置 = 不接入 |
 | 12 | **裸模型名默认域** | `model_default_realm = cn / global / auto(:cn,global) / auto:global,cn` | `cn` |
 | 13 | **客户端特征对齐** | 稳定设备/会话指纹、硬件特征离散化、`/v2/report` 桌面指纹、版本自检 | 启用 |
 | 14 | **面板版本配置** | 占位符来自后端内置基线（不硬编码）；「一键填入已拉取版本」；CLI 版本需人工核对 | 生效 |
 | 15 | **Responses / Anthropic 桥接** | `/v1/responses` 无状态文本 / function tools；`/v1/messages` 文本 / client tools。复用原有执行、重试、用量与日志；原生 Chat 保留扩展。纯提示/遥测字段（`cache_control` / `metadata` / `include` / `client_metadata` / `service_tier` / `prompt_cache_key` / `stream_options` / `top_k` / `text.verbosity` 等）与客户端侧推理状态（Responses `reasoning` 历史、Anthropic `thinking`）接受即丢，丢弃项写入请求归档并在面板展示；近似变换显式可见（`is_error` → `[tool error]` 文本前缀、`stop_sequences` → Chat `stop`）；会改变语义或伪造能力的字段（`previous_response_id` / `conversation` / `background:true` / `text.format` 结构化输出 / `strict:true` / 白名单外未知字段）仍明确 400。见 [兼容说明](docs/PROTOCOL_COMPATIBILITY.md) | 生效（限定子集） |
+
+---
+
+### 成长任务自动化策略（`growth.autotasks`）
+
+**动机**：哪些活动任务能被自动化，此前是 `internal/panel/autotask.go` 里的硬编码注册表
+（`autoActions` / `builtinMPTaskCodes`）——上游每上一个新活动、调一次反作弊口径，都只能改代码重编译。
+现在改成「判据实现仍是代码 + 启用集合/参数可配置」：
+
+| 配置键 | 语义 | 缺省 |
+| --- | --- | --- |
+| `disabled` | 屏蔽的任务码黑名单（与 `only` 同时命中时黑名单优先） | 空 = 不屏蔽 |
+| `only` | 白名单；非空时只有列出的任务参与自动化 | 空 = 不启用白名单 |
+| `order` | 执行顺序覆盖（队列与一键完成）；列出的按本序在前，未列出的按内置依赖序排后 | 空 = 完全按内置序 |
+| `mp_codes` | 小程序口径专属任务码：**裸码 = 整体覆盖**内置表，前缀 `+` = 追加 | 空 = 内置表 |
+| `allow_unknown_claim` | 对「上游已下发但无判据实现」的任务只做 accept + 达标领奖（绝不伪造事件）；未达标不排队 | `false` |
+| `tasks.<code>.gap` | 判据事件间隔（Go 时长，如 `45s`；mp 对话事件有上游反作弊校验） | 空 = 内置 |
+| `tasks.<code>.target` | 进度目标覆盖（`0` = 以上游下发为准） | `0` |
+| `tasks.<code>.attempt` | 「尝试型」展示标记覆盖（不改变执行逻辑） | 内置 |
+| `tasks.<code>.window` | 计数窗口 `HH:MM-HH:MM`（支持跨零点；`black_cat` 用，**同时作用于面板动作与 blackcat 排程**） | 内置 `23:00-08:00` |
+| `tasks.<code>.activity_id` | 上报事件的 activityId（`school_season` 用，活动改 id 免改代码） | 内置 `school_open_day_2026` |
+
+**能配什么、不能配什么**（设计边界）：
+
+- **能配**：启用集合、顺序、mp 口径、事件间隔、进度目标、窗口、activityId。上游改活动节奏/加严风控
+  时不需要改代码。
+- **不能配**：判据事件的**字段形状与埋点指纹**（`chat_request_send` 带哪些字段、
+  `expert_actual_use` 带不带 conversationId、桌面/小程序两套指纹）——这些是逆向产物，
+  必须先作为 Go 代码存在（`internal/upstream/school.go` 等），配置只能引用已实现的动作。
+  新增一类判据仍需改代码；新增「与已实现动作同形状」的活动则可只靠配置接入。
+
+**只影响自动化动作集合**：`disabled` / `only` 不改账号页的任务列表展示，也不拦手动
+「接受 / 领取」接口（上游下发的任务在那里照常可见可操作）；被屏蔽的任务在「一键完成」返回 501
+并说明是策略屏蔽，不静默失败。
+
+**运行时行为**：
+
+- 全部字段热生效（`internal/config/catalog.go` 的 `growth.*` → Hot；保存时
+  `Panel.SetAutotaskPolicy` 原子替换快照）。
+- mp 专属码优先**运行时探测**：任务中心每次拉双口径列表（`ListTasks` vs `ListTasksMP`，两者都
+  成功时才更新）把差集记入缓存；静态表与配置只作兜底。因此上游新增 mp 任务无需登记。
+- 配置里出现非内置任务码只打日志（镜像进面板运行日志），不报错——活动下线/码改名是常态，
+  报错会让旧配置起不来。
+- 窗口判定与排程共用同一实现（`upstream.InWindow`）：配置收窄 `black_cat` 窗口后，`blackcat`
+  排程在窗口外触发会直接跳过，不会出现「面板说在窗口内、排程说不在」的分裂
+  （`cmd/server.blackcatWindowFrom` 装配与热改共用口径；排程器口径见 `scheduler.SetBlackcatWindow`）。
+- **面板保存是深合并**：`growth.autotasks.tasks` 这类 map 无法通过面板删除键，只能手工编辑
+  `config.json`（面板配置页给出只读预览与说明）；`disabled`/`only`/`order`/`mp_codes` 列表
+  清空表单即下发 `[]`（整体替换，可清除）。
+
+**面板入口**：配置页「定时任务」分区底部「成长任务自动化」；内置动作码清单由后端
+`GET /panel/api/tasks/actions` 下发（前端不硬编码，灰显 = 当前被策略屏蔽）。
 
 ---
 
@@ -196,6 +248,7 @@ content:[]。空数组保持原形，不作为 null、缺失结果或虚构文�
 | 裸模型名默认域 | `internal/server/resolve_model.go` |
 | 请求归档 / 被丢弃字段 | `internal/reqlog/reqlog.go`（`Event.dropped`）、`internal/server/logging.go`（归一化：去重 / 下标折叠 / 上限 8）；面板 `frontend/src/views/LogsView.tsx`（列 + 搜索 + tooltip） |
 | 面板 | 源码 `frontend/src/`（React + Vite 工程）；构建产物 `internal/panel/web/`（固定三件套，`go:embed`，见 `web_embed.go`）；后端 `internal/panel/{config.go,panel.go,web_embed.go}` |
+| 成长任务自动化策略 | `internal/config/{schema,normalize,catalog}.go`（`growth.autotasks` 定义/校验/热生效登记）、`internal/panel/autotask_policy.go`（**新增**：策略快照 + 启用集合/顺序/参数/mp 解析）、`internal/panel/{autotask,taskcenter,tasks}.go`（动作实现与调用点）、`internal/upstream/blackcat.go`（`InWindow` 窗口判定，面板与排程共用）、`internal/scheduler/{scheduler.go,blackcat.go}`（`SetBlackcatWindow` 热改 + 窗口守卫）、`cmd/server/main.go`（装配 + 热应用 + `blackcatWindowFrom`）、面板表单项（`frontend/src/{configSchema.ts,views/ConfigView.tsx}`） |
 
 ## 6. 未验证项（静态检查不能替代真实上游验收）
 

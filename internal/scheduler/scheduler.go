@@ -37,6 +37,12 @@ type Config struct {
 	// entry.creditsEarliestExpiry）。<=0 时不做路由门槛；展示仍使用完整逐包数据。
 	ExpiringSoonWindow time.Duration
 
+	// BlackcatWindow 夜猫子计数窗口覆盖（当日分钟数；Start>End = 跨零点，
+	// Start==End = 全天）。nil = 内置 23:00–08:00（upstream.InNightWindow 同口径）。
+	// 来源：growth.autotasks.tasks.black_cat.window（与面板侧动作同一份配置，
+	// 避免「面板说在窗口内、排程说不在」的分裂）；热改走 SetBlackcatWindow。
+	BlackcatWindow *CountWindow
+
 	// CheckinDisabled 显式关闭签到排程（对应 config 的 schedule.checkin_enabled=false）。
 	// 禁用后不再有任何签到时点。旅行不再搭签到便车（已剥离为独立排程）。
 	CheckinDisabled bool
@@ -188,6 +194,33 @@ func (s *Scheduler) Reconfigure(checkinHours, travelHours, activityHours, keepal
 	s.schedMu.Unlock()
 	poke(s.rearmSchedule)
 	poke(s.rearmBalance)
+}
+
+// CountWindow 计数窗口（当日分钟数）。Start > End 表示跨零点（如 23:00-08:00）；
+// Start == End 视为全天。判定实现统一在 upstream.InWindow（与面板侧同一份代码）。
+type CountWindow struct{ StartMin, EndMin int }
+
+// inBlackcatWindow 报告 now 是否落在夜猫子计数窗口内（配置覆盖优先，缺省 23:00–08:00）。
+func (s *Scheduler) inBlackcatWindow(now time.Time) bool {
+	if w := s.GetBlackcatWindow(); w != nil {
+		return upstream.InWindow(w.StartMin, w.EndMin, now)
+	}
+	return upstream.InNightWindow(now)
+}
+
+// SetBlackcatWindow 热替换夜猫子计数窗口覆盖（nil = 回到内置 23:00–08:00）。
+// 配置保存时由 main 调用，与面板侧 growth.autotasks.tasks.black_cat.window 同源。
+func (s *Scheduler) SetBlackcatWindow(w *CountWindow) {
+	s.schedMu.Lock()
+	s.cfg.BlackcatWindow = w
+	s.schedMu.Unlock()
+}
+
+// GetBlackcatWindow 返回当前窗口覆盖（nil = 内置；供状态展示与测试）。
+func (s *Scheduler) GetBlackcatWindow() *CountWindow {
+	s.schedMu.Lock()
+	defer s.schedMu.Unlock()
+	return s.cfg.BlackcatWindow
 }
 
 // poke 非阻塞发一次唤醒信号（已有待处理信号则忽略，语义等价）。

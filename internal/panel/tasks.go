@@ -40,7 +40,9 @@ func (p *Panel) accountTasks(w http.ResponseWriter, r *http.Request) {
 	}
 	// 合并小程序口径任务（school_season / Sequential_Tasks_1 等仅在 mp 头列表下发）。
 	// mp 列表是默认口径的超集（实测含常规任务），按 task_code 去重；失败静默。
+	// 两次列表都成功时顺手记录差集（= mp 专属码），供 isMPTaskCode 运行时识别。
 	if mpTasks, mpErr := p.cfg.Upstream.ListTasksMP(a); mpErr == nil {
+		p.noteMPDetected(mpExclusiveCodes(tasks, mpTasks))
 		seen := map[string]bool{}
 		for _, t := range tasks {
 			seen[t.TaskCode] = true
@@ -164,9 +166,10 @@ func (p *Panel) accountTaskClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 小程序口径任务走 chat 域 mp 头领奖（缺头实测不可领）；其余 Web 端接口。
+	// 判定口径 = 内置表 ∪ 配置 ∪ 运行时探测（见 autotask_policy.go）。
 	var credit, energy int64
 	var err error
-	if isMPTaskCode(body.TaskCode) {
+	if p.isMPTaskCode(body.TaskCode) {
 		credit, energy, err = p.cfg.Upstream.ClaimRewardMP(a, body.TaskCode)
 	} else {
 		credit, energy, err = p.cfg.Upstream.ClaimReward(a, body.TaskCode)

@@ -9,6 +9,11 @@ export const CFG_MAP: Record<string, string[]> = {
   checkin_enabled: ['schedule', 'checkin_enabled'],
   growth_hours: ['schedule', 'growth_hours'],
   growth_enabled: ['schedule', 'growth_enabled'],
+  growth_autotasks_disabled: ['growth', 'autotasks', 'disabled'],
+  growth_autotasks_only: ['growth', 'autotasks', 'only'],
+  growth_autotasks_order: ['growth', 'autotasks', 'order'],
+  growth_autotasks_mp_codes: ['growth', 'autotasks', 'mp_codes'],
+  growth_autotasks_allow_unknown_claim: ['growth', 'autotasks', 'allow_unknown_claim'],
   travel_hours: ['schedule', 'travel_hours'],
   travel_enabled: ['schedule', 'travel_enabled'],
   activity_hours: ['schedule', 'activity_hours'],
@@ -77,6 +82,12 @@ export const CLEARABLE_CFG = new Set([
   'prompt_cn_mode', 'prompt_global_mode', 'prompt_cn_preset', 'prompt_global_preset',
   'proxy_url', 'resin_url', 'resin_platform_name',
   'cn_client_version', 'cn_cli_version', 'global_client_version', 'global_cli_version',
+]);
+
+/* 逗号分隔的字符串列表字段（Go 侧 []string）。空串有意：清空表单 = 下发 []（清掉
+   清单），因为数组在保存时是整体替换；不提交的话磁盘上的旧值永远不会消失。 */
+export const STR_LIST_CFG = new Set([
+  'growth_autotasks_disabled', 'growth_autotasks_only', 'growth_autotasks_order', 'growth_autotasks_mp_codes',
 ]);
 
 /* 下拉但值是数字的字段（Go 侧 int）。 */
@@ -162,9 +173,10 @@ export function collectConfig(
     if (el.type === 'checkbox') v = !!el.checked;
     else {
       const raw = String(el.value ?? '').trim();
-      if (raw === '') v = CLEARABLE_CFG.has(name) ? '' : undefined;
+      if (raw === '') v = STR_LIST_CFG.has(name) ? [] : (CLEARABLE_CFG.has(name) ? '' : undefined);
       else if (NUMERIC_CFG.has(name)) v = Number(raw);
       else if (name.endsWith('_hours')) v = raw.split(/[,，\s]+/).filter(Boolean).map(Number);
+      else if (STR_LIST_CFG.has(name)) v = raw.split(/[,，\s]+/).filter(Boolean);
       else v = raw;
     }
     if (v !== undefined) put(out, path, v);

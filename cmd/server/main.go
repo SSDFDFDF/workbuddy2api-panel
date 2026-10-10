@@ -216,6 +216,9 @@ func main() {
 		KeepaliveDisabled:  !cfg.Schedule.KeepaliveEnabled,
 		BlackcatDisabled:   !cfg.Schedule.BlackcatEnabled,
 		GrowthDisabled:     !cfg.Schedule.GrowthEnabled,
+		// 夜猫子计数窗口覆盖（growth.autotasks.tasks.black_cat.window）：
+		// 与面板侧动作同一份配置，nil = 内置 23:00–08:00。
+		BlackcatWindow: blackcatWindowFrom(cfg),
 		// 保号类四任务是否覆盖禁用账号（缺省 false = 禁用即跳过，保持既有行为）。
 		IncludeDisabledInTasks: cfg.Schedule.IncludeDisabledInTasks,
 	})
@@ -388,6 +391,8 @@ func main() {
 	// 时经这两个句柄热改入站准入/会话粘性以外的处理器侧字段。
 	hot.handler = h
 	hot.panel = pn
+	// 成长任务自动化策略快照（growth.autotasks）：装配即建并注入，保存配置时整体替换。
+	pn.SetAutotaskPolicy(panel.NewAutotaskPolicy(cfg))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -743,6 +748,13 @@ func saveConfigTx(raw []byte, path string, hot *hotTargets) ([]string, error) {
 		!newCfg.Schedule.GrowthEnabled)
 	sch.SetBalanceInterval(newCfg.BalanceRefreshInterval)
 	sch.SetIncludeDisabledInTasks(newCfg.Schedule.IncludeDisabledInTasks)
+	// 夜猫子计数窗口热生效（growth.autotasks.tasks.black_cat.window）：与面板侧动作同源。
+	sch.SetBlackcatWindow(blackcatWindowFrom(newCfg))
+	// 成长任务自动化策略热生效（growth.autotasks）：整体替换面板侧快照，任务中心 /
+	// 一键完成 / growth 排程的下一次动作即用新策略（无需重启）。
+	if hot.panel != nil {
+		hot.panel.SetAutotaskPolicy(panel.NewAutotaskPolicy(newCfg))
+	}
 
 	return restartRequiredFields(oldCfg, newCfg), nil
 }
@@ -774,6 +786,18 @@ func migrationNotesSuffix(notes []string) string {
 		return ""
 	}
 	return "（" + strings.Join(notes, "；") + "）"
+}
+
+// blackcatWindowFrom 由配置推导夜猫子计数窗口覆盖（nil = 内置 23:00–08:00）。
+//
+// 装配期与热应用共用同一口径，避免「重启后与热改后行为不一致」：窗口来自
+// growth.autotasks.tasks.black_cat.window（与面板 runBlackCat 同一字段）。
+func blackcatWindowFrom(cfg *config.Config) *scheduler.CountWindow {
+	p, ok := cfg.Growth.Autotasks.Tasks["black_cat"]
+	if !ok || !p.HasWindow {
+		return nil
+	}
+	return &scheduler.CountWindow{StartMin: p.WindowStartMin, EndMin: p.WindowEndMin}
 }
 
 // upstreamOptions 由配置构建上游热改选项（装配与保存路径共用同一口径，

@@ -54,6 +54,16 @@
     "balance_refresh_minutes": 5,
     "include_disabled_in_tasks": false
   },
+  "growth": {
+    "autotasks": {
+      "disabled": [],
+      "only": [],
+      "order": [],
+      "mp_codes": [],
+      "allow_unknown_claim": false,
+      "tasks": {}
+    }
+  },
   "global": {
     "enabled": true,
     "chat_base": "",

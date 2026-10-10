@@ -42,7 +42,11 @@ type autoAction struct {
 	TaskCode string // 目标任务 code
 	Desc     string // 展示用说明
 	Attempt  bool   // true = 尝试型（上游未证实可脚本化，跑了可能不点亮）
-	run      func(p *Panel, a *auth.Auth) (string, error)
+	// claimOnly 标记「策略合成的兜底动作」：只做 accept + 达标领奖，不报任何
+	// 判据事件（allow_unknown_claim 开启且任务未内置判据时）。此类动作只在任务
+	// 已达标时进入待办，避免每天把等不到判据的任务排进队列。
+	claimOnly bool
+	run       func(p *Panel, a *auth.Auth) (string, error)
 }
 
 // autoActions 已实现的任务动作表（顺序即执行顺序：先解锁依赖项）。
@@ -176,17 +180,19 @@ var autoActions = []autoAction{
 	},
 }
 
-// autoActionFor 查任务对应的动作；无则返回 nil（不可自动化）。
-func autoActionFor(code string) *autoAction {
+// autoActionByCode 在内置动作注册表里按 code 查动作（纯静态，不含策略过滤；
+// 策略层见 autotask_policy.go 的 actionFor）。未登记返回 nil。
+func autoActionByCode(code string) *autoAction {
+	code = strings.TrimSpace(code)
 	for i := range autoActions {
-		if autoActions[i].TaskCode == strings.TrimSpace(code) {
+		if autoActions[i].TaskCode == code {
 			return &autoActions[i]
 		}
 	}
 	return nil
 }
 
-// autoActionIndex 任务在 autoActions 中的顺序（队列执行按依赖序排；未知返回大值）。
+// autoActionIndex 任务在**内置** autoActions 中的顺序（策略层排序的基准；未知返回大值）。
 func autoActionIndex(code string) int {
 	for i := range autoActions {
 		if autoActions[i].TaskCode == code {
@@ -196,9 +202,13 @@ func autoActionIndex(code string) int {
 	return 1 << 20
 }
 
-// mpTaskCodes 小程序口径专属下发的成长任务：默认（无 mp 头）列表不出现，
-// accept/claim 均要求 X-Client-Platform: miniprogram。新任务出现时在此登记。
-var mpTaskCodes = map[string]bool{
+// builtinMPTaskCodes 小程序口径专属下发的成长任务——**内置兜底表**：默认（无 mp 头）
+// 列表不出现，accept/claim 均要求 X-Client-Platform: miniprogram。
+//
+// 运行时优先：任务中心每次拉双口径列表时把「mp 列表 − 默认列表」的差集记入
+// Panel.noteMPDetected（上游新增 mp 任务无需改代码）；本表只在探测不可用
+// （列表失败/尚未扫描）时兜底，也可用 growth.autotasks.mp_codes 增删。
+var builtinMPTaskCodes = map[string]bool{
 	"school_season":      true, // 校园日（mini chat + activityId）
 	"Sequential_Tasks_1": true, // 小程序首对话（mini chat，无 activityId）
 	"Sequential_Tasks_2": true, // 小程序选中专家并完成有效对话（mp 指纹 expert_actual_use）
@@ -212,8 +222,7 @@ var mpTaskCodes = map[string]bool{
 	"Sequential_Tasks_7": true,
 }
 
-// isMPTaskCode 报告任务是否小程序口径专属（决定回读/接受/领奖走 mp 变体）。
-func isMPTaskCode(code string) bool { return mpTaskCodes[code] }
+// isMPTaskCode 见 autotask_policy.go（内置表 ∪ 配置 ∪ 运行时探测）。
 
 // taskByCode 拉取任务列表并定位单个任务；未找到返回 nil（不视为错误）。
 // 双口径：mp 专属任务在默认列表查不到，自动回落 mp 列表（仅对已登记的 mp 码，
@@ -228,7 +237,7 @@ func (p *Panel) taskByCode(a *auth.Auth, code string) (*upstream.Task, error) {
 			return &tasks[i], nil
 		}
 	}
-	if isMPTaskCode(code) {
+	if p.isMPTaskCode(code) {
 		return p.taskByCodeMP(a, code)
 	}
 	return nil, nil
@@ -329,6 +338,9 @@ var mpChatEventGap = 45 * time.Second
 // mp 查询 → accept（带登记回读验证）→ mini chat 事件上报（withActivityId 决定
 // 是否带开学季 activityId：school_season 必带，Sequential_Tasks_1 不带——服务端按
 // source=mini_program 指纹关联）→ 回读 → 达标即领奖。
+//
+// 参数可被 growth.autotasks.tasks.<code> 覆盖：gap（事件间隔）、target（进度目标）、
+// activity_id（事件 activityId）。
 func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string, withActivityId bool) (string, error) {
 	t, err := p.taskByCodeMP(a, code)
 	if err != nil {
@@ -352,7 +364,7 @@ func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string, withActivityId bool
 		}
 	}
 	// 已达标（含 completed 未领）：直接领奖。
-	target := t.Target
+	target := p.targetFor(code, t.Target)
 	if target <= 0 {
 		target = 1
 	}
@@ -363,15 +375,17 @@ func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string, withActivityId bool
 		}
 		return fmt.Sprintf("已领取奖励（+%dc +%de）", credit, energy), nil
 	}
-	// 判据上报：按差额补 mini chat 事件。每条前 sleep mpChatEventGap+抖动——
-	// 连发会被上游反作弊判无效（见 mpChatEventGap 注释），宁可慢不可白报。
+	// 判据上报：按差额补 mini chat 事件。每条前 sleep gap+抖动——连发会被上游
+	// 反作弊判无效（见 mpChatEventGap 注释），宁可慢不可白报。gap 可由
+	// growth.autotasks.tasks.<code>.gap 覆盖（比如上游反作弊口径变化时无需改代码）。
+	gap := p.gapFor(code, mpChatEventGap)
 	need := target - t.Current
 	for i := int64(0); i < need; i++ {
-		time.Sleep(mpChatEventGap + time.Duration(rand.Int64N(int64(10*time.Second))))
+		time.Sleep(gap + time.Duration(rand.Int64N(int64(10*time.Second))))
 		conv := fmt.Sprintf("wb2api-mp-%d-%d", time.Now().UnixMilli(), i)
 		var ev map[string]any
 		if withActivityId {
-			ev = upstream.SchoolSeasonChatEvent(conv)
+			ev = upstream.SchoolSeasonChatEvent(conv, p.activityIDFor(code))
 		} else {
 			ev = upstream.SchoolChatTimesEvents(conv)
 		}
@@ -450,7 +464,7 @@ func (p *Panel) runSequentialEventTask(a *auth.Auth, code string, primary, fallb
 	if t.Claimed {
 		return "已领取", nil
 	}
-	target := t.Target
+	target := p.targetFor(code, t.Target)
 	if target <= 0 {
 		target = 1
 	}
@@ -559,7 +573,7 @@ func runMiniExpert(p *Panel, a *auth.Auth) (string, error) {
 	if t.Claimed {
 		return "已领取", nil
 	}
-	target := t.Target
+	target := p.targetFor(code, t.Target)
 	if target <= 0 {
 		target = 1 // 未 accept 的 mp 任务 progress 为 null，target 兜底（上游实测）
 	}
@@ -629,8 +643,14 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "task_code required")
 		return
 	}
-	act := autoActionFor(body.TaskCode)
+	act := p.actionFor(body.TaskCode)
 	if act == nil {
+		// 区分两种不可执行：策略屏蔽（改配置即可恢复）与确实无接口实现。
+		if autoActionByCode(body.TaskCode) != nil {
+			writeErr(w, http.StatusNotImplemented,
+				"该任务已被 growth.autotasks 策略屏蔽（disabled / only），可在配置页调整后重试")
+			return
+		}
 		writeErr(w, http.StatusNotImplemented,
 			"该任务需要客户端内交互（无对应接口），无法自动完成；请按任务说明在官方客户端操作")
 		return
@@ -653,7 +673,7 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "该账号没有此任务")
 		return
 	}
-	isMP := isMPTaskCode(act.TaskCode)
+	isMP := p.isMPTaskCode(act.TaskCode)
 	if before.Claimed {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "skipped": true, "message": "该任务已领取过奖励"})
 		return
@@ -745,15 +765,17 @@ func truncateStr(s string, n int) string {
 var reportGap = 1050 * time.Millisecond
 
 // runChat5 补足 chat_5 的进度：按差额上报 chat_request_send。
+// target/gap 可由 growth.autotasks.tasks.chat_5 覆盖。
 func runChat5(p *Panel, a *auth.Auth) (string, error) {
-	t, err := p.taskByCode(a, "chat_5")
+	const code = "chat_5"
+	t, err := p.taskByCode(a, code)
 	if err != nil {
 		return "", err
 	}
 	if t == nil {
 		return "", fmt.Errorf("任务不存在")
 	}
-	target := t.Target
+	target := p.targetFor(code, t.Target)
 	if target <= 0 {
 		target = 5
 	}
@@ -761,13 +783,14 @@ func runChat5(p *Panel, a *auth.Auth) (string, error) {
 	if need <= 0 {
 		return "进度已达标，无需上报", nil
 	}
+	gap := p.gapFor(code, reportGap)
 	for i := int64(0); i < need; i++ {
 		cid := fmt.Sprintf("wb2api-chat5-%d-%d", time.Now().UnixMilli(), i)
 		if err := p.cfg.Upstream.ReportChatActivity(a, cid, ""); err != nil {
 			return fmt.Sprintf("上报第 %d/%d 条失败: %v", i+1, need, err), nil
 		}
 		if i < need-1 {
-			time.Sleep(reportGap)
+			time.Sleep(gap)
 		}
 	}
 	return fmt.Sprintf("已补报 %d 条对话事件", need), nil
@@ -883,9 +906,10 @@ func runLibraryRead(p *Panel, a *auth.Auth) (string, error) {
 // runBlackCat 完成 black_cat（夜猫子，夜间 23:00–08:00 计数）。
 // 判据 = 夜间窗口内 glm-5.2 真实对话 + chat 事件上报（WorkBuddy-Daily 实测口径）。
 // 窗口外不做（提示等排程）；网关 blackcat_hours（默认 23 点）排程会自动补足。
+// 计数窗口可由 growth.autotasks.tasks.black_cat.window 覆盖（如 "22:30-07:30"）。
 func runBlackCat(p *Panel, a *auth.Auth) (string, error) {
-	if !upstream.InNightWindow(time.Now()) {
-		return "当前不在 23:00–08:00 计数窗口，行为不计分；网关会在每日 23 点自动补足", nil
+	if !p.inCountWindow("black_cat", time.Now()) {
+		return "当前不在夜间计数窗口（默认 23:00–08:00），行为不计分；网关会在排程时点自动补足", nil
 	}
 	need, err := p.cfg.Upstream.BlackcatNeed(a)
 	if err != nil {
@@ -1008,7 +1032,13 @@ func runAppearance(p *Panel, a *auth.Auth) (string, error) {
 // （JOIN chat 链）一次上报 5 组即 5/5 点亮。template_id 服务端不校验真实性。
 func runTemplateUse(p *Panel, a *auth.Auth) (string, error) {
 	templates := [][2]string{{"1", "深度研究"}, {"2", "周报生成"}, {"3", "竞品分析"}, {"4", "活动策划"}, {"5", "代码评审"}}
-	for i, tp := range templates {
+	// 目标次数可覆盖（缺省 = 模板表长度）：超出模板表的轮次循环复用模板。
+	count := int(p.targetFor("template_5", int64(len(templates))))
+	if count <= 0 {
+		count = len(templates)
+	}
+	for i := 0; i < count; i++ {
+		tp := templates[i%len(templates)]
 		ms := time.Now().UnixMilli()
 		conv := fmt.Sprintf("wb2api-tpl-%d-%d", ms, i)
 		req := fmt.Sprintf("wb2api-tpl-req-%d-%d", ms, i)
@@ -1018,7 +1048,7 @@ func runTemplateUse(p *Panel, a *auth.Auth) (string, error) {
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
-	return "已上报 template_used ×5", nil
+	return fmt.Sprintf("已上报 template_used ×%d", count), nil
 }
 
 // runPlaybookPrompt 完成 playbook_prompt（灵感案例 Dialog 中发送 Prompt）。
@@ -1055,16 +1085,20 @@ const expertSummonGap = 6 * time.Second
 // （summon_click/summoned）→ 真实 chat 拿服务端 requestId → expert_actual_use。
 // 自造专家 id 或自造 requestId 均不计数。
 func runExpertUse(p *Panel, a *auth.Auth) (string, error) {
-	return runExpertBatch(p, a, "agent", 5)
+	return runExpertBatch(p, a, "expert_5", "agent", int(p.targetFor("expert_5", 5)))
 }
 
 // runExpertTeamUse 完成 Expert_team_use_3（使用 3 个专家团，expertType=team）。
 func runExpertTeamUse(p *Panel, a *auth.Auth) (string, error) {
-	return runExpertBatch(p, a, "team", 3)
+	return runExpertBatch(p, a, "Expert_team_use_3", "team", int(p.targetFor("Expert_team_use_3", 3)))
 }
 
 // runExpertBatch 专家召唤+使用的公共实现。失败逐个继续，返回汇总信息。
-func runExpertBatch(p *Panel, a *auth.Auth, expertType string, count int) (string, error) {
+// code 仅用于读取逐任务参数覆盖（间隔）；空 = 用内置间隔。
+func runExpertBatch(p *Panel, a *auth.Auth, code, expertType string, count int) (string, error) {
+	if count <= 0 {
+		count = 1
+	}
 	experts, err := p.cfg.Upstream.MarketExpertList(a, expertType)
 	if err != nil {
 		return "", fmt.Errorf("拉取专家列表: %w", err)
@@ -1098,7 +1132,7 @@ func runExpertBatch(p *Panel, a *auth.Auth, expertType string, count int) (strin
 		}
 		ok++
 		if i < len(experts)-1 {
-			time.Sleep(expertSummonGap)
+			time.Sleep(p.gapFor(code, expertSummonGap))
 		}
 	}
 	_ = fail
@@ -1112,13 +1146,19 @@ func runExpertBatch(p *Panel, a *auth.Auth, expertType string, count int) (strin
 // runAutoAll 对单账号依次执行所有可自动化任务，返回逐项结果。
 // 供「一键完成全部可自动任务」使用；单项失败不影响后续项。
 //
+// 动作集合与顺序来自当前策略（growth.autotasks）：被黑/白名单屏蔽的任务不执行，
+// allow_unknown_claim 开启时对「已下发但未内置判据」的任务补上 accept + 达标领奖。
+//
 // 流程：先把所有未接受的任务批量 accept（规范状态机；上游脚本建议"先 accept"），
 // 再逐项执行行为链路。accept 不是进度产生的必要条件，但让后续状态流转规范。
 func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 	var out []map[string]any
 
 	// 阶段 0：批量接受尚未接受的任务（失败不阻塞——行为事件才是进度唯一判据）。
+	// 同时记录两侧列表的任务码：供 allow_unknown_claim 的兜底动作枚举。
+	var defaultTasks, mpTasks []upstream.Task
 	if tasks, err := p.cfg.Upstream.ListTasks(a); err == nil {
+		defaultTasks = tasks
 		var codes []string
 		for _, t := range tasks {
 			if !t.Claimed && !t.Locked && t.AcceptStatus != "accepted" && t.AcceptStatus != "completed" {
@@ -1142,9 +1182,15 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 	}
 
 	// 阶段 0b：小程序口径任务单独接受（默认列表不含 mp 码；失败不阻塞）。
-	if mpTasks, err := p.cfg.Upstream.ListTasksMP(a); err == nil {
+	// 两次列表都成功时顺手记录 mp 专属码差集（与任务扫描/账号任务列表同一口径），
+	// 否则「一键完成」在扫描之前遇到 mp 专属的未知任务会查不到而误报「无此任务」。
+	if tasks, err := p.cfg.Upstream.ListTasksMP(a); err == nil {
+		mpTasks = tasks
+		if defaultTasks != nil {
+			p.noteMPDetected(mpExclusiveCodes(defaultTasks, tasks))
+		}
 		var mpCodes []string
-		for _, t := range mpTasks {
+		for _, t := range tasks {
 			if !t.Claimed && !t.Locked && t.AcceptStatus != "accepted" && t.AcceptStatus != "completed" {
 				mpCodes = append(mpCodes, t.TaskCode)
 			}
@@ -1165,7 +1211,26 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 		}
 	}
 
-	for _, act := range autoActions {
+	// 动作清单：策略过滤后的内置动作（按策略顺序），加上 allow_unknown_claim
+	// 对「已下发但未内置判据」任务的兜底动作（仅在该任务已达标时才会执行）。
+	actions := p.actions()
+	if p.autotaskPolicy().AllowUnknownClaim {
+		seen := map[string]bool{}
+		for _, act := range actions {
+			seen[act.TaskCode] = true
+		}
+		for _, t := range append(append([]upstream.Task{}, defaultTasks...), mpTasks...) {
+			if seen[t.TaskCode] || autoActionByCode(t.TaskCode) != nil {
+				continue
+			}
+			if act := p.actionFor(t.TaskCode); act != nil {
+				seen[t.TaskCode] = true
+				actions = append(actions, *act)
+			}
+		}
+	}
+
+	for _, act := range actions {
 		item := map[string]any{"task_code": act.TaskCode, "desc": act.Desc}
 		before, err := p.taskByCode(a, act.TaskCode)
 		if err != nil {
@@ -1194,7 +1259,7 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 			continue
 		}
 		var after *upstream.Task
-		if isMPTaskCode(act.TaskCode) {
+		if p.isMPTaskCode(act.TaskCode) {
 			after, _ = p.taskByCodeMP(a, act.TaskCode)
 		} else {
 			after, _ = p.taskByCodeWaiting(a, act.TaskCode)
@@ -1208,7 +1273,7 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 			item["claimable"] = true
 			var credit, energy int64
 			var cerr error
-			if isMPTaskCode(act.TaskCode) {
+			if p.isMPTaskCode(act.TaskCode) {
 				credit, energy, cerr = p.cfg.Upstream.ClaimRewardMP(a, act.TaskCode)
 			} else {
 				credit, energy, cerr = p.cfg.Upstream.ClaimReward(a, act.TaskCode)

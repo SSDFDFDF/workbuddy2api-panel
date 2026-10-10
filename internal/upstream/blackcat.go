@@ -16,10 +16,30 @@ import (
 	"workbuddy_manager/internal/auth"
 )
 
-// InNightWindow 当前是否处于夜猫子计数窗口（23:00–08:00 本地时区）。
+// InNightWindow 当前是否处于夜猫子计数窗口（内置 23:00–08:00 本地时区）。
+// 内置口径的**唯一定义点**（面板侧与排程器的缺省路径都走这里）：
+// 与历史实现 `h >= 23 || h < 8` 逐时刻等价，见 blackcat_window_test.go 的回归断言。
 func InNightWindow(now time.Time) bool {
-	h := now.Hour()
-	return h >= 23 || h < 8
+	return InWindow(23*60, 8*60, now)
+}
+
+// InWindow 报告 now 是否落在 [startMin, endMin) 计数窗口内（当日分钟数）。
+//   - startMin < endMin：同日窗口（如 09:00-18:00）；
+//   - startMin > endMin：跨零点窗口（如 23:00-08:00）；
+//   - startMin == endMin：全天。
+//
+// 供夜猫子（内置窗口）与配置化的 activity/task 计数窗口共用，保证
+// scheduler 与 panel 两侧对同一窗口的判定逐字一致。
+func InWindow(startMin, endMin int, now time.Time) bool {
+	cur := now.Hour()*60 + now.Minute()
+	switch {
+	case startMin == endMin:
+		return true
+	case startMin < endMin:
+		return cur >= startMin && cur < endMin
+	default:
+		return cur >= startMin || cur < endMin
+	}
 }
 
 // BlackcatNeed 查 black_cat 任务剩余差额（需要再完成几次对话）。

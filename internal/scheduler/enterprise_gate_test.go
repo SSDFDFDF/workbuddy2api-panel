@@ -167,3 +167,41 @@ func TestEnterpriseGateKeepsKeepaliveAndBalance(t *testing.T) {
 		t.Fatal("pool missing")
 	}
 }
+
+// TestBlackcatWindowOverride 配置化的夜猫子计数窗口必须真的作用到**排程器**：
+// growth.autotasks.tasks.black_cat.window 收窄窗口后，窗口外的排程触发直接跳过
+// （一个上游请求都不发），窗口内照常发起。此前该判定写死 23:00–08:00，与面板侧
+// 动作的配置化窗口分裂——「面板说在窗口内、排程说不在」正是要防的形态。
+func TestBlackcatWindowOverride(t *testing.T) {
+	restoreClock := nowForNightWindow
+	nowForNightWindow = func() time.Time { return time.Date(2026, 10, 7, 23, 30, 0, 0, time.Local) }
+	t.Cleanup(func() { nowForNightWindow = restoreClock })
+
+	// 窗口收到 01:00–05:00：23:30 在窗口外 → 不发任何请求。
+	s, r := enterpriseTestScheduler(t, false)
+	s.SetBlackcatWindow(&CountWindow{StartMin: 1 * 60, EndMin: 5 * 60})
+	s.RunBlackcatNow()
+	if r.has("/v2/activity/growth/tasks") {
+		t.Errorf("窗口外不应发起上游请求，实际=%v", r.snapshot())
+	}
+
+	// 窗口含 23:30（22:00–07:00 跨零点）→ 与内置口径同样发起第一跳。
+	s2, r2 := enterpriseTestScheduler(t, false)
+	s2.SetBlackcatWindow(&CountWindow{StartMin: 22 * 60, EndMin: 7 * 60})
+	s2.RunBlackcatNow()
+	if !r2.has("/v2/activity/growth/tasks") {
+		t.Errorf("窗口内应发起上游请求，实际=%v", r2.snapshot())
+	}
+
+	// 置 nil 回到内置口径（23:30 在内）——热改可逆。
+	s3, r3 := enterpriseTestScheduler(t, false)
+	s3.SetBlackcatWindow(&CountWindow{StartMin: 1 * 60, EndMin: 5 * 60})
+	s3.SetBlackcatWindow(nil)
+	if s3.GetBlackcatWindow() != nil {
+		t.Fatal("置 nil 后窗口覆盖应清空")
+	}
+	s3.RunBlackcatNow()
+	if !r3.has("/v2/activity/growth/tasks") {
+		t.Errorf("回到内置窗口后应发起上游请求，实际=%v", r3.snapshot())
+	}
+}

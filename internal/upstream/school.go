@@ -141,12 +141,16 @@ func SchoolChatTimesEvents(conversationID string) map[string]any {
 }
 
 // SchoolSeasonChatEvent 构造 growth 域「校园日」（school_season）判据事件：
-// mini 指纹 chat_request_send + activityId=school_open_day_2026（与 school 域
-// 开学季同 activityId 关联；实测无 activityId 的事件不点亮）。事件形状与
-// SchoolChatTimesEvents 同构（school 域 chat_3_times 同款），仅追加 activityId。
-func SchoolSeasonChatEvent(conversationID string) map[string]any {
+// mini 指纹 chat_request_send + activityId（与 school 域开学季同 activityId
+// 关联；实测无 activityId 的事件不点亮）。事件形状与 SchoolChatTimesEvents
+// 同构（school 域 chat_3_times 同款），仅追加 activityId；activityID 空 =
+// schoolOpenDayActivityID（配置未覆盖时的内置默认）。
+func SchoolSeasonChatEvent(conversationID, activityID string) map[string]any {
+	if activityID == "" {
+		activityID = schoolOpenDayActivityID
+	}
 	ev := SchoolChatTimesEvents(conversationID)
-	ev["activityId"] = schoolOpenDayActivityID
+	ev["activityId"] = activityID
 	return ev
 }
 

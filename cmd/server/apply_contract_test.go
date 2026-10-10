@@ -39,6 +39,8 @@ var hotAppliedPaths = []string{
 	"pool.*",
 	// 排程参数（scheduler.Reconfigure / SetBalanceInterval / …）
 	"schedule.*",
+	// 成长任务自动化策略（Panel.SetAutotaskPolicy：原子快照整体替换）
+	"growth.*",
 	// 入站准入限额（Handler.SetIngressLimits）
 	"server.max_inflight_requests",
 	"server.max_inflight_bytes_mb",

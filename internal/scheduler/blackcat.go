@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"workbuddy_manager/internal/logfmt"
-	"workbuddy_manager/internal/upstream"
 )
 
 // nowForNightWindow 夜猫子窗口判定所用时钟（生产恒为 time.Now）。
@@ -18,10 +17,11 @@ import (
 var nowForNightWindow = time.Now
 
 // RunBlackcatNow 对所有可用账号执行夜猫子对话补足（窗口外跳过）。
-// 由 blackcat_hours 排程（默认 [23]）触发；执行前二次校验 InNightWindow。
+// 由 blackcat_hours 排程（默认 [23]）触发；执行前二次校验计数窗口
+// （缺省 23:00–08:00，可由 growth.autotasks.tasks.black_cat.window 覆盖）。
 func (s *Scheduler) RunBlackcatNow() {
-	if !upstream.InNightWindow(nowForNightWindow()) {
-		log.Printf("blackcat: 当前不在 23:00–08:00 计数窗口，跳过")
+	if !s.inBlackcatWindow(nowForNightWindow()) {
+		log.Printf("blackcat: 当前不在计数窗口（缺省 23:00–08:00），跳过")
 		return
 	}
 	for _, st := range s.cfg.Pool.List() {
