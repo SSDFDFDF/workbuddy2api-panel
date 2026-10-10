@@ -16,7 +16,7 @@ import (
 // response.incomplete, never in tool lifecycle events that eager clients execute.
 func Stream(w http.ResponseWriter, r io.Reader, req *Request, hint func(string) string, opts ...upstream.StreamOption) error {
 	b := newBuilder(req)
-	started, textStarted := false, false
+	started, textStarted, streamedText := false, false, false
 	textIndex := -1
 	sequence := 0
 	emit := func(name string, data map[string]any) error {
@@ -80,6 +80,7 @@ func Stream(w http.ResponseWriter, r io.Reader, req *Request, hint func(string) 
 		if err := startText(index); err != nil {
 			return err
 		}
+		streamedText = true
 		if req.Kind == Anthropic {
 			return emit("content_block_delta", map[string]any{"index": index, "delta": map[string]any{"type": "text_delta", "text": text}})
 		}
@@ -128,6 +129,27 @@ func Stream(w http.ResponseWriter, r io.Reader, req *Request, hint func(string) 
 		if item["type"] == "text" || item["type"] == "message" {
 			if err := startText(i); err != nil {
 				return err
+			}
+			// Text that never arrived as deltas (a refusal fallback, or a snapshot
+			// that superseded them) still has to reach the client in the block that
+			// is about to close.
+			text := ""
+			if req.Kind == Anthropic {
+				text, _ = item["text"].(string)
+			} else {
+				part := item["content"].([]any)[0].(map[string]any)
+				text, _ = part["text"].(string)
+			}
+			if !streamedText && text != "" {
+				if req.Kind == Anthropic {
+					if err := emit("content_block_delta", map[string]any{"index": i, "delta": map[string]any{"type": "text_delta", "text": text}}); err != nil {
+						return err
+					}
+				} else {
+					if err := emit("response.output_text.delta", map[string]any{"item_id": b.messageID, "output_index": i, "content_index": 0, "delta": text, "logprobs": []any{}}); err != nil {
+						return err
+					}
+				}
 			}
 			if req.Kind == Anthropic {
 				if err := emit("content_block_stop", map[string]any{"index": i}); err != nil {

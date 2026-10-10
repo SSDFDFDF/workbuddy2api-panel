@@ -19,6 +19,19 @@ func declaredToolNames(req *Request) []string {
 	return names
 }
 
+// strictToolNames reports whether upstream tool names must match the tools this
+// request authorizes. A request that declares no tools and carries no tool
+// history has nothing to contradict: the bridge passes observed names through
+// instead of failing a tool-less turn (the upstream may still attempt one of
+// its built-in tools). History alone keeps the strict check so retired
+// identities never become callable (see toolIndex.wireOwners).
+func (req *Request) strictToolNames() bool {
+	if len(declaredToolNames(req)) > 0 {
+		return true
+	}
+	return req.Kind == Responses && req.tools != nil && len(req.tools.wireOwners) > 0
+}
+
 // validateToolSelection enforces the translated request, not just declaration
 // membership. A cutoff may explain a missing required tool, but cannot authorize
 // forbidden calls, a different selected function or disallowed parallel calls.
@@ -55,5 +68,13 @@ func validateToolSelection(req *Request, calls []any, finish string) error {
 }
 
 func completionOptions(req *Request, opts []upstream.StreamOption) []upstream.StreamOption {
-	return append(opts, upstream.WithEmptyToolIdentityDeltas(), upstream.WithDeclaredToolNames(declaredToolNames(req)))
+	opts = append(opts, upstream.WithEmptyToolIdentityDeltas(), upstream.WithLegacyFunctionCalls())
+	if req.strictToolNames() {
+		opts = append(opts, upstream.WithDeclaredToolNames(declaredToolNames(req)))
+	} else {
+		// No tool set is authorized: dedup name dialects but pass observed
+		// names through instead of failing a tool-less turn.
+		opts = append(opts, upstream.WithToolNameDialects())
+	}
+	return opts
 }

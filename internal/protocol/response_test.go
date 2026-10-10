@@ -247,15 +247,31 @@ func TestUpstreamReasoningDropped(t *testing.T) {
 	}
 }
 
-func TestAggregateStreamRejectSameOrdering(t *testing.T) {
+func TestTextAfterToolDeltasIsKept(t *testing.T) {
+	// Text that arrives after tool deltas is appended to the single text block
+	// instead of failing: the destination protocols cannot replay the original
+	// interleaving, but dropping the text would lose content.
 	raw := strings.Replace(toolsStream, `"finish_reason":"tool_calls"`, `"finish_reason":null`, 1)
 	raw = strings.Replace(raw, "data: [DONE]", `data: {"choices":[{"index":0,"delta":{"content":"late"},"finish_reason":"tool_calls"}]}`+"\n\ndata: [DONE]", 1)
-	if _, err := Aggregate(strings.NewReader(raw), testRequest(t, Responses)); err == nil {
-		t.Fatal("aggregate reordered text")
+	completion, err := Aggregate(strings.NewReader(raw), testRequest(t, Responses))
+	if err != nil {
+		t.Fatal("aggregate dropped text after tools", err)
+	}
+	out, err := completion.Format(testRequest(t, Responses))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := out["output"].([]any)[0].(map[string]any)["content"].([]any)[0].(map[string]any)["text"]
+	if text != "checkinglate" {
+		t.Fatal("late text lost", text)
 	}
 	for _, kind := range []Kind{Responses, Anthropic} {
-		if err := Stream(httptest.NewRecorder(), strings.NewReader(raw), testRequest(t, kind), nil); err == nil {
-			t.Fatal("stream reordered text")
+		rec := httptest.NewRecorder()
+		if err := Stream(rec, strings.NewReader(raw), testRequest(t, kind), nil); err != nil {
+			t.Fatal("stream dropped text after tools", err)
+		}
+		if !strings.Contains(rec.Body.String(), "late") {
+			t.Fatal("stream lost late text")
 		}
 	}
 }

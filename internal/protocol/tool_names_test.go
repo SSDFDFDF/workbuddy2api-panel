@@ -11,13 +11,28 @@ import (
 
 func requestWithNames(t *testing.T, kind Kind, names []string) *Request {
 	t.Helper()
-	req := testRequest(t, kind)
+	body := map[string]any{"model": "cn:demo"}
 	tools := []any{}
 	for _, name := range names {
-		tools = append(tools, map[string]any{"type": "function", "function": map[string]any{"name": name, "parameters": map[string]any{"type": "object"}, "strict": false}})
+		if kind == Responses {
+			tools = append(tools, map[string]any{"type": "function", "name": name, "parameters": map[string]any{"type": "object"}, "strict": false})
+		} else {
+			tools = append(tools, map[string]any{"name": name, "input_schema": map[string]any{"type": "object"}})
+		}
 	}
-	req.Chat.Object["tools"] = tools
-	return req
+	body["tools"] = tools
+	if kind == Responses {
+		body["store"] = false
+		body["input"] = "hi"
+	} else {
+		body["max_tokens"] = 100
+		body["messages"] = []any{map[string]any{"role": "user", "content": "hi"}}
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return mustDecode(t, kind, string(raw))
 }
 
 func nameChunks(chunks []any) string {
@@ -58,7 +73,7 @@ func TestToolNameDialects(t *testing.T) {
 		{"undeclared", []string{"lookup"}, []any{"unknown"}, ""},
 		{"not-a-prefix-repair", []string{"lookup"}, []any{"look"}, ""},
 		{"missing-name", []string{"lookup"}, []any{"", nil}, ""},
-		{"no-tools", nil, []any{"lookup"}, ""},
+		{"no-tools", nil, []any{"lookup"}, "lookup"},
 		{"invalid-type", []string{"lookup"}, []any{42}, ""},
 	} {
 		for _, kind := range []Kind{Responses, Anthropic} {

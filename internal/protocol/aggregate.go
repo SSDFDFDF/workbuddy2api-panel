@@ -64,61 +64,48 @@ func (c *Completion) Format(req *Request) (map[string]any, error) {
 
 // outputState is shared by SSE and JSON consumers. It establishes text blocks
 // while observing validated frames, then binds tools only after upstream finish.
-// This foundation deliberately retains the strict text-before-tools subset:
-// accepting interleaving here also needs a lossless Chat history representation.
+// Text and tool deltas may interleave: text is delivered through one block
+// (order between separately delivered blocks cannot be replayed by the
+// destination protocols, but content is never dropped).
 type outputState struct {
-	blocks      []blockRef
-	sawTools    bool
-	sawMessage  bool
-	sawSnapshot bool
+	blocks   []blockRef
+	streamed bool
 }
 
 func (o *outputState) observe(chunk map[string]any, text func(int, string) error) error {
 	choices, _ := chunk["choices"].([]any)
 	for _, v := range choices {
 		ch := v.(map[string]any)
-		if ch["logprobs"] != nil {
-			return fmt.Errorf("upstream logprobs are unsupported")
-		}
-		_, hasDelta := ch["delta"]
-		_, hasMessage := ch["message"]
-		if hasMessage && (hasDelta || o.sawMessage) || hasDelta && o.sawSnapshot {
-			return fmt.Errorf("mixed upstream message snapshots and deltas are unsupported")
-		}
-		if hasMessage {
-			o.sawSnapshot = true
-		}
-		m, _ := ch["delta"].(map[string]any)
+		delta, hasDelta := ch["delta"].(map[string]any)
+		m := delta
 		if m == nil {
 			m, _ = ch["message"].(map[string]any)
-		}
-		if m != nil {
-			o.sawMessage = true
 		}
 		if err := checkMessage(m); err != nil {
 			return err
 		}
-		if v := m["content"]; v != nil {
-			s, ok := v.(string)
-			if !ok {
-				return fmt.Errorf("only upstream text is supported")
-			}
-			if s != "" {
-				if o.sawTools {
-					return fmt.Errorf("text after tool deltas cannot preserve output order in this bridge")
-				}
-				if len(o.blocks) == 0 {
-					o.blocks = append(o.blocks, blockRef{kind: textBlock})
-				}
-				if text != nil {
-					if err := text(len(o.blocks)-1, s); err != nil {
-						return err
-					}
-				}
-			}
+		s := messageText(m)
+		if s == "" {
+			continue
 		}
-		if a, ok := m["tool_calls"].([]any); ok && len(a) > 0 {
-			o.sawTools = true
+		if len(o.blocks) == 0 {
+			o.blocks = append(o.blocks, blockRef{kind: textBlock})
+		}
+		if text == nil {
+			continue
+		}
+		// A full message snapshot may carry the whole text at once. Stream it
+		// only when no text has been streamed yet; otherwise the deltas already
+		// delivered it (the final formatted text still comes from the aggregated
+		// message, so a snapshot is never lost downstream).
+		if !hasDelta {
+			if o.streamed {
+				continue
+			}
+			o.streamed = true
+		}
+		if err := text(len(o.blocks)-1, s); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -130,7 +117,11 @@ func (o *outputState) complete(raw map[string]any) (*Completion, error) {
 		return nil, err
 	}
 	calls, _ := m["tool_calls"].([]any)
-	if len(o.blocks) == 0 && len(calls) == 0 {
+	// The final message decides the plan, not the frames that happened to carry
+	// text: a refusal fallback (or any snapshot text) may be visible here without
+	// ever having arrived as a content delta. Without a text block the plan and
+	// the formatted message disagree and the turn would fail in validatePlan.
+	if len(o.blocks) == 0 && (len(calls) == 0 || visibleText(m) != "") {
 		o.blocks = append(o.blocks, blockRef{kind: textBlock})
 	}
 	for i := range calls {

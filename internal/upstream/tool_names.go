@@ -11,10 +11,15 @@ import (
 //
 // Each non-empty chunk can extend a prefix, repeat that entire prefix, or be a
 // cumulative prefix. Keep every viable interpretation; only a unique *complete*
-// declared name may be emitted. Unrelated replacements are never accepted.
+// declared name may be emitted. A chunk that does not resolve against a
+// declaration falls back to literal accumulation (raw) instead of failing, so an
+// upstream that calls a tool the request did not declare still produces a usable
+// name; membership enforcement, when wanted, lives in the consumer.
 type toolNameState struct {
 	declared map[string]bool
 	prefixes map[string]bool
+	raw      string
+	literal  bool
 }
 
 const maxToolNameCandidates = 128
@@ -33,6 +38,21 @@ func (s *toolNameState) add(v any) error {
 	}
 	if len(chunk) > maxToolNameCandidateBytes {
 		return fmt.Errorf("tool name exceeds bounded name state limit")
+	}
+	// Best-effort literal accumulation: single-shot, cumulative and repeated
+	// full-name dialects all collapse into one name. This is the value used
+	// when no declaration resolves the chunks.
+	switch {
+	case s.raw == "", chunk == s.raw, strings.HasPrefix(chunk, s.raw):
+		s.raw = chunk
+	default:
+		if len(s.raw)+len(chunk) > maxToolNameCandidateBytes {
+			return fmt.Errorf("tool name exceeds bounded name state limit")
+		}
+		s.raw += chunk
+	}
+	if s.literal {
+		return nil
 	}
 	next := map[string]bool{}
 	bytes := 0
@@ -74,26 +94,35 @@ func (s *toolNameState) add(v any) error {
 		}
 	}
 	if len(next) == 0 {
-		return fmt.Errorf("upstream tool name does not match declared tools")
+		// No declaration matched: keep the literal accumulation and stop
+		// resolving rather than rejecting an undeclared name.
+		s.literal = true
+		s.prefixes = nil
+		return nil
 	}
 	s.prefixes = next
 	return nil
 }
 
 func (s *toolNameState) name() (string, error) {
-	name := ""
-	for prefix := range s.prefixes {
-		if s.declared[prefix] {
-			if name != "" && name != prefix {
-				return "", fmt.Errorf("ambiguous upstream tool name")
+	if !s.literal {
+		name := ""
+		for prefix := range s.prefixes {
+			if s.declared[prefix] {
+				if name != "" && name != prefix {
+					return "", fmt.Errorf("ambiguous upstream tool name")
+				}
+				name = prefix
 			}
-			name = prefix
+		}
+		if name != "" {
+			return name, nil
 		}
 	}
-	if name == "" {
+	if s.raw == "" {
 		return "", fmt.Errorf("incomplete or undeclared upstream tool name")
 	}
-	return name, nil
+	return s.raw, nil
 }
 
 // WithDeclaredToolNames enables name-dialect resolution for ConsumeCompletion.
@@ -105,4 +134,12 @@ func WithDeclaredToolNames(names []string) StreamOption {
 		declared[name] = true
 	}
 	return func(o *streamOptions) { o.declaredToolNames = declared }
+}
+
+// WithToolNameDialects enables name-dialect dedup (repeated/cumulative name
+// chunks) without declaration membership: undeclared names pass through with
+// their literal accumulation. Translating consumers use it when the request
+// authorizes no tool set. Native Chat never sets it.
+func WithToolNameDialects() StreamOption {
+	return func(o *streamOptions) { o.dialectToolNames = true }
 }

@@ -48,7 +48,10 @@ func TestToolNameResolutionRoutingAndNoReplay(t *testing.T) {
 					h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "a", AccessToken: "a", ExpiresAt: 9999999999}, &auth.Auth{UID: "b", AccessToken: "b", ExpiresAt: 9999999999}), Upstream: up, RequestLog: logs})
 					rec := httptest.NewRecorder()
 					h.ServeHTTP(rec, req)
-					success := len(names) == 1
+					// With no declared tools the observed name now passes through
+					// (dialect-deduplicated) instead of failing the tool-less turn;
+					// ambiguity across two declarations still fails.
+					success := len(names) <= 1
 					if calls != 1 {
 						t.Fatal("replayed", calls)
 					}

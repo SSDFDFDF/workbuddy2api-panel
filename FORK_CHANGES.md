@@ -164,7 +164,8 @@ git log --oneline <已同步基线>..upstream/main     # 列出待判定提交�
 （两者都不上行，真正的 beta 语义字段仍按上述规则逐字段处理）。
 
 协议 P0 优化：`protocol.Completion` 将原始记账数据与有序块引用分开，流式/非流式共用
-`collect` 与块格式化；不新增跨块正文/参数复制。保留工具后文本、混合快照的严格拒绝，
+`collect` 与块格式化；不新增跨块正文/参数复制。工具后文本并入同一文本块、快照与增量可
+混用（快照覆盖先前增量且不重复投递）：目标协议无法复放原始交错顺序，但不丢内容。
 暂不宣称支持有序块历史回放。Responses 在明确 length/content_filter 时允许身份完整的
 未完成工具作为诊断数据；只在最终 incomplete envelope 携带，不发工具生命周期事件。
 参数前缀验证不修复 JSON，错误语法/重复键/过深嵌套仍拒绝；无 finish 的 EOF 仍失败。
@@ -188,6 +189,18 @@ content:[]。空数组保持原形，不作为 null、缺失结果或虚构文�
 新协议在最终交付工具前校验 none/required/指定函数/禁止并行；违规上游结果不交付工具，
 不中途改请求也不重放生成。明确 length/content_filter 允许缺失尚未产生的必需调用，
 但不能绕过禁止调用或选择函数限制；原生 Chat 不加这些跨协议检查。
+
+响应侧容错（不改变请求侧拒绝语义）：上游 message 的旧版单调用 `function_call` 折入
+`tool_calls`（合成 call id；`finish_reason:function_call`、以及旧版调用旁的 `stop` 归为
+`tool_calls`），不再 502；未知 message 字段、非空 `annotations`/`refusal`、logprobs、
+文本分段数组与混合快照/增量均不再拒绝——能映射的映射（`refusal` 无正文时作正文、
+`annotations` 进 Responses `output_text`、文本分段拼接），不能映射的忽略。
+最终聚合才出现的文本（快照补正文、refusal 兜底）会补建文本块，流式收尾时从未以 delta
+发出的正文在关闭块内补发，不再因块计划不一致 502 或静默丢文本。
+工具名白名单只在请求声明了工具集或带工具历史时强制（“历史不授权工具”边界不变，
+`TestHistoricalIdentitiesDoNotGrantTools` 继续拒绝退役身份）；未声明任何工具的请求
+放行上游工具调用，并在未声明场景下仍做名称增量/累积/重复去重。请求体未知字段、
+`strict:true`、`text.format` 非 text 等仍 400——丢失它们会改变请求、对话或能力语义。
 
 本阶段参考 CLIProxyAPI、llm-rosetta、cc-switch，独立实现而非直接移植源码：
 

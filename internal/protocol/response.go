@@ -62,15 +62,16 @@ func streamError(err error, hint func(string) string) (int, map[string]any) {
 	return 502, map[string]any{"error": map[string]any{"type": "upstream_error", "code": "upstream_protocol_error", "message": err.Error()}}
 }
 
-// Unsupported response information is an upstream protocol error, not a reason
-// to emit a plausible but lossy successful result.
+// checkMessage validates the structural facts the bridge needs to build
+// text/tool output. Foreign fields (legacy function_call, annotations, refusal,
+// metadata) do not fail the turn: the bridge represents what it can and ignores
+// what the destination protocols cannot carry.
 func checkMessage(m map[string]any) error {
 	for k, v := range m {
 		if v == nil {
 			continue
 		}
 		switch k {
-		case "content": // Checked as text by the order guard and final builder.
 		case "role":
 			if v != "assistant" {
 				return fmt.Errorf("unexpected upstream message role")
@@ -79,24 +80,49 @@ func checkMessage(m map[string]any) error {
 			if _, ok := v.([]any); !ok {
 				return fmt.Errorf("invalid upstream tool_calls array")
 			}
-		case "annotations":
-			if a, ok := v.([]any); !ok || len(a) > 0 {
-				return fmt.Errorf("upstream annotations are unsupported")
+		case "function_call":
+			if _, ok := v.(map[string]any); !ok {
+				return fmt.Errorf("invalid upstream function_call")
 			}
-		case "reasoning", "reasoning_content":
-			// Upstream reasoning text is not representable in Responses or
-			// Messages (the Chat upstream has no signed or encrypted state), so it
-			// is ignored instead of failing the whole turn. Visible text and tool
-			// calls still pass the checks below.
-		case "refusal":
-			if v != "" {
-				return fmt.Errorf("upstream %s cannot be represented by this text/tool bridge", k)
-			}
-		default:
-			return fmt.Errorf("upstream message field %s cannot be represented by this text/tool bridge", k)
 		}
 	}
 	return nil
+}
+
+// messageText extracts visible text from an upstream message without failing on
+// the content shapes the Chat wire may use (plain string or text-part array).
+func messageText(m map[string]any) string {
+	switch v := m["content"].(type) {
+	case string:
+		return v
+	case []any:
+		var b strings.Builder
+		for _, part := range v {
+			switch p := part.(type) {
+			case string:
+				b.WriteString(p)
+			case map[string]any:
+				if s, ok := p["text"].(string); ok {
+					b.WriteString(s)
+				}
+			}
+		}
+		return b.String()
+	default:
+		return ""
+	}
+}
+
+// visibleText is the text the bridge delivers for a message: flattened content
+// text, or the refusal text when there is no visible content.
+func visibleText(m map[string]any) string {
+	if text := messageText(m); strings.TrimSpace(text) != "" {
+		return text
+	}
+	if refusal, ok := m["refusal"].(string); ok {
+		return refusal
+	}
+	return ""
 }
 
 func responseParts(resp map[string]any) (map[string]any, string, error) {
@@ -108,9 +134,7 @@ func responseParts(resp map[string]any) (map[string]any, string, error) {
 	if !ok {
 		return nil, "", fmt.Errorf("invalid upstream choice")
 	}
-	if v := ch["logprobs"]; v != nil {
-		return nil, "", fmt.Errorf("upstream logprobs are unsupported")
-	}
+	// Upstream logprobs have no place in this bridge; they are ignored.
 	m, ok := ch["message"].(map[string]any)
 	if !ok {
 		return nil, "", fmt.Errorf("missing upstream message")
@@ -121,10 +145,39 @@ func responseParts(resp map[string]any) (map[string]any, string, error) {
 	finish, _ := ch["finish_reason"].(string)
 	switch finish {
 	case "stop", "length", "tool_calls", "content_filter":
+	case "function_call":
+		finish = "tool_calls"
 	default:
-		return nil, "", fmt.Errorf("unsupported upstream finish_reason %q", finish)
+		// Missing or unknown terminal labels do not change what the message
+		// contains; report a normal stop instead of failing the turn.
+		finish = "stop"
+	}
+	// Pre-tool_calls single call: fold it into the modern array so the bridge
+	// can deliver it. A legacy call is a tool signal even when the upstream
+	// labelled the turn stop.
+	if fc, ok := m["function_call"].(map[string]any); ok && len(messageToolCalls(m)) == 0 {
+		name, _ := fc["name"].(string)
+		args, _ := fc["arguments"].(string)
+		if strings.TrimSpace(name) != "" || strings.TrimSpace(args) != "" {
+			call := map[string]any{"type": "function", "function": map[string]any{"name": name, "arguments": args}}
+			if id, _ := fc["id"].(string); id != "" {
+				call["id"] = id
+			}
+			copy := make(map[string]any, len(m)+1)
+			for k, v := range m {
+				copy[k] = v
+			}
+			copy["tool_calls"] = []any{call}
+			m = copy
+			finish = "tool_calls"
+		}
 	}
 	return m, finish, nil
+}
+
+func messageToolCalls(m map[string]any) []any {
+	calls, _ := m["tool_calls"].([]any)
+	return calls
 }
 
 // responseBuilder is request-scoped; stream and JSON share final object creation.
@@ -264,7 +317,7 @@ func (b *responseBuilder) format(resp map[string]any) (map[string]any, error) {
 		return nil, err
 	}
 	s := &outputState{}
-	if text, _ := m["content"].(string); text != "" {
+	if visibleText(m) != "" {
 		s.blocks = append(s.blocks, blockRef{kind: textBlock})
 	}
 	c, err := s.complete(resp)
@@ -284,14 +337,7 @@ func (b *responseBuilder) formatCompletion(completion *Completion) (map[string]a
 	if err != nil {
 		return nil, err
 	}
-	text := ""
-	if v := m["content"]; v != nil {
-		var ok bool
-		text, ok = v.(string)
-		if !ok {
-			return nil, fmt.Errorf("only upstream text content is supported")
-		}
-	}
+	text := visibleText(m)
 	calls, _ := m["tool_calls"].([]any)
 	incomplete := finish == "length" || finish == "content_filter"
 	if len(calls) > 0 && finish != "tool_calls" && !(b.req.Kind == Responses && incomplete) {
@@ -311,16 +357,21 @@ func (b *responseBuilder) formatCompletion(completion *Completion) (map[string]a
 	if incomplete {
 		status = "incomplete"
 	}
+	annotations := []any{}
+	if a, ok := m["annotations"].([]any); ok && len(a) > 0 {
+		annotations = a
+	}
 	ids := map[string]bool{}
 	declared := map[string]bool{}
 	for _, name := range declaredToolNames(b.req) {
 		declared[name] = true
 	}
+	strict := b.req.strictToolNames()
 	for _, block := range completion.blocks {
 		if block.kind == textBlock {
 			if b.req.Kind == Responses {
 				output = append(output, map[string]any{"id": b.messageID, "type": "message", "role": "assistant", "status": status,
-					"content": []any{map[string]any{"type": "output_text", "text": text, "annotations": []any{}, "logprobs": []any{}}}})
+					"content": []any{map[string]any{"type": "output_text", "text": text, "annotations": annotations, "logprobs": []any{}}}})
 			} else {
 				output = append(output, map[string]any{"type": "text", "text": text})
 			}
@@ -344,22 +395,39 @@ func (b *responseBuilder) formatCompletion(completion *Completion) (map[string]a
 		name, _ := fn["name"].(string)
 		args, hasArgs := fn["arguments"].(string)
 		if !hasArgs {
-			return nil, fmt.Errorf("missing upstream tool arguments")
+			if incomplete {
+				return nil, fmt.Errorf("missing upstream tool arguments")
+			}
+			// A completed no-argument call may omit the field entirely.
+			args = "{}"
+		} else if !incomplete && strings.TrimSpace(args) == "" {
+			args = "{}"
 		}
 		if v := call["type"]; v != nil && v != "function" {
 			return nil, fmt.Errorf("unsupported upstream tool type")
 		}
-		if strings.TrimSpace(id) == "" || strings.TrimSpace(name) == "" || ids[id] {
-			return nil, fmt.Errorf("missing or duplicate upstream tool identity")
+		if strings.TrimSpace(name) == "" {
+			return nil, fmt.Errorf("missing upstream tool name")
 		}
-		if !declared[name] {
+		if strings.TrimSpace(id) == "" {
+			if incomplete {
+				return nil, fmt.Errorf("missing upstream tool identity")
+			}
+			// Call ids are opaque to the client; a completed call with no
+			// upstream identity gets a fresh one instead of failing.
+			id = newID("call_")
+		}
+		if ids[id] {
+			return nil, fmt.Errorf("duplicate upstream tool identity")
+		}
+		if strict && !declared[name] {
 			return nil, fmt.Errorf("upstream tool name does not match declared tools")
 		}
 		ids[id] = true
 		var input map[string]any
 		if incomplete {
 			err = objectPrefix(args)
-		} else {
+		} else if b.req.Kind == Anthropic {
 			input, err = jsondoc.Object([]byte(args))
 		}
 		if err != nil {

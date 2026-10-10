@@ -101,25 +101,33 @@ func (r *eventReader) next() (sseEvent, error) {
 }
 
 type completionState struct {
-	top               map[string]any
-	choices           map[int]*choiceState
-	expected          int
-	aggregate         bool
-	bytes             int
-	emptyToolIdentity bool
-	declaredToolNames map[string]bool
+	top                 map[string]any
+	choices             map[int]*choiceState
+	expected            int
+	aggregate           bool
+	bytes               int
+	emptyToolIdentity   bool
+	declaredToolNames   map[string]bool
+	dialectToolNames    bool
+	legacyFunctionCalls bool
 }
 type choiceState struct {
-	fields            map[string]any
-	message           map[string]any
-	tools             map[int]map[string]any
-	finish            string
-	emptyToolIdentity bool
-	declaredToolNames map[string]bool
-	toolNames         map[int]*toolNameState
-	messageStrings    map[string]*strings.Builder
-	toolStrings       map[int]map[string]*strings.Builder
+	fields              map[string]any
+	message             map[string]any
+	tools               map[int]map[string]any
+	finish              string
+	emptyToolIdentity   bool
+	declaredToolNames   map[string]bool
+	dialectToolNames    bool
+	legacyFunctionCalls bool
+	toolNames           map[int]*toolNameState
+	messageStrings      map[string]*strings.Builder
+	toolStrings         map[int]map[string]*strings.Builder
 }
+
+// legacyToolIndex separates the pre-tool_calls single call from modern call
+// indices (validated to stay below 128) so both can never merge into one entry.
+const legacyToolIndex = 1000
 
 func newCompletion(n int, aggregate bool) *completionState {
 	if n <= 0 {
@@ -179,6 +187,30 @@ func appendString(dst map[string]any, buffers map[string]*strings.Builder, k str
 	dst[k] = b.String()
 	return nil
 }
+
+// contentText flattens the text shapes a Chat message may use (plain string or
+// text-part array) for translating consumers.
+func contentText(v any) (string, bool) {
+	switch x := v.(type) {
+	case string:
+		return x, true
+	case []any:
+		var b strings.Builder
+		for _, part := range x {
+			switch p := part.(type) {
+			case string:
+				b.WriteString(p)
+			case map[string]any:
+				if s, ok := p["text"].(string); ok {
+					b.WriteString(s)
+				}
+			}
+		}
+		return b.String(), true
+	default:
+		return "", false
+	}
+}
 func mergeList(dst map[string]any, k string, v any) error {
 	if v == nil {
 		return nil
@@ -194,6 +226,40 @@ func mergeList(dst map[string]any, k string, v any) error {
 func (c *choiceState) mergeMessage(m map[string]any, snapshot, strict bool) error {
 	if snapshot { // Full messages are snapshots, never a second copy of deltas.
 		for k, v := range m {
+			if c.legacyFunctionCalls {
+				// Translating consumers need the text/tool subset only: fold the
+				// legacy call, keep fields this bridge can represent, ignore the
+				// rest, and let a snapshot supersede earlier deltas instead of
+				// failing on a benign re-send.
+				switch k {
+				case "function_call":
+					// A snapshot supersedes earlier deltas: reset the folded call so
+					// its name/arguments are not appended to what already arrived.
+					delete(c.tools, legacyToolIndex)
+					delete(c.toolStrings, legacyToolIndex)
+					if err := c.mergeLegacyFunctionCall(v); err != nil {
+						return err
+					}
+					continue
+				case "content":
+					// Translating consumers deliver text only: flatten text-part
+					// arrays so a later delta seeds from the snapshot text instead of
+					// losing it.
+					if s, ok := contentText(v); ok {
+						c.message[k] = s
+					} else {
+						delete(c.message, k)
+					}
+					delete(c.messageStrings, k)
+					continue
+				case "reasoning", "reasoning_content", "refusal", "annotations", "tool_calls":
+					c.message[k] = v
+					delete(c.messageStrings, k)
+					continue
+				default:
+					continue
+				}
+			}
 			if old, ok := c.message[k]; ok && old != nil && old != "" && !reflect.DeepEqual(old, v) {
 				return fmt.Errorf("conflicting message snapshot field %s", k)
 			}
@@ -202,19 +268,50 @@ func (c *choiceState) mergeMessage(m map[string]any, snapshot, strict bool) erro
 			// delta from that exact snapshot, not a stale buffer.
 			delete(c.messageStrings, k)
 		}
+		if c.legacyFunctionCalls && c.modernCalls() {
+			// A snapshot that carries modern calls supersedes any folded legacy
+			// call; the same call must never be delivered twice.
+			delete(c.tools, legacyToolIndex)
+			delete(c.toolStrings, legacyToolIndex)
+		}
 		return nil
 	}
 	for _, k := range []string{"content", "reasoning", "reasoning_content", "refusal"} {
-		if v, ok := m[k]; ok {
-			if err := appendString(c.message, c.messageStrings, k, v); err != nil {
-				return err
+		v, ok := m[k]
+		if !ok {
+			continue
+		}
+		if c.legacyFunctionCalls {
+			// Translating consumers deliver text only: a text-part array is
+			// flattened, and a value with no text meaning is ignored instead of
+			// failing the turn.
+			if k == "content" {
+				if s, ok := contentText(v); ok {
+					if err := appendString(c.message, c.messageStrings, k, s); err != nil {
+						return err
+					}
+				}
+				continue
 			}
+			if s, ok := v.(string); ok {
+				if err := appendString(c.message, c.messageStrings, k, s); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		if err := appendString(c.message, c.messageStrings, k, v); err != nil {
+			return err
 		}
 	}
 	if v, ok := m["annotations"]; ok {
-		if err := mergeList(c.message, "annotations", v); err != nil {
-			return err
+		if a, isArray := v.([]any); isArray || !c.legacyFunctionCalls {
+			if err := mergeList(c.message, "annotations", a); err != nil {
+				return err
+			}
 		}
+		// Translating consumers ignore a malformed annotations value instead of
+		// failing the turn; the destination protocols would discard it anyway.
 	}
 	if raw, ok := m["tool_calls"]; ok && raw != nil {
 		calls, ok := raw.([]any)
@@ -248,12 +345,19 @@ func (c *choiceState) mergeMessage(m map[string]any, snapshot, strict bool) erro
 				}
 			}
 			if idx < 0 {
-				if len(c.tools) != 1 {
+				// The legacy pseudo-index is not a modern call: count only real
+				// call slots so one indexed-less delta still resolves uniquely.
+				modern, n := -1, 0
+				for i := range c.tools {
+					if i == legacyToolIndex {
+						continue
+					}
+					modern, n = i, n+1
+				}
+				if n != 1 {
 					return fmt.Errorf("ambiguous tool delta without index or id")
 				}
-				for i := range c.tools {
-					idx = i
-				}
+				idx = modern
 			}
 			t := c.tools[idx]
 			if t == nil {
@@ -293,7 +397,7 @@ func (c *choiceState) mergeMessage(m map[string]any, snapshot, strict bool) erro
 				// Native adapter follows incremental name semantics, including delayed names.
 				for _, k := range []string{"name", "arguments"} {
 					if v, ok := fn[k]; ok {
-						if k == "name" && c.declaredToolNames != nil {
+						if k == "name" && (c.declaredToolNames != nil || c.dialectToolNames) {
 							if c.toolNames[idx] == nil {
 								c.toolNames[idx] = &toolNameState{declared: c.declaredToolNames}
 							}
@@ -311,7 +415,94 @@ func (c *choiceState) mergeMessage(m map[string]any, snapshot, strict bool) erro
 			}
 		}
 	}
-	return mergeStable(c.message, m, map[string]bool{"content": true, "reasoning": true, "reasoning_content": true, "refusal": true, "annotations": true, "tool_calls": true}, strict)
+	if raw, ok := m["function_call"]; ok && raw != nil && c.legacyFunctionCalls {
+		// Skip a legacy echo when the same frame (or an earlier one) already
+		// delivered modern tool calls.
+		if !c.modernCalls() {
+			if err := c.mergeLegacyFunctionCall(raw); err != nil {
+				return err
+			}
+		}
+	}
+	ignore := map[string]bool{"content": true, "reasoning": true, "reasoning_content": true, "refusal": true, "annotations": true, "tool_calls": true}
+	if c.legacyFunctionCalls {
+		// Foreign message fields have no representation in the destination
+		// protocols; ignoring them keeps a chatty upstream from failing the
+		// turn on a conflict the client would never see.
+		for k := range m {
+			ignore[k] = true
+		}
+	}
+	return mergeStable(c.message, m, ignore, strict)
+}
+
+// modernCalls reports whether the choice already carries modern tool calls,
+// either as deltas (tools map) or from a message snapshot.
+func (c *choiceState) modernCalls() bool {
+	if calls, ok := c.message["tool_calls"].([]any); ok && len(calls) > 0 {
+		return true
+	}
+	for i := range c.tools {
+		if i != legacyToolIndex {
+			return true
+		}
+	}
+	return false
+}
+
+// mergeLegacyFunctionCall folds the pre-tool_calls `function_call` field into
+// the tool array (at a dedicated index) so translated responses can deliver it
+// as a regular function call. Name chunks follow the common single-shot /
+// cumulative / repeated dialects; arguments append. An all-empty placeholder is
+// ignored rather than turned into an unusable call.
+func (c *choiceState) mergeLegacyFunctionCall(raw any) error {
+	fn, ok := raw.(map[string]any)
+	if !ok {
+		return fmt.Errorf("invalid function_call")
+	}
+	name, _ := fn["name"].(string)
+	args, _ := fn["arguments"].(string)
+	if name == "" && args == "" {
+		return nil
+	}
+	if fn["name"] != nil {
+		if _, ok := fn["name"].(string); !ok {
+			return fmt.Errorf("invalid function_call name")
+		}
+	}
+	if fn["arguments"] != nil {
+		if _, ok := fn["arguments"].(string); !ok {
+			return fmt.Errorf("invalid function_call arguments")
+		}
+	}
+	t := c.tools[legacyToolIndex]
+	if t == nil {
+		t = map[string]any{"id": "call_legacy", "type": "function"}
+		c.tools[legacyToolIndex] = t
+	}
+	to, _ := t["function"].(map[string]any)
+	if to == nil {
+		to = map[string]any{}
+		t["function"] = to
+	}
+	if c.toolStrings[legacyToolIndex] == nil {
+		c.toolStrings[legacyToolIndex] = map[string]*strings.Builder{}
+	}
+	if name != "" {
+		cur, _ := to["name"].(string)
+		switch {
+		case cur == "" || name == cur || strings.HasPrefix(name, cur):
+			to["name"] = name
+		default:
+			to["name"] = cur + name
+		}
+	}
+	if fn["arguments"] != nil {
+		if err := appendString(to, c.toolStrings[legacyToolIndex], "arguments", fn["arguments"]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 func (s *completionState) add(obj map[string]any) error {
 	for _, k := range []string{"id", "model"} {
@@ -353,7 +544,7 @@ func (s *completionState) add(obj map[string]any) error {
 		c := s.choices[i]
 		if c == nil {
 			c = &choiceState{fields: map[string]any{"index": i}, message: map[string]any{}, tools: map[int]map[string]any{}, emptyToolIdentity: s.emptyToolIdentity,
-				declaredToolNames: s.declaredToolNames, toolNames: map[int]*toolNameState{},
+				declaredToolNames: s.declaredToolNames, dialectToolNames: s.dialectToolNames, legacyFunctionCalls: s.legacyFunctionCalls, toolNames: map[int]*toolNameState{},
 				messageStrings: map[string]*strings.Builder{}, toolStrings: map[int]map[string]*strings.Builder{}}
 			s.choices[i] = c
 		}
@@ -378,7 +569,7 @@ func (s *completionState) add(obj map[string]any) error {
 				return err
 			}
 		}
-		if raw, has := ch["logprobs"]; has && raw != nil {
+		if raw, has := ch["logprobs"]; has && raw != nil && !s.legacyFunctionCalls {
 			m, ok := raw.(map[string]any)
 			if !ok {
 				return fmt.Errorf("invalid logprobs")
@@ -413,7 +604,12 @@ func (s *completionState) add(obj map[string]any) error {
 			if err := c.validateTools(); err != nil {
 				return err
 			}
-		} else if c.declaredToolNames != nil && (c.finish == "length" || c.finish == "content_filter") {
+		} else if c.legacyFunctionCalls && c.finish == "function_call" && len(c.tools) > 0 {
+			// The legacy terminal label maps onto the modern tool validation.
+			if err := c.validateTools(); err != nil {
+				return err
+			}
+		} else if len(c.toolNames) > 0 && (c.finish == "length" || c.finish == "content_filter") {
 			// Resolve only observed complete names for translating consumers.
 			// The protocol layer decides whether partial arguments can be represented.
 			if err := c.resolveToolNames(); err != nil {
@@ -434,6 +630,11 @@ func (c *choiceState) resolveToolNames() error {
 	return nil
 }
 func (c *choiceState) validateTools() error {
+	if c.legacyFunctionCalls && c.modernCalls() {
+		// The modern call is authoritative; validate it without the legacy echo.
+		delete(c.tools, legacyToolIndex)
+		delete(c.toolStrings, legacyToolIndex)
+	}
 	if err := c.resolveToolNames(); err != nil {
 		return err
 	}
@@ -503,6 +704,12 @@ func (s *completionState) response() map[string]any {
 		if _, ok := c.message["content"]; !ok {
 			c.message["content"] = nil
 		}
+		if c.legacyFunctionCalls && c.modernCalls() {
+			// Modern calls are authoritative; a legacy echo must not be delivered
+			// as a second call or clobber a snapshot's call array.
+			delete(c.tools, legacyToolIndex)
+			delete(c.toolStrings, legacyToolIndex)
+		}
 		if len(c.tools) > 0 {
 			idxs := []int{}
 			for j := range c.tools {
@@ -516,7 +723,13 @@ func (s *completionState) response() map[string]any {
 			c.message["tool_calls"] = a
 		}
 		c.fields["message"] = c.message
-		c.fields["finish_reason"] = c.finish
+		finish := c.finish
+		if c.legacyFunctionCalls && finish == "stop" && c.tools[legacyToolIndex] != nil {
+			// A folded legacy call is a tool turn even when the upstream labelled
+			// the terminal frame stop.
+			finish = "tool_calls"
+		}
+		c.fields["finish_reason"] = finish
 		chs = append(chs, c.fields)
 	}
 	out["choices"] = chs
@@ -571,14 +784,16 @@ func ErrorStatus(k ErrKind) int {
 
 type StreamOption func(*streamOptions)
 type streamOptions struct {
-	onErrorFrame      func(string)
-	onFrame           func(map[string]any)
-	expected          int
-	firstEvent        time.Duration
-	firstGeneration   time.Duration
-	tail              time.Duration
-	emptyToolIdentity bool
-	declaredToolNames map[string]bool
+	onErrorFrame        func(string)
+	onFrame             func(map[string]any)
+	expected            int
+	firstEvent          time.Duration
+	firstGeneration     time.Duration
+	tail                time.Duration
+	emptyToolIdentity   bool
+	declaredToolNames   map[string]bool
+	dialectToolNames    bool
+	legacyFunctionCalls bool
 }
 
 func WithErrorFrameObserver(fn func(string)) StreamOption {
@@ -594,6 +809,13 @@ func WithExpectedChoices(n int) StreamOption { return func(o *streamOptions) { o
 // values or ambiguous deltas remain errors. Native Chat stays unchanged.
 func WithEmptyToolIdentityDeltas() StreamOption {
 	return func(o *streamOptions) { o.emptyToolIdentity = true }
+}
+
+// WithLegacyFunctionCalls opts a translating consumer into folding the legacy
+// single-call `function_call` message field into the modern tool array. Native
+// Chat never sets this option, so its raw field pass-through stays unchanged.
+func WithLegacyFunctionCalls() StreamOption {
+	return func(o *streamOptions) { o.legacyFunctionCalls = true }
 }
 
 // watchResponse closes a blocked upstream reader when semantic deadlines expire.
@@ -817,6 +1039,8 @@ func ConsumeCompletion(r io.Reader, emit func(map[string]any) error, opts ...Str
 	s := newCompletion(o.expected, true)
 	s.emptyToolIdentity = o.emptyToolIdentity
 	s.declaredToolNames = o.declaredToolNames
+	s.legacyFunctionCalls = o.legacyFunctionCalls
+	s.dialectToolNames = o.dialectToolNames
 	err := consume(r, s, func(_ sseEvent, obj map[string]any) error {
 		if emit == nil {
 			return nil
@@ -835,6 +1059,8 @@ func Aggregate(r io.Reader, opts ...StreamOption) (map[string]any, error) {
 		f(&o)
 	}
 	s := newCompletion(o.expected, true)
+	s.legacyFunctionCalls = o.legacyFunctionCalls
+	s.dialectToolNames = o.dialectToolNames
 	if err := consume(r, s, nil, o); err != nil {
 		return nil, err
 	}
@@ -877,6 +1103,10 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		return nil
 	}
 	s := newCompletion(o.expected, false)
+	s.emptyToolIdentity = o.emptyToolIdentity
+	s.declaredToolNames = o.declaredToolNames
+	s.legacyFunctionCalls = o.legacyFunctionCalls
+	s.dialectToolNames = o.dialectToolNames
 	err := consume(r, s, write, o)
 	var we *DownstreamWriteError
 	if errors.As(err, &we) {

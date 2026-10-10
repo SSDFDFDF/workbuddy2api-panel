@@ -157,33 +157,47 @@ func FuzzResponsePipeline(f *testing.F) {
 	})
 }
 
-func TestUnrepresentableResponseFields(t *testing.T) {
+func TestForeignResponseFieldsAreTolerated(t *testing.T) {
+	// Unknown message fields and non-text extras no longer fail the turn: they
+	// are ignored (or mapped) while the visible text still reaches the client.
 	for _, field := range []string{
 		`"audio":{"data":"abc"}`, `"citations":["source"]`,
-		`"custom_extension":{"x":1}`, `"role":"user"`,
-		`"annotations":{"text":"not-an-array"}`,
+		`"custom_extension":{"x":1}`, `"annotations":[{"type":"url_citation"}]`,
+		`"annotations":{"text":"not-an-array"}`, `"refusal":"cannot help"`,
 	} {
-		raw := `data: {"choices":[{"index":0,"delta":{"content":"hi",` + field + `},"finish_reason":"stop"}]}` + "\n\n"
-		if _, err := Aggregate(strings.NewReader(raw), testRequest(t, Responses)); err == nil {
-			t.Fatalf("silently lost response data: %s", field)
-		}
+		raw := `data: {"choices":[{"index":0,"delta":{"content":"hi",` + field + `},"finish_reason":"stop"}]}` + "\n\n" +
+			`data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}` + "\n\ndata: [DONE]\n\n"
 		for _, kind := range []Kind{Responses, Anthropic} {
-			if err := Stream(httptest.NewRecorder(), strings.NewReader(raw), testRequest(t, kind), nil); err == nil {
-				t.Fatalf("silently streamed unsupported data: %s", field)
+			if _, err := Aggregate(strings.NewReader(raw), testRequest(t, kind)); err != nil {
+				t.Fatalf("aggregate rejected %s: %v", field, err)
+			}
+			if err := Stream(httptest.NewRecorder(), strings.NewReader(raw), testRequest(t, kind), nil); err != nil {
+				t.Fatalf("stream rejected %s: %v", field, err)
 			}
 		}
 	}
+	// The role is the one message field the bridge still asserts.
+	raw := `data: {"choices":[{"index":0,"delta":{"content":"hi","role":"user"},"finish_reason":"stop"}]}` + "\n\n" +
+		`data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}` + "\n\ndata: [DONE]\n\n"
+	if _, err := Aggregate(strings.NewReader(raw), testRequest(t, Responses)); err == nil {
+		t.Fatal("foreign role accepted")
+	}
+	// Snapshot and delta frames may mix; content is not duplicated in the
+	// stream and the snapshot supersedes the deltas for the final result.
 	for _, raw := range []string{
 		`data: {"choices":[{"index":0,"delta":{"content":"hi"}}]}` + "\n\n" +
-			`data: {"choices":[{"index":0,"message":{"content":"hi"},"finish_reason":"stop"}]}` + "\n\n",
-		`data: {"choices":[{"index":0,"delta":{"content":"hi"},"message":{"content":"hi"},"finish_reason":"stop"}]}` + "\n\n",
+			`data: {"choices":[{"index":0,"message":{"content":"hi"},"finish_reason":"stop"}]}` + "\n\n" +
+			`data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}` + "\n\ndata: [DONE]\n\n",
+		`data: {"choices":[{"index":0,"delta":{"content":"hi"},"message":{"content":"hi"},"finish_reason":"stop"}]}` + "\n\n" +
+			`data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}` + "\n\ndata: [DONE]\n\n",
 	} {
-		if _, err := Aggregate(strings.NewReader(raw), testRequest(t, Responses)); err == nil {
-			t.Fatal("mixed snapshot and delta accepted")
-		}
 		for _, kind := range []Kind{Responses, Anthropic} {
-			if err := Stream(httptest.NewRecorder(), strings.NewReader(raw), testRequest(t, kind), nil); err == nil {
-				t.Fatal("snapshot repeated as text delta")
+			rec := httptest.NewRecorder()
+			if err := Stream(rec, strings.NewReader(raw), testRequest(t, kind), nil); err != nil {
+				t.Fatal("mixed snapshot and delta rejected", err)
+			}
+			if body := rec.Body.String(); !strings.Contains(body, `"hi"`) || strings.Contains(body, "hihi") {
+				t.Fatal("mixed snapshot and delta mishandled", body)
 			}
 		}
 	}
@@ -211,8 +225,26 @@ func TestInvalidToolsAreNotDroppedOrInvented(t *testing.T) {
 		}
 	}
 	legacy := `{"object":"chat.completion","choices":[{"index":0,"message":{"content":"","function_call":{"name":"x","arguments":"{}"}},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
-	if _, err := Aggregate(strings.NewReader(legacy), testRequest(t, Responses)); err == nil {
-		t.Fatal("legacy tool silently lost")
+	// A legacy single call is converted instead of being silently dropped. With
+	// no declared tools it is delivered; when the request declares tools the
+	// declared-tool boundary still applies.
+	open := mustDecode(t, Responses, `{"model":"x","store":false,"input":"hi"}`)
+	converted, err := Aggregate(strings.NewReader(legacy), open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := converted.Format(open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := out["output"].([]any)[0].(map[string]any)
+	if item["type"] != "function_call" || item["name"] != "x" || item["arguments"] != "{}" {
+		t.Fatal(item)
+	}
+	if c, err := Aggregate(strings.NewReader(legacy), testRequest(t, Responses)); err == nil {
+		if _, err := c.Format(testRequest(t, Responses)); err == nil {
+			t.Fatal("undeclared legacy tool delivered")
+		}
 	}
 	// Keep JSON fixtures syntactically checked even when a validation path rejects early.
 	var v any
